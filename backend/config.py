@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     flickr_api_secret: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    # Pinterest app keys — register at developers.pinterest.com (free Trial mode is fine
+    # for posting to your own account; production review only needed if other users will
+    # connect via this app).
+    pinterest_app_id: str = ""
+    pinterest_app_secret: str = ""
 
     upload_max_mb: int = 200
     session_timeout_minutes: int = 1440

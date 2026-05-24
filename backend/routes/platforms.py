@@ -16,7 +16,7 @@ from config import settings
 from database import get_session
 from models import PlatformCredential, Post, User
 from routes.auth import current_user
-from services.platforms import bluesky, flickr, pixelfed
+from services.platforms import bluesky, flickr, pinterest, pixelfed
 
 log = logging.getLogger("framepost.platforms")
 router = APIRouter()
@@ -325,6 +325,147 @@ def _pixelfed_redirect_back(reason: str) -> RedirectResponse:
         url=f"/settings/platforms?error={quote(reason)}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
+
+
+# -----------------------------------------------------------------------------
+# Pinterest — API v5 OAuth 2.0
+# -----------------------------------------------------------------------------
+
+PINTEREST_OAUTH_COOKIE = "framepost_pinterest_oauth"
+_PINTEREST_OAUTH_SALT = "framepost.oauth.pinterest.v1"
+
+
+def _pinterest_signer() -> URLSafeTimedSerializer:
+    if not settings.secret_key:
+        raise RuntimeError("SECRET_KEY is not set.")
+    return URLSafeTimedSerializer(settings.secret_key, salt=_PINTEREST_OAUTH_SALT)
+
+
+def _pinterest_redirect_back(reason: str) -> RedirectResponse:
+    from urllib.parse import quote
+    return RedirectResponse(
+        url=f"/settings/platforms?error={quote(reason)}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.get("/pinterest/status")
+def pinterest_status(
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+) -> dict[str, Any]:
+    return pinterest.current_status(db)
+
+
+@router.get("/pinterest/connect")
+def pinterest_connect(
+    request: Request,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Redirect the browser to Pinterest's authorize endpoint. Top-level GET because the
+    browser navigates here (same pattern as Pixelfed/Flickr)."""
+    callback = _absolute_url(request, "/api/platforms/pinterest/callback")
+    try:
+        authorize_url, state = pinterest.begin_connect(db, redirect_uri=callback)
+    except pinterest.PinterestError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST if e.permanent else status.HTTP_502_BAD_GATEWAY,
+            str(e),
+        )
+
+    state_cookie = _pinterest_signer().dumps({"state": state})
+    response = RedirectResponse(url=authorize_url, status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        PINTEREST_OAUTH_COOKIE,
+        state_cookie,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=OAUTH_COOKIE_TTL,
+        path="/api/platforms/pinterest",
+    )
+    return response
+
+
+@router.get("/pinterest/callback")
+def pinterest_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_session),
+):
+    """Pinterest redirects here after user approval. Validate state, exchange code, persist."""
+    if error:
+        return _pinterest_redirect_back(f"Pinterest authorization denied: {error}")
+    if not code or not state:
+        return _pinterest_redirect_back("Missing authorization code or state.")
+
+    cookie = request.cookies.get(PINTEREST_OAUTH_COOKIE)
+    if not cookie:
+        return _pinterest_redirect_back("Missing OAuth state cookie.")
+    try:
+        cookie_state = _pinterest_signer().loads(cookie, max_age=OAUTH_COOKIE_TTL)
+    except (BadSignature, SignatureExpired):
+        return _pinterest_redirect_back("OAuth state expired or invalid.")
+    if cookie_state.get("state") != state:
+        return _pinterest_redirect_back("OAuth state mismatch.")
+
+    try:
+        pinterest.complete_connect(db, code=code, state=state)
+    except pinterest.PinterestError as e:
+        return _pinterest_redirect_back(f"Pinterest exchange failed: {e}")
+    except Exception as e:
+        log.exception("pinterest callback failed")
+        return _pinterest_redirect_back(f"Pinterest exchange failed: {e}")
+
+    response = RedirectResponse(
+        url="/settings/platforms?connected=pinterest", status_code=status.HTTP_303_SEE_OTHER
+    )
+    response.delete_cookie(PINTEREST_OAUTH_COOKIE, path="/api/platforms/pinterest")
+    return response
+
+
+@router.post("/pinterest/disconnect")
+def pinterest_disconnect(
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    return {"ok": True, "removed": pinterest.disconnect(db)}
+
+
+@router.get("/pinterest/boards")
+def pinterest_boards(
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """List the user's Pinterest boards. Used by the default-board picker in Settings."""
+    try:
+        return {"boards": pinterest.list_boards(db)}
+    except pinterest.PinterestError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST if e.permanent else status.HTTP_502_BAD_GATEWAY,
+            str(e),
+        )
+
+
+class PinterestDefaultBoardBody(BaseModel):
+    board_id: str = Field(min_length=1, max_length=200)
+    board_name: str = Field(min_length=0, max_length=300)
+
+
+@router.put("/pinterest/default-board")
+def pinterest_set_default_board(
+    body: PinterestDefaultBoardBody,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    try:
+        pinterest.set_default_board(db, board_id=body.board_id, board_name=body.board_name)
+    except pinterest.PinterestError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    return {"ok": True}
 
 
 # -----------------------------------------------------------------------------

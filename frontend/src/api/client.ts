@@ -528,6 +528,45 @@ export const pixelfedConnectUrl = (instance: string) =>
 export const disconnectPixelfed = () =>
   apiFetch<{ ok: true; removed: boolean }>("/api/platforms/pixelfed/disconnect", { method: "POST" });
 
+// ---- Pinterest ----
+export type PinterestStatus = {
+  connected: boolean;
+  pending?: boolean;
+  account: string | null;
+  profile_url?: string | null;
+  default_board_id?: string | null;
+  default_board_name?: string | null;
+  connected_at?: string | null;
+  last_success_at?: string | null;
+  last_error?: string | null;
+  default_target?: boolean;
+  token_expires?: string | null;
+};
+
+export type PinterestBoard = {
+  id: string;
+  name: string;
+  privacy?: string | null;
+  pin_count?: number | null;
+};
+
+export const fetchPinterestStatus = () =>
+  apiFetch<PinterestStatus>("/api/platforms/pinterest/status");
+
+export const pinterestConnectUrl = () => `/api/platforms/pinterest/connect`;
+
+export const disconnectPinterest = () =>
+  apiFetch<{ ok: true; removed: boolean }>("/api/platforms/pinterest/disconnect", { method: "POST" });
+
+export const fetchPinterestBoards = () =>
+  apiFetch<{ boards: PinterestBoard[] }>("/api/platforms/pinterest/boards");
+
+export const setPinterestDefaultBoard = (board_id: string, board_name: string) =>
+  apiFetch<{ ok: true }>(
+    "/api/platforms/pinterest/default-board",
+    { method: "PUT", body: JSON.stringify({ board_id, board_name }) },
+  );
+
 // ---- shared default-target toggle ----
 export const setPlatformDefaultTarget = (platform: string, default_target: boolean) =>
   apiFetch<{ ok: true; default_target: boolean }>(

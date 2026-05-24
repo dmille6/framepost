@@ -5,17 +5,23 @@ import { useSearchParams } from "react-router-dom";
 import {
   ApiError,
   type BlueskyStatus,
+  type PinterestStatus,
   type PixelfedStatus,
   connectBluesky,
   disconnectBluesky,
+  disconnectPinterest,
   disconnectPixelfed,
   fetchAppConfig,
   fetchBlueskyStatus,
   fetchFlickrStatus,
+  fetchPinterestBoards,
+  fetchPinterestStatus,
   fetchPixelfedStatus,
   flickrConnectUrl,
   patchAppConfig,
+  pinterestConnectUrl,
   pixelfedConnectUrl,
+  setPinterestDefaultBoard,
   setPlatformDefaultTarget,
   testBluesky,
 } from "../api/client";
@@ -31,6 +37,11 @@ export default function SettingsPlatforms() {
     const connected = params.get("connected");
     if (connected === "pixelfed") {
       setBanner({ kind: "ok", text: "Pixelfed connected." });
+      params.delete("connected");
+      setParams(params, { replace: true });
+    }
+    if (connected === "pinterest") {
+      setBanner({ kind: "ok", text: "Pinterest connected. Pick a default board below to start pinning." });
       params.delete("connected");
       setParams(params, { replace: true });
     }
@@ -62,6 +73,7 @@ export default function SettingsPlatforms() {
       <FlickrPanel />
       <BlueskyPanel />
       <PixelfedPanel />
+      <PinterestPanel />
       <RedditPanel />
     </div>
   );
@@ -565,6 +577,204 @@ function PixelfedSubtitle({ status }: { status: PixelfedStatus }) {
         </>
       )}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pinterest — API v5 OAuth 2.0, requires app keys in .env first.
+// ---------------------------------------------------------------------------
+function PinterestPanel() {
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery({
+    queryKey: ["pinterest-status"],
+    queryFn: fetchPinterestStatus,
+  });
+
+  const disconnect = useMutation({
+    mutationFn: () => disconnectPinterest(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pinterest-status"] }),
+  });
+
+  const toggleDefault = useMutation({
+    mutationFn: (next: boolean) => setPlatformDefaultTarget("pinterest", next),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pinterest-status"] }),
+  });
+
+  if (isLoading) return <div className="fp-card"><SkeletonRows count={3} /></div>;
+  const connected = data?.connected ?? false;
+  const pending = data?.pending ?? false;
+
+  return (
+    <div className="fp-card">
+      <CardHeader
+        title="Pinterest"
+        subtitle={connected
+          ? <PinterestSubtitle status={data!} />
+          : pending
+            ? "OAuth in progress — finish the authorization on Pinterest to complete the connection."
+            : "Pins drive perpetual referral traffic — each pin links back to the photo on Flickr. Requires PINTEREST_APP_ID + PINTEREST_APP_SECRET in .env (register at developers.pinterest.com)."}
+      />
+
+      {!connected ? (
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <a
+            href={pinterestConnectUrl()}
+            className="fp-btn"
+            style={{ textDecoration: "none" }}
+          >
+            Connect Pinterest
+          </a>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          <PinterestBoardPicker
+            currentBoardId={data?.default_board_id ?? null}
+            currentBoardName={data?.default_board_name ?? null}
+            onSaved={() => qc.invalidateQueries({ queryKey: ["pinterest-status"] })}
+          />
+          <DefaultTargetToggle
+            value={data?.default_target ?? true}
+            onToggle={(v) => toggleDefault.mutate(v)}
+            label="Auto-post new scheduled photos to Pinterest"
+          />
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            {data?.profile_url && (
+              <a
+                href={data.profile_url}
+                target="_blank"
+                rel="noreferrer"
+                className="fp-btn-ghost"
+                style={{ padding: "7px 12px", fontSize: 13 }}
+              >
+                View profile ↗
+              </a>
+            )}
+            <button
+              className="fp-btn-danger"
+              onClick={() => {
+                if (confirm("Disconnect Pinterest?")) disconnect.mutate();
+              }}
+              disabled={disconnect.isPending}
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PinterestSubtitle({ status }: { status: PinterestStatus }) {
+  return (
+    <span>
+      Connected as <strong>@{status.account}</strong>
+      {status.default_board_name && <> · pinning to <strong>{status.default_board_name}</strong></>}
+      {status.last_success_at && (
+        <>
+          {" · "}
+          <span title={absoluteTime(status.last_success_at)}>
+            last success {relativeTime(status.last_success_at)}
+          </span>
+        </>
+      )}
+    </span>
+  );
+}
+
+function PinterestBoardPicker({
+  currentBoardId,
+  currentBoardName,
+  onSaved,
+}: {
+  currentBoardId: string | null;
+  currentBoardName: string | null;
+  onSaved: () => void;
+}) {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["pinterest-boards"],
+    queryFn: fetchPinterestBoards,
+  });
+  const [picked, setPicked] = useState<string>(currentBoardId ?? "");
+  useEffect(() => {
+    setPicked(currentBoardId ?? "");
+  }, [currentBoardId]);
+
+  const save = useMutation({
+    mutationFn: () => {
+      const board = data?.boards.find((b) => b.id === picked);
+      return setPinterestDefaultBoard(picked, board?.name ?? "");
+    },
+    onSuccess: () => onSaved(),
+  });
+
+  const boards = data?.boards ?? [];
+  const dirty = picked !== (currentBoardId ?? "");
+
+  return (
+    <Field
+      label="Default board"
+      hint={
+        currentBoardName
+          ? `All pins go to this board. Per-post board picking is v2.`
+          : "All pins from FramePost will be created on the board you pick here."
+      }
+    >
+      {isLoading ? (
+        <SkeletonRows count={1} height={32} />
+      ) : error ? (
+        <div style={{ fontSize: 12, color: "var(--danger)" }}>
+          Couldn't load boards: {(error as Error).message}{" "}
+          <button
+            className="fp-btn-ghost"
+            onClick={() => refetch()}
+            style={{ padding: "3px 8px", fontSize: 11 }}
+          >
+            Retry
+          </button>
+        </div>
+      ) : boards.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          No boards found on your Pinterest account. Create one at{" "}
+          <a href="https://www.pinterest.com/" target="_blank" rel="noreferrer">
+            pinterest.com
+          </a>{" "}
+          first, then click Retry.{" "}
+          <button
+            className="fp-btn-ghost"
+            onClick={() => refetch()}
+            style={{ padding: "3px 8px", fontSize: 11 }}
+          >
+            Retry
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select
+            className="fp-input"
+            value={picked}
+            onChange={(e) => setPicked(e.target.value)}
+            style={{ flex: 1 }}
+          >
+            <option value="" disabled>— pick a board —</option>
+            {boards.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+                {b.privacy && b.privacy !== "PUBLIC" ? ` (${b.privacy.toLowerCase()})` : ""}
+                {typeof b.pin_count === "number" ? ` · ${b.pin_count} pins` : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            className="fp-btn"
+            disabled={!dirty || !picked || save.isPending}
+            onClick={() => save.mutate()}
+          >
+            {save.isPending ? "Saving…" : "Save"}
+          </button>
+        </div>
+      )}
+    </Field>
   );
 }
 

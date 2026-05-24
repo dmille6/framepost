@@ -72,6 +72,11 @@ of the original brief — well past the initial Flickr-only scope, with
 multi-platform automation, AI tagging, Reels generation, and the activity
 feed all live.
 
+## Privacy
+
+See [PRIVACY.md](PRIVACY.md). FramePost is self-hosted; the maintainer does
+not operate any servers and does not receive any user data.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

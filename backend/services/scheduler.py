@@ -20,7 +20,7 @@ from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
 from services import backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, image, retry, storage, tags, trending, watcher
-from services.platforms import bluesky, flickr, pixelfed
+from services.platforms import bluesky, flickr, pinterest, pixelfed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("framepost.worker")
@@ -441,6 +441,20 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
     elif cred.platform == "pixelfed":
         result = pixelfed.post_photo(db=db, src=src, text=text, alt_text=alt)
         remote_id, remote_url = result["remote_id"], result["url"]
+    elif cred.platform == "pinterest":
+        # Pinterest has structured title/description/link rather than a blob, so we don't
+        # use _build_caption_for's output — we pass the fields directly. Link defaults to the
+        # photo's Flickr URL (drives the killer perpetual referral traffic) when present.
+        result = pinterest.post_pin(
+            db=db,
+            src=src,
+            title=post.title,
+            description=post.description,
+            tags=post.tags,
+            link=post.flickr_url,
+            alt_text=alt,
+        )
+        remote_id, remote_url = result["remote_id"], result["url"]
     else:
         raise RuntimeError(f"unsupported platform: {cred.platform}")
 
@@ -501,7 +515,7 @@ def fanout_to_platforms(
     if targets is None:
         creds = db.execute(
             select(PlatformCredential).where(
-                PlatformCredential.platform.in_(("bluesky", "pixelfed")),
+                PlatformCredential.platform.in_(("bluesky", "pixelfed", "pinterest")),
                 PlatformCredential.default_target == 1,
             )
         ).scalars().all()
