@@ -206,7 +206,7 @@ export default function ReelTab({ postId, post }: Props) {
     <div style={{ display: "grid", gap: 16 }}>
       <CardHeader
         title="Reel"
-        subtitle="Build a silent 9:16 MP4 from up to 10 stills. Drag the output into instagram.com — add music in the IG editor after upload."
+        subtitle="Build a silent 9:16 MP4 from up to 10 stills. Works for Instagram Reels and TikTok — same file, upload to either. Add music in the platform's app after upload."
       />
 
       <PastReelsForThisPhoto postId={postId} />
@@ -325,7 +325,10 @@ export default function ReelTab({ postId, post }: Props) {
         >
           <div style={{ fontSize: 13, fontWeight: 500 }}>Reel ready</div>
           <div style={{ fontSize: 11 }}>
-            Download the MP4 and drag it into instagram.com to upload as a Reel.
+            Download the MP4 and upload to <strong>Instagram Reels</strong> (drag into
+            instagram.com) or <strong>TikTok</strong> (via the mobile app). Same file
+            works for both. Hashtag conventions differ — IG likes a long block, TikTok
+            prefers 3-5 trending ones.
           </div>
           <a className="fp-btn" href={reelDownloadUrl(reel.id)} download>
             Download MP4
