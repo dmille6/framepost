@@ -25,6 +25,11 @@ IPTCInfo3==2.1.4
 # Watch folder
 watchdog==6.0.0
 
+# Face detection for default Reel crop position (Haar cascades — no model download needed,
+# bundled XML files ship with the wheel). Headless variant avoids GUI/Qt deps.
+opencv-python-headless==4.10.0.84
+numpy==2.2.0
+
 # Crypto + auth
 cryptography==44.0.0
 passlib[argon2]==1.7.4

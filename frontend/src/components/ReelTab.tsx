@@ -11,9 +11,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ApiError,
   createReel,
+  deleteReel,
   fetchInstagramFormat,
   getReel,
   listHistory,
+  listReels,
   reelDownloadUrl,
   thumbnailUrl,
   type HistoryPost,
@@ -33,6 +35,7 @@ const ASPECT = 9 / 16;
 type Selected = {
   post: HistoryPost;
   crop: ReelCrop | null;
+  cropEnd?: ReelCrop | null;
 };
 
 function defaultCropForAspect(width: number, height: number): ReelCrop {
@@ -156,10 +159,10 @@ export default function ReelTab({ postId, post }: Props) {
     });
   }
 
-  function saveCrop(idx: number, crop: ReelCrop) {
+  function saveCrop(idx: number, crop: ReelCrop, cropEnd: ReelCrop | null) {
     setSelected((prev) => {
       const next = [...prev];
-      next[idx] = { ...next[idx], crop };
+      next[idx] = { ...next[idx], crop, cropEnd };
       return next;
     });
     setCropTarget(null);
@@ -171,7 +174,7 @@ export default function ReelTab({ postId, post }: Props) {
         post_id: s.post.id,
         position: i,
         crop_start: s.crop!,
-        crop_end: null,
+        crop_end: s.cropEnd ?? null,
       }));
       return createReel({
         cover_post_id: coverPostId,
@@ -205,6 +208,8 @@ export default function ReelTab({ postId, post }: Props) {
         title="Reel"
         subtitle="Build a silent 9:16 MP4 from up to 10 stills. Drag the output into instagram.com — add music in the IG editor after upload."
       />
+
+      <PastReelsForThisPhoto postId={postId} />
 
       {/* Selected photo sequence */}
       <div>
@@ -364,10 +369,111 @@ export default function ReelTab({ postId, post }: Props) {
           postWidth={selected[cropTarget].post.width ?? 1080}
           postHeight={selected[cropTarget].post.height ?? 1920}
           initialCrop={selected[cropTarget].crop}
-          onSave={(crop) => saveCrop(cropTarget, crop)}
+          initialCropEnd={selected[cropTarget].cropEnd ?? null}
+          onSave={(crop, cropEnd) => saveCrop(cropTarget, crop, cropEnd)}
           onCancel={() => setCropTarget(null)}
         />
       )}
+    </div>
+  );
+}
+
+function PastReelsForThisPhoto({ postId }: { postId: string }) {
+  const qc = useQueryClient();
+  const { data: reels = [], isLoading } = useQuery({
+    queryKey: ["reels"],
+    queryFn: listReels,
+    staleTime: 30_000,
+  });
+
+  // Filter client-side — GET /api/reels returns all of them, but list size is bounded
+  // (typically <100 Reels per active user) so no need for a server-side filter param yet.
+  const mine = reels.filter((r) => r.cover_post_id === postId);
+
+  const del = useMutation({
+    mutationFn: (reelId: string) => deleteReel(reelId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["reels"] }),
+  });
+
+  if (isLoading || mine.length === 0) return null;
+
+  return (
+    <div
+      style={{
+        background: "var(--bg)",
+        border: "0.5px solid var(--border)",
+        borderRadius: 8,
+        padding: 10,
+        display: "grid",
+        gap: 6,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text-dim)" }}>
+        Past Reels for this photo · {mine.length}
+      </div>
+      {mine.map((r) => {
+        const created = new Date(r.created_at);
+        const isReady = r.status === "ready" && r.mp4_available;
+        const isFailed = r.status === "failed";
+        const isExpired = r.status === "ready" && !r.mp4_available;
+        return (
+          <div
+            key={r.id}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr auto",
+              alignItems: "center",
+              gap: 10,
+              padding: "6px 4px",
+              fontSize: 12,
+            }}
+          >
+            <div style={{ display: "grid", gap: 2 }}>
+              <div>
+                {created.toLocaleString()} ·{" "}
+                <span style={{ color: "var(--text-dim)" }}>
+                  {r.photos.length} photo{r.photos.length === 1 ? "" : "s"} ·{" "}
+                  {Math.round(r.total_duration_seconds)}s
+                </span>
+              </div>
+              {isFailed && (
+                <div style={{ color: "var(--danger)", fontSize: 11 }}>
+                  Failed: {r.error_message || "unknown error"}
+                </div>
+              )}
+              {isExpired && (
+                <div style={{ color: "var(--text-fade)", fontSize: 11 }}>
+                  MP4 expired (30-day retention) — regenerate to download.
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {isReady && (
+                <a
+                  href={reelDownloadUrl(r.id)}
+                  download
+                  className="fp-btn-ghost"
+                  style={{ padding: "4px 10px", fontSize: 11, textDecoration: "none" }}
+                >
+                  Download MP4
+                </a>
+              )}
+              <button
+                className="fp-btn-ghost"
+                onClick={() => {
+                  if (confirm(`Delete this Reel from ${created.toLocaleDateString()}?`)) {
+                    del.mutate(r.id);
+                  }
+                }}
+                disabled={del.isPending}
+                style={{ padding: "4px 10px", fontSize: 11, color: "var(--danger)" }}
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -452,7 +558,9 @@ function SequenceRow({
           <span>#{index + 1}</span>
           <span>
             {selected.crop
-              ? `Cropped ${selected.crop.width}×${selected.crop.height}`
+              ? selected.cropEnd
+                ? `Director pan — ${selected.crop.width}×${selected.crop.height} → ${selected.cropEnd.width}×${selected.cropEnd.height}`
+                : `Cropped ${selected.crop.width}×${selected.crop.height}`
               : "Not yet cropped"}
           </span>
         </div>

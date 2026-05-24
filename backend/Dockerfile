@@ -27,7 +27,7 @@ COPY --chown=app:app requirements.txt ./
 RUN pip install -r requirements.txt
 
 # Configurable build cache buster — bumped to force a fresh dep install when adding packages.
-ENV FRAMEPOST_DEP_REV=3
+ENV FRAMEPOST_DEP_REV=4
 
 COPY --chown=app:app . ./
 

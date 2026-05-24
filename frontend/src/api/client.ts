@@ -224,6 +224,15 @@ export type InstagramFormat = {
   sizes: string[];
 };
 
+export type FaceCenter = {
+  x: number | null;
+  y: number | null;
+  detected: boolean;
+};
+
+export const fetchFaceCenter = (postId: string) =>
+  apiFetch<FaceCenter>(`/api/posts/${postId}/face-center`);
+
 export const fetchInstagramFormat = (
   postId: string,
   opts: { extraPerformerPostIds?: string[] } = {},

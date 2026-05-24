@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
-from services import events, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
+from services import events, faces, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -343,6 +343,53 @@ def get_preview(
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+class FaceCenter(BaseModel):
+    """Normalized 0..1 face-center coordinates in the post's original image space."""
+    x: float | None
+    y: float | None
+    detected: bool
+
+
+@router.get("/{post_id}/face-center", response_model=FaceCenter)
+def get_face_center(
+    post_id: str,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Run face detection on the post's source image and return the normalized center of
+    the largest detected face. Used by the Reel CropModal to seed a sensible initial
+    crop position. Returns detected=false when no face is found — frontend falls back
+    to image center.
+
+    Uses the preview (1600-px) if available — fast enough that the user doesn't see a
+    spinner on the modal open, and accurate enough for "pick a starting position."
+    """
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+
+    # Prefer the preview (smaller, fast Haar pass) and only fall back to original if
+    # the preview hasn't been generated yet.
+    src: Path | None = None
+    preview = storage.preview_path(post_id)
+    if preview.exists():
+        src = preview
+    elif post.original_path and Path(post.original_path).exists():
+        src = Path(post.original_path)
+    if src is None:
+        return FaceCenter(x=None, y=None, detected=False)
+
+    try:
+        result = faces.detect_face_center(src)
+    except Exception:
+        log.exception("face detect failed for %s", post_id)
+        return FaceCenter(x=None, y=None, detected=False)
+
+    if result is None:
+        return FaceCenter(x=None, y=None, detected=False)
+    return FaceCenter(x=result[0], y=result[1], detected=True)
 
 
 class InstagramFormat(BaseModel):

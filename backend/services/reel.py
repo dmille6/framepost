@@ -34,6 +34,10 @@ FPS = 30
 # math simple and the file irrelevant after concat.
 ZOOM_UPSCALE = 4
 ZOOM_AMOUNT = 0.05  # 1.0 -> 1.05 over the segment
+# Crossfade duration between adjacent segments. 0.4s reads as a soft cut that doesn't
+# slow the pace, while masking the boundary cleanly. Total output is slightly shorter
+# than the sum of segment durations: total = sum(durations) - (N-1) * CROSSFADE_S.
+CROSSFADE_S = 0.4
 
 
 @dataclass
@@ -95,7 +99,8 @@ def generate(
             seg_paths.append(seg_path)
 
         try:
-            _concat(seg_paths, output_path, tmpdir)
+            durations = [s.duration_s for s in segments]
+            _concat(seg_paths, durations, output_path, tmpdir)
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or b"").decode("utf-8", errors="replace")[-2000:]
             raise ReelGenerationError(f"concat failed: {stderr}") from e
@@ -176,20 +181,52 @@ def _render_director(seg: PhotoSegment, segment_path: Path, work: Path) -> None:
     subprocess.run(cmd, check=True, capture_output=True)
 
 
-def _concat(segments: list[Path], output_path: Path, tmpdir: Path) -> None:
-    """Hard-cut concat. All segments share encoding params so demuxer concat is exact.
+def _concat(segments: list[Path], durations: list[float], output_path: Path, tmpdir: Path) -> None:
+    """Concat segments. Single segment → fast copy. Multi-segment → xfade crossfades.
 
-    Crossfade transitions are a v2 polish item — would require re-encoding via the xfade
-    filter graph and a per-segment offset computation. Hard cuts are perfectly fine for a
-    "here is the night" recap and ship today.
+    xfade math: with N segments of durations d_0..d_{N-1} and crossfade duration X, the
+    i-th crossfade (between the running chain and segments[i+1]) has its offset at
+    sum(d_0..d_i) - (i+1)*X — i.e. it begins X seconds before the chain ends. The output
+    total length is sum(durations) - (N-1)*X.
     """
-    list_file = tmpdir / "concat.txt"
-    list_file.write_text("".join(f"file '{p}'\n" for p in segments))
+    if len(segments) == 1:
+        # Nothing to fade against — fast-path copy.
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(segments[0]),
+            "-c", "copy",
+            str(output_path),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return
+
+    # Build the xfade filter chain.
+    inputs: list[str] = []
+    for p in segments:
+        inputs.extend(["-i", str(p)])
+
+    chain: list[str] = []
+    prev_label = "[0:v]"
+    for i in range(len(segments) - 1):
+        cumulative = sum(durations[: i + 1])
+        offset = cumulative - (i + 1) * CROSSFADE_S
+        # Guard against negative offsets (only happens if a segment is shorter than the
+        # crossfade itself — unlikely with 10-90s reels, but be safe).
+        offset = max(0.01, offset)
+        out_label = f"[v{i:02d}]"
+        chain.append(
+            f"{prev_label}[{i + 1}:v]xfade=transition=fade:"
+            f"duration={CROSSFADE_S}:offset={offset:.3f}{out_label}"
+        )
+        prev_label = out_label
+
     cmd = [
         "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", str(list_file),
-        "-c", "copy",
+        *inputs,
+        "-filter_complex", "; ".join(chain),
+        "-map", prev_label,
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+        "-an",
         str(output_path),
     ]
     subprocess.run(cmd, check=True, capture_output=True)

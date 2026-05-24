@@ -853,6 +853,13 @@ def daily_cleanup() -> None:
             db.rollback()
 
         try:
+            n = cleanup.purge_expired_reels(db)
+            log.info("daily cleanup: purged %d reel mp4(s)", n)
+        except Exception:
+            log.exception("reel purge failed")
+            db.rollback()
+
+        try:
             backup.wal_checkpoint()
         except Exception:
             log.exception("WAL checkpoint failed")
