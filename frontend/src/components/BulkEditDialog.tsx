@@ -3,17 +3,21 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import {
   getPost,
+  getPostPerformers,
   listAlbums,
   listConnectedPlatforms,
   listGroups,
   listProfiles,
   setPostAlbums,
   setPostGroups,
+  setPostPerformers,
   setPostProfiles,
   updatePost,
+  type Performer,
   type PostUpdate,
 } from "../api/client";
 import MultiSelectChips from "./MultiSelectChips";
+import PerformersField from "./PerformersField";
 
 type Props = {
   postIds: string[];
@@ -36,6 +40,8 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   const [groupIds, setGroupIds] = useState<Set<string>>(new Set());
   const [profileIds, setProfileIds] = useState<Set<string>>(new Set());
   const [targetSet, setTargetSet] = useState<Set<string>>(new Set());
+  const [bulkPerformers, setBulkPerformers] = useState<Performer[]>([]);
+  const [performersMode, setPerformersMode] = useState<"append" | "replace">("append");
 
   // Per-section apply toggles. Selects + multi-select sections need explicit opt-in
   // because "empty" is ambiguous (vs text fields where empty == don't change).
@@ -105,6 +111,20 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
           if (applyGroups === "on") await setPostGroups(postId, [...groupIds]);
           if (applyProfiles === "on") await setPostProfiles(postId, [...profileIds]);
 
+          // Performers: append (union by performer.id) or replace.
+          if (bulkPerformers.length > 0) {
+            let finalIds: string[];
+            if (performersMode === "replace") {
+              finalIds = bulkPerformers.map((p) => p.id);
+            } else {
+              const existing = await getPostPerformers(postId);
+              const seen = new Set(existing.map((p) => p.id));
+              const additions = bulkPerformers.filter((p) => !seen.has(p.id));
+              finalIds = [...existing.map((p) => p.id), ...additions.map((p) => p.id)];
+            }
+            await setPostPerformers(postId, finalIds);
+          }
+
           done += 1;
         } catch (e) {
           failed += 1;
@@ -127,6 +147,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
     !!title.trim() ||
     !!description.trim() ||
     !!tags.trim() ||
+    bulkPerformers.length > 0 ||
     applyPrivacy === "on" ||
     applySafety === "on" ||
     applyType === "on" ||
@@ -252,6 +273,33 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
               <ModeChip
                 active={tagsMode === "replace"}
                 onClick={() => setTagsMode("replace")}
+                disabled={busy}
+              >
+                Replace
+              </ModeChip>
+            </div>
+          </Field>
+
+          <Field
+            label="Performers"
+            hint={
+              performersMode === "append"
+                ? "Adds these performers to each draft's existing list (deduplicated)."
+                : "Replaces each draft's performer list with these."
+            }
+          >
+            <PerformersField selected={bulkPerformers} onChange={setBulkPerformers} label="" />
+            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              <ModeChip
+                active={performersMode === "append"}
+                onClick={() => setPerformersMode("append")}
+                disabled={busy}
+              >
+                Append (recommended)
+              </ModeChip>
+              <ModeChip
+                active={performersMode === "replace"}
+                onClick={() => setPerformersMode("replace")}
                 disabled={busy}
               >
                 Replace

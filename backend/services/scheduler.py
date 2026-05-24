@@ -351,8 +351,16 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
 
     # Performer @-mentions + their hashtags. Mentions get priority on tight budgets
     # (Bluesky) because they're attribution — losing a tag is annoying but losing a
-    # credited performer is rude.
-    perf_mention, perf_hashtags = performers_svc.for_post(db, post.id)
+    # credited performer is rude. We also dedupe against the description/tags so a
+    # manually-typed @handle or #handle doesn't get echoed by the auto-insert.
+    all_performers = performers_svc.get_post_performers(db, post.id)
+    filtered = performers_svc.dedupe_against_text(
+        all_performers,
+        existing_text=(post.description or "") + " " + (post.title or ""),
+        existing_tags=tag_str,
+    )
+    perf_mention = performers_svc.mention_block(filtered)
+    perf_hashtags = performers_svc.hashtag_tokens(filtered)
 
     if platform == "bluesky":
         # 300-graphemes hard cap. Skip signature (would eat budget). Build:
@@ -479,9 +487,15 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         # Performer handling: Pinterest has no @-mention culture, so we skip the mentions
         # block. But the performer hashtags belong in description — we prepend their
         # tokens to the tags string so pinterest.post_pin's existing hashtag builder
-        # de-dupes them against post.tags naturally.
+        # de-dupes them against post.tags naturally. Dedupe against existing description/tags
+        # so manually-typed performer references aren't doubled.
         _perf_performers = performers_svc.get_post_performers(db, post.id)
-        perf_hashtag_tokens = performers_svc.hashtag_tokens(_perf_performers)
+        _filtered = performers_svc.dedupe_against_text(
+            _perf_performers,
+            existing_text=(post.description or "") + " " + (post.title or ""),
+            existing_tags=post.tags or "",
+        )
+        perf_hashtag_tokens = performers_svc.hashtag_tokens(_filtered)
         merged_tags = " ".join(
             [t.lstrip("#") for t in perf_hashtag_tokens] + ((post.tags or "").split())
         )

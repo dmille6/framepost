@@ -363,6 +363,15 @@ def _read_signature(db: Session) -> str | None:
 @router.get("/{post_id}/instagram", response_model=InstagramFormat)
 def get_instagram_format(
     post_id: str,
+    extra_performer_post_ids: str | None = Query(
+        None,
+        description=(
+            "Comma-separated list of additional post IDs. Performers tagged on any of "
+            "these posts are merged (deduped by performer ID) into the mention/hashtag "
+            "block. Used by the Reels builder so a Reel's caption aggregates performers "
+            "across every photo in the sequence, not just the cover."
+        ),
+    ),
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
 ):
@@ -371,9 +380,29 @@ def get_instagram_format(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
     signature = _read_signature(db)
 
+    # Collect performers from cover post + any extras (deduped by performer.id, preserving
+    # first-seen order so the cover's performers stay at the front).
+    all_perfs = performers_svc.get_post_performers(db, post_id)
+    seen_ids = {p.id for p in all_perfs}
+    if extra_performer_post_ids:
+        for extra_id in (s.strip() for s in extra_performer_post_ids.split(",")):
+            if not extra_id or extra_id == post_id:
+                continue
+            for p in performers_svc.get_post_performers(db, extra_id):
+                if p.id not in seen_ids:
+                    seen_ids.add(p.id)
+                    all_perfs.append(p)
+
     # Performer @-mentions go between description and signature; hashtags merge into the
-    # standard hashtag block (deduplicated against any manual tags the user typed).
-    perf_mention, perf_hashtags = performers_svc.for_post(db, post_id)
+    # standard hashtag block (deduplicated against any manual tags the user typed AND
+    # against any @/# manually written in the description or title).
+    filtered_perfs = performers_svc.dedupe_against_text(
+        all_perfs,
+        existing_text=(post.description or "") + " " + (post.title or ""),
+        existing_tags=post.tags or "",
+    )
+    perf_mention = performers_svc.mention_block(filtered_perfs)
+    perf_hashtags = performers_svc.hashtag_tokens(filtered_perfs)
 
     base_caption = instagram.build_caption(
         title=post.title, description=post.description, signature=signature

@@ -224,8 +224,16 @@ export type InstagramFormat = {
   sizes: string[];
 };
 
-export const fetchInstagramFormat = (postId: string) =>
-  apiFetch<InstagramFormat>(`/api/posts/${postId}/instagram`);
+export const fetchInstagramFormat = (
+  postId: string,
+  opts: { extraPerformerPostIds?: string[] } = {},
+) => {
+  const extras = (opts.extraPerformerPostIds ?? []).filter((id) => id && id !== postId);
+  const qs = extras.length
+    ? `?extra_performer_post_ids=${encodeURIComponent(extras.join(","))}`
+    : "";
+  return apiFetch<InstagramFormat>(`/api/posts/${postId}/instagram${qs}`);
+};
 
 export const instagramImageUrl = (
   postId: string,

@@ -91,9 +91,16 @@ export default function ReelTab({ postId, post }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   // Auto-pull caption from cover photo when cover changes (unless user has edited).
+  // Aggregate performers across every photo in the Reel (not just the cover) so a
+  // multi-performer recap captions everyone, even when the cover photo features only
+  // one of them. The IG-format endpoint dedupes by performer.id internally.
+  const extraPostIds = selected
+    .map((s) => s.post.id)
+    .filter((id) => id !== coverPostId);
   const coverFormat = useQuery({
-    queryKey: ["instagram-format", coverPostId],
-    queryFn: () => fetchInstagramFormat(coverPostId),
+    queryKey: ["instagram-format", coverPostId, extraPostIds.slice().sort().join(",")],
+    queryFn: () =>
+      fetchInstagramFormat(coverPostId, { extraPerformerPostIds: extraPostIds }),
   });
   useEffect(() => {
     if (!captionEdited && coverFormat.data?.caption) {

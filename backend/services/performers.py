@@ -56,3 +56,57 @@ def for_post(db: Session, post_id: str) -> tuple[str, list[str]]:
     """Convenience: load performers for post_id and return (mention_block, hashtag_tokens)."""
     performers = get_post_performers(db, post_id)
     return mention_block(performers), hashtag_tokens(performers)
+
+
+def dedupe_against_text(
+    performers: list[Performer],
+    *,
+    existing_text: str = "",
+    existing_tags: str = "",
+) -> list[Performer]:
+    """Filter out performers whose handle (or display_name fallback token) is already present.
+
+    If the user manually typed '@roxielarouge' in the description, we don't want the
+    auto-mention to add it again. Same for '#roxielarouge' in the tag input. We check both
+    forms — handles AND fallback tokens (CamelCased display names) — case-insensitively.
+    """
+    text_lower = (existing_text or "").lower()
+    tags_lower = (existing_tags or "").lower()
+
+    out: list[Performer] = []
+    for p in performers:
+        candidates: list[str] = []
+        if p.instagram_handle:
+            candidates.append(p.instagram_handle.lower())
+        # Fallback token (CamelCased display name) — lowercased for matching.
+        fallback = "".join(ch for ch in p.display_name if ch.isalnum()).lower()
+        if fallback and fallback not in candidates:
+            candidates.append(fallback)
+
+        # Skip if ANY representation of this performer is already in the text or tags.
+        # We look for @form and #form in description (mentions/hashtags can appear either
+        # place when the user types manually) and bare-token in tags (since tag input is
+        # comma/space-separated, prefixes don't matter — we just check whole-token presence).
+        present = False
+        for cand in candidates:
+            if (
+                f"@{cand}" in text_lower
+                or f"#{cand}" in text_lower
+                or _has_token(tags_lower, cand)
+            ):
+                present = True
+                break
+        if not present:
+            out.append(p)
+    return out
+
+
+def _has_token(tags_lower: str, token: str) -> bool:
+    """Whole-token match within the tags string. Splits on common separators."""
+    if not tags_lower or not token:
+        return False
+    for raw in tags_lower.replace(",", " ").split():
+        cleaned = raw.lstrip("#").lstrip("@")
+        if cleaned == token:
+            return True
+    return False
