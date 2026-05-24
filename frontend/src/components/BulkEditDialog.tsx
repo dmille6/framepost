@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import {
+  fetchRecentCities,
+  fetchRecentShows,
   getPost,
   getPostPerformers,
   listAlbums,
@@ -15,9 +17,11 @@ import {
   updatePost,
   type Performer,
   type PostUpdate,
+  type Venue,
 } from "../api/client";
 import MultiSelectChips from "./MultiSelectChips";
 import PerformersField from "./PerformersField";
+import VenueField from "./VenueField";
 
 type Props = {
   postIds: string[];
@@ -42,6 +46,10 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   const [targetSet, setTargetSet] = useState<Set<string>>(new Set());
   const [bulkPerformers, setBulkPerformers] = useState<Performer[]>([]);
   const [performersMode, setPerformersMode] = useState<"append" | "replace">("append");
+  const [bulkVenue, setBulkVenue] = useState<Venue | null>(null);
+  const [applyVenue, setApplyVenue] = useState<Apply>("off");
+  const [bulkShow, setBulkShow] = useState("");
+  const [bulkCity, setBulkCity] = useState("");
 
   // Per-section apply toggles. Selects + multi-select sections need explicit opt-in
   // because "empty" is ambiguous (vs text fields where empty == don't change).
@@ -59,6 +67,14 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   const { data: connectedPlatforms = [] } = useQuery({
     queryKey: ["connected-platforms"],
     queryFn: listConnectedPlatforms,
+  });
+  const { data: recentShows = [] } = useQuery({
+    queryKey: ["recent-shows"],
+    queryFn: fetchRecentShows,
+  });
+  const { data: recentCities = [] } = useQuery({
+    queryKey: ["recent-cities"],
+    queryFn: fetchRecentCities,
   });
 
   const [progress, setProgress] = useState<{ done: number; failed: number; total: number } | null>(null);
@@ -86,6 +102,11 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
       if (applySafety === "on") baseBody.safety_level = safety;
       if (applyType === "on") baseBody.content_type = contentType;
       if (applyTargets === "on") baseBody.target_platforms = [...targetSet];
+      // Venue uses an apply toggle since "no venue selected" is ambiguous from "don't
+      // change". Show/city use empty == skip (text fields), same as title/description.
+      if (applyVenue === "on") baseBody.venue_id = bulkVenue?.id ?? null;
+      if (bulkShow.trim()) baseBody.show = bulkShow.trim();
+      if (bulkCity.trim()) baseBody.city = bulkCity.trim();
 
       let done = 0;
       let failed = 0;
@@ -148,6 +169,9 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
     !!description.trim() ||
     !!tags.trim() ||
     bulkPerformers.length > 0 ||
+    applyVenue === "on" ||
+    !!bulkShow.trim() ||
+    !!bulkCity.trim() ||
     applyPrivacy === "on" ||
     applySafety === "on" ||
     applyType === "on" ||
@@ -306,6 +330,51 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
               </ModeChip>
             </div>
           </Field>
+
+          {/* Venue + Show + City — structured context. Venue uses apply-toggle because
+              "no venue" is ambiguous; show/city use empty == skip. */}
+          <SectionToggle
+            label="Venue"
+            note="Replaces each draft's venue. Clear by toggling on with no venue picked."
+            applied={applyVenue === "on"}
+            onToggle={(on) => setApplyVenue(on ? "on" : "off")}
+            disabled={busy}
+          >
+            <VenueField selected={bulkVenue} onChange={setBulkVenue} label="" />
+          </SectionToggle>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Show / event" hint="Leave blank to skip. Replaces existing.">
+              <input
+                className="fp-input"
+                value={bulkShow}
+                onChange={(e) => setBulkShow(e.target.value)}
+                placeholder="(don't change)"
+                list="bulk-show-suggestions"
+                disabled={busy}
+              />
+              <datalist id="bulk-show-suggestions">
+                {recentShows.map((s) => (
+                  <option key={s} value={s} />
+                ))}
+              </datalist>
+            </Field>
+            <Field label="City" hint="Leave blank to skip. Replaces existing.">
+              <input
+                className="fp-input"
+                value={bulkCity}
+                onChange={(e) => setBulkCity(e.target.value)}
+                placeholder="(don't change)"
+                list="bulk-city-suggestions"
+                disabled={busy}
+              />
+              <datalist id="bulk-city-suggestions">
+                {recentCities.map((c) => (
+                  <option key={c} value={c} />
+                ))}
+              </datalist>
+            </Field>
+          </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
             <ToggleField

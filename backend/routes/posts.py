@@ -81,6 +81,10 @@ class PostOut(BaseModel):
     posted_to_instagram_at: datetime | None = None
     reddit_posted_at: datetime | None = None
     target_platforms: list[str] | None = None
+    venue_id: str | None = None
+    show: str | None = None
+    city: str | None = None
+    alt_text: str | None = None
     created_at: datetime
 
     class Config:
@@ -123,6 +127,12 @@ class PostUpdate(BaseModel):
     safety_level: str | None = Field(default=None, pattern="^(safe|moderate|restricted)$")
     content_type: str | None = Field(default=None, pattern="^(photo|screenshot|other)$")
     target_platforms: list[str] | None = Field(default=None)
+    # Structured context (0014). venue_id is a FK to venues.id; show/city are free text;
+    # alt_text is the AI-generated accessibility/SEO description.
+    venue_id: str | None = None
+    show: str | None = Field(default=None, max_length=200)
+    city: str | None = Field(default=None, max_length=200)
+    alt_text: str | None = Field(default=None, max_length=2000)
 
 
 @router.post(
@@ -345,6 +355,43 @@ def get_preview(
     )
 
 
+@router.get("/recent-shows", response_model=list[str])
+def recent_shows(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Distinct non-empty show values across all posts, most-recent first. Feeds the
+    type-ahead suggestion datalist in MetadataEditor and BulkEditDialog."""
+    rows = db.execute(
+        select(Post.show, func.max(Post.created_at).label("recent"))
+        .where(Post.show.is_not(None))
+        .where(Post.show != "")
+        .group_by(Post.show)
+        .order_by(func.max(Post.created_at).desc())
+        .limit(limit)
+    ).all()
+    return [r[0] for r in rows]
+
+
+@router.get("/recent-cities", response_model=list[str])
+def recent_cities(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Distinct non-empty city values, most-recent first."""
+    rows = db.execute(
+        select(Post.city, func.max(Post.created_at).label("recent"))
+        .where(Post.city.is_not(None))
+        .where(Post.city != "")
+        .group_by(Post.city)
+        .order_by(func.max(Post.created_at).desc())
+        .limit(limit)
+    ).all()
+    return [r[0] for r in rows]
+
+
 class FaceCenter(BaseModel):
     """Normalized 0..1 face-center coordinates in the post's original image space."""
     x: float | None
@@ -397,6 +444,7 @@ class InstagramFormat(BaseModel):
     hashtags: list[str]
     title: str | None
     description: str | None
+    alt_text: str | None
     signature: str | None
     posted_to_instagram_at: datetime | None
     sizes: list[str]
@@ -427,29 +475,36 @@ def get_instagram_format(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
     signature = _read_signature(db)
 
-    # Collect performers from cover post + any extras (deduped by performer.id, preserving
-    # first-seen order so the cover's performers stay at the front).
-    all_perfs = performers_svc.get_post_performers(db, post_id)
-    seen_ids = {p.id for p in all_perfs}
+    # Unified context for the cover post: performers + venue (mentions) and show/city
+    # (hashtags only). For Reels with extra photos, also union-in performers from those
+    # extra photos so the caption credits everyone in the sequence, not just whoever
+    # was on the cover.
+    ctx = performers_svc.caption_context_for_post(db, post)
+    perf_mention = ctx.mention_block
+    perf_hashtags = list(ctx.hashtag_tokens)
+
     if extra_performer_post_ids:
+        seen_handles = {h.lstrip("@").lower() for h in perf_mention.split() if h}
+        seen_hash_keys = {h.lstrip("#").lower() for h in perf_hashtags}
         for extra_id in (s.strip() for s in extra_performer_post_ids.split(",")):
             if not extra_id or extra_id == post_id:
                 continue
             for p in performers_svc.get_post_performers(db, extra_id):
-                if p.id not in seen_ids:
-                    seen_ids.add(p.id)
-                    all_perfs.append(p)
-
-    # Performer @-mentions go between description and signature; hashtags merge into the
-    # standard hashtag block (deduplicated against any manual tags the user typed AND
-    # against any @/# manually written in the description or title).
-    filtered_perfs = performers_svc.dedupe_against_text(
-        all_perfs,
-        existing_text=(post.description or "") + " " + (post.title or ""),
-        existing_tags=post.tags or "",
-    )
-    perf_mention = performers_svc.mention_block(filtered_perfs)
-    perf_hashtags = performers_svc.hashtag_tokens(filtered_perfs)
+                # Only add if not already present (handle-key or fallback-token-key match).
+                handle_key = p.instagram_handle.lower() if p.instagram_handle else None
+                token_key = (
+                    p.instagram_handle if p.instagram_handle
+                    else "".join(ch for ch in p.display_name if ch.isalnum())
+                ).lower()
+                if handle_key and handle_key not in seen_handles:
+                    perf_mention = (perf_mention + " " if perf_mention else "") + f"@{p.instagram_handle}"
+                    seen_handles.add(handle_key)
+                if token_key and token_key not in seen_hash_keys:
+                    perf_hashtags.append(
+                        f"#{p.instagram_handle}" if p.instagram_handle
+                        else f"#{''.join(ch for ch in p.display_name if ch.isalnum())}"
+                    )
+                    seen_hash_keys.add(token_key)
 
     base_caption = instagram.build_caption(
         title=post.title, description=post.description, signature=signature
@@ -478,6 +533,7 @@ def get_instagram_format(
         hashtags=hashtags,
         title=post.title,
         description=post.description,
+        alt_text=post.alt_text,
         signature=signature,
         posted_to_instagram_at=post.posted_to_instagram_at,
         sizes=list(instagram.SIZES.keys()),

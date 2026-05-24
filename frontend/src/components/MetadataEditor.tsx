@@ -6,6 +6,8 @@ import { useMutation } from "@tanstack/react-query";
 import {
   aiSuggestForPost,
   fetchAIStatus,
+  fetchRecentCities,
+  fetchRecentShows,
   getMergedTags,
   getPostAlbums,
   getPostGroups,
@@ -15,9 +17,11 @@ import {
   listConnectedPlatforms,
   listGroups,
   listProfiles,
+  listVenues,
   thumbnailUrl,
   type Performer,
   type Post,
+  type Venue,
 } from "../api/client";
 import AISuggestPanel from "./AISuggestPanel";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
@@ -26,6 +30,7 @@ import MultiSelectChips from "./MultiSelectChips";
 import PerformersField from "./PerformersField";
 import TagsInput from "./TagsInput";
 import TrendingPanel from "./TrendingPanel";
+import VenueField from "./VenueField";
 
 export type EditorChanges = {
   title: string | null;
@@ -39,6 +44,10 @@ export type EditorChanges = {
   profile_ids: string[];
   performer_ids: string[];
   target_platforms: string[] | null;
+  venue_id: string | null;
+  show: string | null;
+  city: string | null;
+  alt_text: string | null;
 };
 
 type Props = {
@@ -60,6 +69,36 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [privacy, setPrivacy] = useState(post.privacy ?? "private");
   const [safety, setSafety] = useState(post.safety_level ?? "safe");
   const [contentType, setContentType] = useState(post.content_type ?? "photo");
+  const [show, setShow] = useState(post.show ?? "");
+  const [city, setCity] = useState(post.city ?? "");
+  const [altText, setAltText] = useState(post.alt_text ?? "");
+  const [venue, setVenue] = useState<Venue | null>(null);
+
+  // Venue lookup — fetch the full venue list once, then resolve by ID. List is small
+  // (typically <50 venues per user) so client-side resolution is fine.
+  const { data: allVenues = [] } = useQuery({
+    queryKey: ["venues", ""],
+    queryFn: () => listVenues(),
+  });
+  useEffect(() => {
+    if (post.venue_id) {
+      const v = allVenues.find((x) => x.id === post.venue_id);
+      if (v) setVenue(v);
+    } else {
+      setVenue(null);
+    }
+  }, [post.id, post.venue_id, allVenues]);
+
+  const { data: recentShows = [] } = useQuery({
+    queryKey: ["recent-shows"],
+    queryFn: fetchRecentShows,
+    staleTime: 60_000,
+  });
+  const { data: recentCities = [] } = useQuery({
+    queryKey: ["recent-cities"],
+    queryFn: fetchRecentCities,
+    staleTime: 60_000,
+  });
 
   const { data: albums = [] } = useQuery({ queryKey: ["albums"], queryFn: listAlbums });
   const { data: groups = [] } = useQuery({ queryKey: ["groups"], queryFn: listGroups });
@@ -107,6 +146,9 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     setPrivacy(post.privacy ?? "private");
     setSafety(post.safety_level ?? "safe");
     setContentType(post.content_type ?? "photo");
+    setShow(post.show ?? "");
+    setCity(post.city ?? "");
+    setAltText(post.alt_text ?? "");
   }, [post.id]);
 
   useEffect(() => { setAlbumIds(new Set(postAlbums)); }, [post.id, postAlbums.join(",")]);
@@ -142,6 +184,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     privacy !== (post.privacy ?? "private") ||
     safety !== (post.safety_level ?? "safe") ||
     contentType !== (post.content_type ?? "photo") ||
+    (show || "") !== (post.show ?? "") ||
+    (city || "") !== (post.city ?? "") ||
+    (altText || "") !== (post.alt_text ?? "") ||
+    (venue?.id ?? null) !== (post.venue_id ?? null) ||
     !setsEqual(albumIds, new Set(postAlbums)) ||
     !setsEqual(groupIds, new Set(postGroups)) ||
     !setsEqual(profileIds, new Set(postProfiles)) ||
@@ -165,6 +211,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       profile_ids: [...profileIds],
       performer_ids: performers.map((p) => p.id),
       target_platforms: targetsToSave,
+      venue_id: venue?.id ?? null,
+      show: show.trim() || null,
+      city: city.trim() || null,
+      alt_text: altText.trim() || null,
     });
   }
 
@@ -263,6 +313,41 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       >
         <input className="fp-input" value={title} onChange={(e) => setTitle(e.target.value)} />
       </Field>
+
+      {/* Structured context — venue / show / city. Fill these BEFORE generating
+          description/tags/alt-text via AI; the suggester uses them as ground truth. */}
+      <VenueField selected={venue} onChange={setVenue} />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <Field label="Show / event" hint="Auto-completes from past shows.">
+          <input
+            className="fp-input"
+            value={show}
+            onChange={(e) => setShow(e.target.value)}
+            list="show-suggestions"
+            placeholder="Slow Burn Burlesque"
+          />
+          <datalist id="show-suggestions">
+            {recentShows.map((s) => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
+        </Field>
+        <Field label="City" hint="Used in captions, alt text, and hashtags.">
+          <input
+            className="fp-input"
+            value={city}
+            onChange={(e) => setCity(e.target.value)}
+            list="city-suggestions"
+            placeholder="New Orleans, LA"
+          />
+          <datalist id="city-suggestions">
+            {recentCities.map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+        </Field>
+      </div>
+
       <DescriptionField
         post={post}
         description={description}
@@ -273,6 +358,20 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       />
 
       <PerformersField selected={performers} onChange={setPerformers} />
+
+      <Field
+        label="Alt text"
+        hint="Screen-reader + Google Image SEO description. AI generates from venue/show/city/performers + the image. Sent on Bluesky/Pixelfed/Pinterest automatically; copy into IG manually."
+      >
+        <textarea
+          className="fp-input"
+          value={altText}
+          onChange={(e) => setAltText(e.target.value)}
+          rows={2}
+          placeholder="(empty — will be auto-generated next time you run AI Suggest)"
+          style={{ resize: "vertical", fontFamily: "inherit" }}
+        />
+      </Field>
 
       <Field label="Tags" hint="Comma-separated · Tab to autocomplete from past tags">
         <TagsInput value={tags} onChange={setTags} />
@@ -292,9 +391,15 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         currentTags={tags}
         currentDescription={description}
         currentTitle={title}
+        currentAltText={altText}
+        currentVenue={venue?.display_name ?? null}
+        currentShow={show}
+        currentCity={city}
+        currentPerformers={performers.map((p) => p.display_name)}
         onAddTag={addTagInline}
         onAddTags={addTagsInline}
         onUseDescription={(text) => setDescription(text)}
+        onUseAltText={(text) => setAltText(text)}
       />
 
       <TrendingPanel

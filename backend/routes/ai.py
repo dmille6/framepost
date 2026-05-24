@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from database import get_session
-from models import AppConfig, Post, User
+from models import AppConfig, Performer, Post, PostPerformer, User, Venue
 from routes.auth import current_user
 from services import ai_tagging
 
@@ -50,20 +50,28 @@ class TestResult(BaseModel):
 class Suggestion(BaseModel):
     tags: list[str]
     description: str | None
+    alt_text: str | None = None
     provider: str
     full_resolution: bool
     sources: list[list[str]] | None = None  # populated only for the "both" provider
 
 
 class SuggestHints(BaseModel):
-    """Optional context the editor passes — current (unsaved) title, tags, and description.
+    """Optional context the editor passes — current (unsaved) field values.
 
     If `hint_description` is non-empty the suggester switches to *polish mode*: refine the
-    existing draft instead of writing from scratch.
+    existing draft instead of writing from scratch. Venue/show/city/performers come from
+    the structured fields the user has filled in and are surfaced as ground truth to the
+    AI — output quality improves significantly when these are populated.
     """
     hint_title: str | None = None
     hint_tags: str | None = None
     hint_description: str | None = None
+    # Structured context. The route falls back to DB values when None.
+    hint_venue: str | None = None
+    hint_show: str | None = None
+    hint_city: str | None = None
+    hint_performers: list[str] | None = None
 
 
 def _get(db: Session, key: str) -> str | None:
@@ -187,6 +195,25 @@ def suggest(
     hint_tags = (hints.hint_tags if hints else None) or post.tags
     hint_description = (hints.hint_description if hints else None) or post.description
 
+    # Structured context: prefer hints (live edits in the editor), fall back to the saved
+    # post fields. Venue + performers require a DB lookup since they're FK-linked.
+    hint_venue = hints.hint_venue if hints else None
+    if hint_venue is None and post.venue_id:
+        v = db.get(Venue, post.venue_id)
+        if v:
+            hint_venue = v.display_name
+    hint_show = (hints.hint_show if hints else None) or post.show
+    hint_city = (hints.hint_city if hints else None) or post.city
+    hint_performers = hints.hint_performers if hints else None
+    if hint_performers is None:
+        perf_names = db.execute(
+            select(Performer.display_name)
+            .join(PostPerformer, PostPerformer.performer_id == Performer.id)
+            .where(PostPerformer.post_id == post_id)
+            .order_by(PostPerformer.position)
+        ).scalars().all()
+        hint_performers = list(perf_names)
+
     try:
         result = suggester.suggest(
             image_path=src,
@@ -195,6 +222,10 @@ def suggest(
             hint_title=hint_title,
             hint_tags=hint_tags,
             hint_description=hint_description,
+            hint_venue=hint_venue,
+            hint_show=hint_show,
+            hint_city=hint_city,
+            hint_performers=hint_performers,
             tone=s.tone,
         )
     except ai_tagging.TagSuggesterError as e:
@@ -205,6 +236,7 @@ def suggest(
     return Suggestion(
         tags=result.tags,
         description=result.description,
+        alt_text=result.alt_text,
         provider=s.provider,
         full_resolution=s.send_full_resolution,
         sources=result.sources,

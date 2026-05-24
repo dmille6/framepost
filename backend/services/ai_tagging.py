@@ -54,13 +54,23 @@ def build_prompt(
     hint_title: str | None,
     hint_tags: str | None,
     hint_description: str | None = None,
+    hint_venue: str | None = None,
+    hint_show: str | None = None,
+    hint_city: str | None = None,
+    hint_performers: list[str] | None = None,
     tone: str = "concise",
 ) -> str:
-    """Inject the photographer's current title/tags/description as context. Two modes:
+    """Inject the photographer's current title/tags/description + structured context
+    (venue/show/city/performers) into the prompt. Two modes:
 
     - **Polish mode** (description already present): refine the existing draft — tighten
       language, weave in title proper-nouns if missing — but don't rewrite from scratch.
     - **Draft mode** (no description): generate a 1–2 sentence caption from the image.
+
+    Structured context (venue/show/city/performers) is treated as ground truth the model
+    can rely on — the AI doesn't have to guess "is that a burlesque show?" if the user
+    has already typed "Slow Burn Burlesque at Hi-Ho Lounge". Output quality jumps when
+    these fields are populated.
 
     `tone` controls description style:
     - "concise" (default): factual, journalistic. State the subject, action, location, and
@@ -72,9 +82,25 @@ def build_prompt(
     has_title = bool(hint_title and hint_title.strip())
     has_tags = bool(hint_tags and hint_tags.strip())
     has_description = bool(hint_description and hint_description.strip())
+    has_venue = bool(hint_venue and hint_venue.strip())
+    has_show = bool(hint_show and hint_show.strip())
+    has_city = bool(hint_city and hint_city.strip())
+    has_performers = bool(hint_performers)
     is_concise = (tone or "concise").lower() != "descriptive"
 
     context_lines = []
+    # Surface structured context FIRST — it's the most reliable signal we have about
+    # what the photo actually depicts.
+    if has_venue:
+        context_lines.append(f'• Venue: {hint_venue.strip()}')
+    if has_show:
+        context_lines.append(f'• Show / event: {hint_show.strip()}')
+    if has_city:
+        context_lines.append(f'• City: {hint_city.strip()}')
+    if has_performers:
+        names = ", ".join(p.strip() for p in (hint_performers or []) if p and p.strip())
+        if names:
+            context_lines.append(f'• Performer(s) in this photo: {names}')
     if has_title:
         context_lines.append(f'• Title: "{hint_title.strip()}"')
     if has_tags:
@@ -82,7 +108,8 @@ def build_prompt(
     if has_description:
         context_lines.append(f'• Existing description draft: "{hint_description.strip()}"')
     context = (
-        "Context (the photographer's current state):\n" + "\n".join(context_lines) + "\n\n"
+        "Context (the photographer's current state — TREAT AS GROUND TRUTH):\n"
+        + "\n".join(context_lines) + "\n\n"
         if context_lines
         else ""
     )
@@ -128,14 +155,23 @@ def build_prompt(
     if has_tags:
         tag_instruction += " Don't propose near-duplicates of the existing tags."
 
+    alt_text_instruction = (
+        "Write a 1-2 short sentence ALT TEXT description suitable for screen readers and "
+        "Google Image Search. State who/what is in the frame, what they're doing, and "
+        "where (use the venue/city/show/performer context above if relevant). Describe "
+        "the literal visual content — no mood, no opinion, no 'beautiful' or 'stunning'. "
+        "150 characters target, 250 max."
+    )
+
     return (
         "You are a photographer's assistant.\n\n"
         + context
         + "Look at this photograph and:\n"
         + f"1. {tag_instruction}\n"
-        + f"2. {description_instruction}\n\n"
+        + f"2. {description_instruction}\n"
+        + f"3. {alt_text_instruction}\n\n"
         + 'Reply with JSON only, in this exact shape:\n'
-        + '{"tags": ["tag1", "tag2"], "description": "..."}\n\n'
+        + '{"tags": ["tag1", "tag2"], "description": "...", "alt_text": "..."}\n\n'
         + f"Cap the tag list at {max_tags}. Tags lowercase unless they're proper nouns."
     )
 
@@ -144,6 +180,7 @@ def build_prompt(
 class TagSuggestion:
     tags: list[str]
     description: str | None = None
+    alt_text: str | None = None
     raw: str | None = None
     # Parallel to `tags`. None for single-provider; populated by EnsembleSuggester so the UI
     # can badge each tag with which provider(s) supplied it.
@@ -211,7 +248,12 @@ def _parse_json_blob(text: str, *, max_tags: int) -> TagSuggestion:
         desc = desc.strip() or None
     else:
         desc = None
-    return TagSuggestion(tags=tags, description=desc, raw=text)
+    alt = data.get("alt_text") or data.get("altText")
+    if isinstance(alt, str):
+        alt = alt.strip() or None
+    else:
+        alt = None
+    return TagSuggestion(tags=tags, description=desc, alt_text=alt, raw=text)
 
 
 # --- Provider interface ---
@@ -236,6 +278,10 @@ class TagSuggester(ABC):
         hint_title: str | None = None,
         hint_tags: str | None = None,
         hint_description: str | None = None,
+        hint_venue: str | None = None,
+        hint_show: str | None = None,
+        hint_city: str | None = None,
+        hint_performers: list[str] | None = None,
         tone: str = "concise",
     ) -> TagSuggestion: ...
 
@@ -277,6 +323,10 @@ class AnthropicSuggester(TagSuggester):
         hint_title: str | None = None,
         hint_tags: str | None = None,
         hint_description: str | None = None,
+        hint_venue: str | None = None,
+        hint_show: str | None = None,
+        hint_city: str | None = None,
+        hint_performers: list[str] | None = None,
         tone: str = "concise",
     ) -> TagSuggestion:
         client = self._client()
@@ -286,6 +336,10 @@ class AnthropicSuggester(TagSuggester):
             hint_title=hint_title,
             hint_tags=hint_tags,
             hint_description=hint_description,
+            hint_venue=hint_venue,
+            hint_show=hint_show,
+            hint_city=hint_city,
+            hint_performers=hint_performers,
             tone=tone,
         )
         r = client.messages.create(
@@ -345,6 +399,10 @@ class OpenAISuggester(TagSuggester):
         hint_title: str | None = None,
         hint_tags: str | None = None,
         hint_description: str | None = None,
+        hint_venue: str | None = None,
+        hint_show: str | None = None,
+        hint_city: str | None = None,
+        hint_performers: list[str] | None = None,
         tone: str = "concise",
     ) -> TagSuggestion:
         client = self._client()
@@ -354,6 +412,10 @@ class OpenAISuggester(TagSuggester):
             hint_title=hint_title,
             hint_tags=hint_tags,
             hint_description=hint_description,
+            hint_venue=hint_venue,
+            hint_show=hint_show,
+            hint_city=hint_city,
+            hint_performers=hint_performers,
             tone=tone,
         )
         r = client.chat.completions.create(
@@ -410,6 +472,10 @@ class EnsembleSuggester(TagSuggester):
         hint_title: str | None = None,
         hint_tags: str | None = None,
         hint_description: str | None = None,
+        hint_venue: str | None = None,
+        hint_show: str | None = None,
+        hint_city: str | None = None,
+        hint_performers: list[str] | None = None,
         tone: str = "concise",
     ) -> TagSuggestion:
         from concurrent.futures import ThreadPoolExecutor
@@ -426,6 +492,10 @@ class EnsembleSuggester(TagSuggester):
                     hint_title=hint_title,
                     hint_tags=hint_tags,
                     hint_description=hint_description,
+                    hint_venue=hint_venue,
+                    hint_show=hint_show,
+                    hint_city=hint_city,
+                    hint_performers=hint_performers,
                     tone=tone,
                 ): s.name
                 for s in (self._anth, self._oai)
@@ -483,15 +553,21 @@ class EnsembleSuggester(TagSuggester):
         ranked = (deduped_agreed + interleaved)[:max_tags]
         sources = [seen[t.lower().strip()] for t in ranked]
 
-        # Description: prefer Anthropic (richer in our test); fall back to OpenAI.
+        # Description + alt_text: prefer Anthropic (richer in our test); fall back to OpenAI.
         description = None
+        alt_text = None
         for provider in (ANTHROPIC, OPENAI):
             r = results[provider]
-            if r and r.description:
+            if r and r.description and description is None:
                 description = r.description
+            if r and r.alt_text and alt_text is None:
+                alt_text = r.alt_text
+            if description and alt_text:
                 break
 
-        return TagSuggestion(tags=ranked, description=description, sources=sources)
+        return TagSuggestion(
+            tags=ranked, description=description, alt_text=alt_text, sources=sources,
+        )
 
 
 # --- Factory ---

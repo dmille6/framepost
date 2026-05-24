@@ -159,6 +159,42 @@ export default function InstagramPanel({ postId }: Props) {
             studio line (e.g. "📷 Darrell Miller Photography") to every caption.
           </div>
         )}
+
+        {data.alt_text && (
+          <>
+            <BlockHeader
+              label="Alt text"
+              help="Click to copy. Paste into IG's 'Write alt text' field (Advanced settings on upload). Accessibility + Google Image SEO."
+              length={data.alt_text.length}
+            />
+            <CopyableBox text={data.alt_text}>
+              <pre
+                style={{
+                  margin: 0,
+                  padding: "10px 44px 10px 12px",
+                  background: "var(--bg)",
+                  border: "0.5px solid var(--border)",
+                  borderRadius: 8,
+                  fontFamily: "inherit",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  color: "var(--text-dim)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {data.alt_text}
+              </pre>
+            </CopyableBox>
+          </>
+        )}
+        {!data.alt_text && (
+          <div style={{ fontSize: 11, color: "var(--text-fade)" }}>
+            No alt text yet. Run AI Suggest from the Edit tab to generate one
+            (accessibility + Google Image SEO; sent automatically on Bluesky / Pixelfed /
+            Pinterest, copy-paste here for IG).
+          </div>
+        )}
       </div>
 
       {/* Image format + download */}

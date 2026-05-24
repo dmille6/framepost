@@ -59,6 +59,10 @@ export default function ScheduledItemModal({
         privacy: changes.privacy,
         safety_level: changes.safety_level,
         content_type: changes.content_type,
+        venue_id: changes.venue_id,
+        show: changes.show,
+        city: changes.city,
+        alt_text: changes.alt_text,
       };
       const saved = await updatePost(item.id, body);
       await setPostAlbums(item.id, changes.album_ids);
@@ -76,6 +80,10 @@ export default function ScheduledItemModal({
       void qc.invalidateQueries({ queryKey: ["post-performers", item.id] });
       void qc.invalidateQueries({ queryKey: ["instagram-format", item.id] });
       void qc.invalidateQueries({ queryKey: ["merged-tags", item.id] });
+      // New structured-context fields can affect the venues count / recent-shows/cities lists.
+      void qc.invalidateQueries({ queryKey: ["venues"] });
+      void qc.invalidateQueries({ queryKey: ["recent-shows"] });
+      void qc.invalidateQueries({ queryKey: ["recent-cities"] });
     },
   });
 

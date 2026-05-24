@@ -349,18 +349,14 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     ).scalar_one_or_none()
     signature = (sig_row.value if sig_row and sig_row.value else "").strip()
 
-    # Performer @-mentions + their hashtags. Mentions get priority on tight budgets
-    # (Bluesky) because they're attribution — losing a tag is annoying but losing a
-    # credited performer is rude. We also dedupe against the description/tags so a
-    # manually-typed @handle or #handle doesn't get echoed by the auto-insert.
-    all_performers = performers_svc.get_post_performers(db, post.id)
-    filtered = performers_svc.dedupe_against_text(
-        all_performers,
-        existing_text=(post.description or "") + " " + (post.title or ""),
-        existing_tags=tag_str,
-    )
-    perf_mention = performers_svc.mention_block(filtered)
-    perf_hashtags = performers_svc.hashtag_tokens(filtered)
+    # Unified caption context: performers + venue (mentions + hashtags) plus show/city
+    # (hashtags only). Mentions get priority on tight budgets (Bluesky) because they're
+    # attribution — losing a tag is annoying but losing a credited performer is rude.
+    # Deduped against description/title/tags so manually-typed @handles/#hashtags don't
+    # echo. See services/performers.caption_context_for_post.
+    ctx = performers_svc.caption_context_for_post(db, post)
+    perf_mention = ctx.mention_block
+    perf_hashtags = ctx.hashtag_tokens
 
     if platform == "bluesky":
         # 300-graphemes hard cap. Skip signature (would eat budget). Build:
@@ -471,7 +467,12 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         raise RuntimeError("no source image (original purged, no preview cached)")
 
     text = _build_caption_for(cred.platform, post, db)
-    alt = (post.title or "") + ("\n\n" + post.description if post.description else "")
+    # Prefer AI-generated alt_text (richer + accessibility-tuned); fall back to title +
+    # description for posts that pre-date the alt_text field (migration 0014) or where
+    # AI generation hasn't been run.
+    alt = (post.alt_text or "").strip() or (
+        (post.title or "") + ("\n\n" + post.description if post.description else "")
+    )
 
     if cred.platform == "bluesky":
         result = bluesky.post_photo(db=db, src=src, text=text, alt_text=alt)
@@ -484,20 +485,13 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         # use _build_caption_for's output — we pass the fields directly. Link defaults to the
         # photo's Flickr URL (drives the killer perpetual referral traffic) when present.
         #
-        # Performer handling: Pinterest has no @-mention culture, so we skip the mentions
-        # block. But the performer hashtags belong in description — we prepend their
-        # tokens to the tags string so pinterest.post_pin's existing hashtag builder
-        # de-dupes them against post.tags naturally. Dedupe against existing description/tags
-        # so manually-typed performer references aren't doubled.
-        _perf_performers = performers_svc.get_post_performers(db, post.id)
-        _filtered = performers_svc.dedupe_against_text(
-            _perf_performers,
-            existing_text=(post.description or "") + " " + (post.title or ""),
-            existing_tags=post.tags or "",
-        )
-        perf_hashtag_tokens = performers_svc.hashtag_tokens(_filtered)
+        # Pinterest has no @-mention culture, so we skip the mentions block entirely. But
+        # the hashtag tokens (performers + venue + show + city) belong in description —
+        # we prepend them to the tags string so pinterest.post_pin's existing hashtag
+        # builder dedupes against post.tags naturally.
+        pin_ctx = performers_svc.caption_context_for_post(db, post)
         merged_tags = " ".join(
-            [t.lstrip("#") for t in perf_hashtag_tokens] + ((post.tags or "").split())
+            [t.lstrip("#") for t in pin_ctx.hashtag_tokens] + ((post.tags or "").split())
         )
         result = pinterest.post_pin(
             db=db,

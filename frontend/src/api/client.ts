@@ -106,6 +106,12 @@ export type Post = {
   posted_to_instagram_at: string | null;
   reddit_posted_at: string | null;
   target_platforms: string[] | null;
+  // Structured context (migration 0014). venue_id references venues.id; show/city are
+  // free text typeahead'd from past values; alt_text is AI-generated.
+  venue_id: string | null;
+  show: string | null;
+  city: string | null;
+  alt_text: string | null;
   created_at: string;
 };
 
@@ -200,6 +206,10 @@ export type PostUpdate = Partial<{
   safety_level: string;
   content_type: string;
   target_platforms: string[] | null;
+  venue_id: string | null;
+  show: string | null;
+  city: string | null;
+  alt_text: string | null;
 }>;
 
 export const updatePost = (id: string, body: PostUpdate) =>
@@ -219,6 +229,7 @@ export type InstagramFormat = {
   hashtags: string[];
   title: string | null;
   description: string | null;
+  alt_text: string | null;
   signature: string | null;
   posted_to_instagram_at: string | null;
   sizes: string[];
@@ -970,6 +981,7 @@ export type AITestResult = {
 export type AISuggestion = {
   tags: string[];
   description: string | null;
+  alt_text: string | null;
   provider: string;
   full_resolution: boolean;
   sources?: string[][] | null;
@@ -984,6 +996,10 @@ export type SuggestHints = {
   hint_title?: string | null;
   hint_tags?: string | null;
   hint_description?: string | null;
+  hint_venue?: string | null;
+  hint_show?: string | null;
+  hint_city?: string | null;
+  hint_performers?: string[] | null;
 };
 
 export const aiSuggestForPost = (postId: string, hints?: SuggestHints) =>
@@ -1019,6 +1035,44 @@ export const refreshTrending = () =>
 export type TagUsage = { tag: string; count: number };
 
 export const fetchUsedTags = () => apiFetch<TagUsage[]>("/api/tags/used");
+
+// --- Venues ----------------------------------------------------------------
+
+export type Venue = {
+  id: string;
+  display_name: string;
+  instagram_handle: string | null;
+  usage_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export const listVenues = (q?: string) => {
+  const qs = q ? `?q=${encodeURIComponent(q)}` : "";
+  return apiFetch<Venue[]>(`/api/venues${qs}`);
+};
+
+export const createVenue = (display_name: string, instagram_handle?: string | null) =>
+  apiFetch<Venue>("/api/venues", {
+    method: "POST",
+    body: JSON.stringify({ display_name, instagram_handle: instagram_handle || null }),
+  });
+
+export const updateVenue = (
+  id: string,
+  patch: { display_name?: string; instagram_handle?: string | null },
+) =>
+  apiFetch<Venue>(`/api/venues/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const deleteVenue = (id: string) =>
+  apiFetch<{ ok: boolean }>(`/api/venues/${id}`, { method: "DELETE" });
+
+// Distinct values for typeahead.
+export const fetchRecentShows = () => apiFetch<string[]>("/api/posts/recent-shows");
+export const fetchRecentCities = () => apiFetch<string[]>("/api/posts/recent-cities");
 
 // --- Performers ------------------------------------------------------------
 

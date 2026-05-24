@@ -15,6 +15,7 @@ import SettingsImport from "./SettingsImport";
 import SettingsPerformers from "./SettingsPerformers";
 import SettingsProfiles from "./SettingsProfiles";
 import SettingsSystem from "./SettingsSystem";
+import SettingsVenues from "./SettingsVenues";
 
 const TABS: { to: string; label: string; phase?: string }[] = [
   { to: "/settings/general", label: "General" },
@@ -24,6 +25,7 @@ const TABS: { to: string; label: string; phase?: string }[] = [
   { to: "/settings/profiles", label: "Tag Profiles" },
   { to: "/settings/title-templates", label: "Title Templates" },
   { to: "/settings/performers", label: "Performers" },
+  { to: "/settings/venues", label: "Venues" },
   { to: "/settings/albums", label: "Albums" },
   { to: "/settings/groups", label: "Groups" },
   { to: "/settings/ai", label: "AI Tagging" },
@@ -84,6 +86,7 @@ export default function Settings() {
               <Route path="profiles" element={<SettingsProfiles />} />
               <Route path="title-templates" element={<SettingsTitleTemplates />} />
               <Route path="performers" element={<SettingsPerformers />} />
+              <Route path="venues" element={<SettingsVenues />} />
               <Route path="albums" element={<SettingsAlbums />} />
               <Route path="groups" element={<SettingsGroups />} />
               <Route path="ai" element={<SettingsAI />} />

@@ -62,6 +62,13 @@ class Post(Base):
     posted_to_instagram_at = Column(DateTime)
     reddit_posted_at = Column(DateTime)
     target_platforms = Column(Text)  # JSON list, null = use defaults
+    # Structured context fields (0014). venue_id is a lightweight entity (like performer);
+    # show + city are free text with frontend typeahead from past values. alt_text is
+    # AI-generated using this context and sent to platforms that accept it.
+    venue_id = Column(String, ForeignKey("venues.id", ondelete="SET NULL"))
+    show = Column(Text)
+    city = Column(Text)
+    alt_text = Column(Text)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
@@ -258,6 +265,15 @@ class TrendingTag(Base):
     last_synced_at = Column(
         DateTime, nullable=False, server_default=func.current_timestamp()
     )
+
+
+class Venue(Base):
+    __tablename__ = "venues"
+    id = Column(String, primary_key=True)
+    display_name = Column(Text, nullable=False, unique=True)
+    instagram_handle = Column(Text)  # stored without leading @
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+    updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
 
 class Performer(Base):

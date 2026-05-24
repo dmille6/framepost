@@ -131,6 +131,10 @@ export default function DraftQueue() {
         privacy: changes.privacy,
         safety_level: changes.safety_level,
         content_type: changes.content_type,
+        venue_id: changes.venue_id,
+        show: changes.show,
+        city: changes.city,
+        alt_text: changes.alt_text,
       };
       const saved = await updatePost(id, body);
       await setPostAlbums(id, changes.album_ids);
@@ -148,6 +152,9 @@ export default function DraftQueue() {
       void qc.invalidateQueries({ queryKey: ["post-profiles", saved.id] });
       void qc.invalidateQueries({ queryKey: ["post-performers", saved.id] });
       void qc.invalidateQueries({ queryKey: ["merged-tags", saved.id] });
+      void qc.invalidateQueries({ queryKey: ["venues"] });
+      void qc.invalidateQueries({ queryKey: ["recent-shows"] });
+      void qc.invalidateQueries({ queryKey: ["recent-cities"] });
     },
   });
 

@@ -8,9 +8,16 @@ type Props = {
   currentTags: string;
   currentDescription: string;
   currentTitle: string;
+  currentAltText?: string;
+  // Structured context hints — passed as ground truth to the AI when populated.
+  currentVenue?: string | null;
+  currentShow?: string | null;
+  currentCity?: string | null;
+  currentPerformers?: string[];
   onAddTag: (tag: string) => void;
   onAddTags: (tags: string[]) => void;
   onUseDescription: (text: string) => void;
+  onUseAltText?: (text: string) => void;
 };
 
 export default function AISuggestPanel({
@@ -19,9 +26,15 @@ export default function AISuggestPanel({
   currentTags,
   currentDescription,
   currentTitle,
+  currentAltText = "",
+  currentVenue,
+  currentShow,
+  currentCity,
+  currentPerformers,
   onAddTag,
   onAddTags,
   onUseDescription,
+  onUseAltText,
 }: Props) {
   const suggest = useMutation({
     mutationFn: () =>
@@ -29,6 +42,12 @@ export default function AISuggestPanel({
         hint_title: currentTitle.trim() || null,
         hint_tags: currentTags.trim() || null,
         hint_description: currentDescription.trim() || null,
+        hint_venue: currentVenue?.trim() || null,
+        hint_show: currentShow?.trim() || null,
+        hint_city: currentCity?.trim() || null,
+        hint_performers: currentPerformers && currentPerformers.length > 0
+          ? currentPerformers
+          : null,
       }),
   });
 
@@ -177,6 +196,30 @@ export default function AISuggestPanel({
                 style={{ fontSize: 12 }}
               >
                 {data.description === currentDescription ? "Already using this" : "Use this"}
+              </button>
+            </div>
+          )}
+
+          {data.alt_text && onUseAltText && (
+            <div
+              style={{
+                marginTop: 4,
+                paddingTop: 8,
+                borderTop: "0.5px solid var(--border)",
+                fontSize: 12,
+              }}
+            >
+              <div style={{ color: "var(--text-fade)", marginBottom: 4 }}>
+                Suggested alt text (accessibility + Google Image SEO)
+              </div>
+              <div style={{ color: "var(--text-dim)", marginBottom: 6 }}>{data.alt_text}</div>
+              <button
+                className="fp-link"
+                onClick={() => onUseAltText(data.alt_text!)}
+                disabled={data.alt_text === currentAltText}
+                style={{ fontSize: 12 }}
+              >
+                {data.alt_text === currentAltText ? "Already using this" : "Use this"}
               </button>
             </div>
           )}

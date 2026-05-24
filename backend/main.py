@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 
 from middleware import CSRFMiddleware
-from routes import activity, ai, albums, analytics, auth, groups, health, history, performers, platforms, posts, profiles, reels, schedule, system, tags, title_templates
+from routes import activity, ai, albums, analytics, auth, groups, health, history, performers, platforms, posts, profiles, reels, schedule, system, tags, title_templates, venues
 from routes import config as config_routes
 
 app = FastAPI(title="FramePost", version="0.1.0")
@@ -31,3 +31,4 @@ app.include_router(title_templates.router, prefix="/api/title-templates", tags=[
 app.include_router(activity.router, prefix="/api/activity", tags=["activity"])
 app.include_router(reels.router, prefix="/api/reels", tags=["reels"])
 app.include_router(performers.router, prefix="/api/performers", tags=["performers"])
+app.include_router(venues.router, prefix="/api/venues", tags=["venues"])
