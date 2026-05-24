@@ -1,0 +1,43 @@
+.git
+.gitignore
+.env
+.env.local
+*.md
+!brief.md
+
+# Don't ship secrets, runtime data, or local caches into images
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python local
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node local
+node_modules/
+frontend/dist/
+frontend/build/
+.vite/
+
+# Photo content (lives on host volume, not in image)
+/mnt/photo-data/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+logs/
+
+# Project memory (host-only, never in image)
+.claude/

@@ -1,0 +1,61 @@
+# FramePost — single-host docker compose.
+# 3 services: backend, worker, nginx. Cleanup is an APScheduler job inside worker, not its own container.
+# Frontend is built by nginx's multi-stage Dockerfile (no runtime Node container).
+#
+# Secrets / API keys come from .env via `env_file:` (NOT `environment:` with ${VAR:-}).
+# `env_file:` loads values straight into the container; the `${VAR:-}` substitution
+# pattern lets a shell-set-but-empty variable beat the .env value, which is a common
+# footgun in dev shells (e.g. an exported empty ANTHROPIC_API_KEY).
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: framepost-backend:dev
+    container_name: framepost-backend
+    user: "1000:1000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/framepost.db
+      PHOTO_ROOT: /mnt/photo-data
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./backend:/app                  # code (dev convenience — bind mount)
+      - ./backend/data:/app/data        # SQLite DB lives on OS disk for WAL perf
+      - /mnt/photo-data:/mnt/photo-data # photos
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  worker:
+    image: framepost-backend:dev   # built by `backend` service — don't double-build
+    container_name: framepost-worker
+    user: "1000:1000"
+    command: ["python", "-m", "services.scheduler"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/framepost.db
+      PHOTO_ROOT: /mnt/photo-data
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./backend:/app
+      - ./backend/data:/app/data
+      - /mnt/photo-data:/mnt/photo-data
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    image: framepost-nginx:dev
+    container_name: framepost-nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

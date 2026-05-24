@@ -1,0 +1,388 @@
+:root {
+  color-scheme: dark;
+  --bg: #0a0a0a;
+  --bg-elevated: #111111;
+  --card: #161616;
+  --hover: #1f1f1f;
+  --teal: #5dcaa5;
+  --teal-strong: #1d9e75;
+  --teal-tint: rgba(93, 202, 165, 0.12);
+  --text: rgba(255, 255, 255, 0.92);
+  --text-dim: rgba(255, 255, 255, 0.6);
+  --text-fade: rgba(255, 255, 255, 0.4);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --danger: #f59c9c;
+  --danger-tint: rgba(245, 156, 156, 0.1);
+  --amber: #f0c97a;
+  --amber-tint: rgba(240, 201, 122, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.5;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+@supports (font-variation-settings: normal) {
+  :root { font-family: "InterVariable", "Inter", system-ui, sans-serif; }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+a { color: var(--teal); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1, h2, h3, h4 { font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: 22px; }
+h2 { font-size: 18px; }
+h3 { font-size: 15px; }
+
+/* Scrollbar — quiet, dark, doesn't fight the design */
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.12) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); background-clip: padding-box; border: 2px solid transparent; }
+
+/* Selection */
+::selection { background: rgba(93, 202, 165, 0.3); color: var(--text); }
+
+/* Focus ring — keyboard only */
+:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+:focus:not(:focus-visible) { outline: none; }
+
+/* Cards */
+.fp-card {
+  background: var(--card);
+  border: 0.5px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.fp-card-elevated {
+  background: var(--card);
+  border: 0.5px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-sm);
+}
+
+/* Card header — consistent title/subtitle/action layout */
+.fp-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.fp-card-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+}
+.fp-card-header-subtitle {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* Inputs */
+.fp-input, .fp-select, .fp-textarea {
+  background: var(--bg);
+  border: 0.5px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: inherit;
+  font: inherit;
+  width: 100%;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.fp-input:hover, .fp-select:hover, .fp-textarea:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+}
+.fp-input:focus, .fp-select:focus, .fp-textarea:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgba(93, 202, 165, 0.12);
+}
+.fp-textarea { resize: vertical; min-height: 80px; line-height: 1.5; }
+
+/* Buttons */
+.fp-btn {
+  background: var(--teal);
+  color: #0a1f17;
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 16px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease, transform 80ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.fp-btn:hover:not(:disabled) { background: #6fdbb6; }
+.fp-btn:active:not(:disabled) { transform: translateY(1px); }
+.fp-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.fp-btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border: 0.5px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.fp-btn-ghost:hover:not(:disabled) { background: var(--hover); border-color: rgba(255,255,255,0.24); }
+.fp-btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.fp-btn-danger {
+  background: transparent;
+  color: var(--danger);
+  border: 0.5px solid rgba(245, 156, 156, 0.3);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.fp-btn-danger:hover:not(:disabled) { background: var(--danger-tint); }
+
+.fp-link {
+  background: transparent;
+  border: 0;
+  color: var(--teal);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+.fp-link:hover { text-decoration: underline; }
+
+/* Status pills — Linear/GitHub style: subtle bg + tinted text + dot */
+.fp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  border: 0.5px solid transparent;
+  white-space: nowrap;
+}
+.fp-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.fp-pill-pending {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+.fp-pill-posted {
+  background: var(--teal-tint);
+  color: var(--teal);
+  border-color: rgba(93, 202, 165, 0.2);
+}
+.fp-pill-late {
+  background: var(--amber-tint);
+  color: var(--amber);
+  border-color: rgba(240, 201, 122, 0.2);
+}
+.fp-pill-missed, .fp-pill-failed {
+  background: var(--danger-tint);
+  color: var(--danger);
+  border-color: rgba(245, 156, 156, 0.2);
+}
+
+/* Grid */
+.fp-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.fp-page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.fp-page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 0.5px solid var(--border);
+}
+.fp-page-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0;
+}
+.fp-page-subtitle {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+/* Skeleton loader */
+@keyframes fp-skeleton {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.fp-skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0.04) 0%,
+    rgba(255,255,255,0.08) 50%,
+    rgba(255,255,255,0.04) 100%
+  );
+  background-size: 200% 100%;
+  animation: fp-skeleton 1.6s ease-in-out infinite;
+  border-radius: 6px;
+  display: block;
+}
+
+/* Entrance animations.
+ *
+ * IMPORTANT: page-level entrance animations cannot use `transform` — any non-`none` transform
+ * on an ancestor creates a containing block for `position: fixed` descendants, which means
+ * modals/lightboxes attached to the page wrapper would position relative to the wrapper
+ * instead of the viewport. We use opacity-only fades for the page-level wrapper and accept
+ * that the slide-up effect is gone. (Cards/tiles can still use translateY since they don't
+ * host fixed children.)
+ */
+@keyframes fp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.fp-fade-in { animation: fp-fade-in 220ms ease-out both; }
+
+@keyframes fp-fade-in-fast {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.fp-fade { animation: fp-fade-in-fast 160ms ease-out both; }
+
+/* Spinner */
+@keyframes fp-spin { to { transform: rotate(360deg); } }
+.fp-spinner {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid rgba(255,255,255,0.18);
+  border-top-color: var(--teal);
+  border-radius: 999px;
+  animation: fp-spin 700ms linear infinite;
+  display: inline-block;
+}
+
+/* Divider */
+.fp-divider {
+  height: 0.5px;
+  background: var(--border);
+  margin: 16px 0;
+  border: 0;
+}
+
+/* Modal/dialog backdrop */
+.fp-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 100;
+  animation: fp-fade-in-fast 140ms ease-out;
+}
+
+/* Tabular numerals utility (already global, but explicit class for cells) */
+.fp-num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+/* Subtle hover lift for cards that act as buttons */
+.fp-card-button {
+  cursor: pointer;
+  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+.fp-card-button:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+}
+
+/* Empty state shell */
+.fp-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 56px 24px;
+  color: var(--text-dim);
+}
+.fp-empty-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: var(--hover);
+  display: grid;
+  place-items: center;
+  color: var(--text-fade);
+  margin-bottom: 16px;
+}
+.fp-empty-title {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+.fp-empty-body {
+  font-size: 13px;
+  max-width: 360px;
+  line-height: 1.5;
+}

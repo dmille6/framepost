@@ -1,0 +1,43 @@
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Local DB & runtime data
+*.db
+*.db-wal
+*.db-shm
+backend/data/
+
+# Photo volume content (lives outside repo, but be safe)
+/mnt/photo-data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend build
+node_modules/
+frontend/dist/
+frontend/build/
+.vite/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+logs/
+
+# Claude Code per-user local config (may contain test creds in permission allowlists)
+.claude/settings.local.json
