@@ -9,6 +9,7 @@ import {
   type ScheduledItem,
   setPostAlbums,
   setPostGroups,
+  setPostPerformers,
   setPostProfiles,
   updatePost,
 } from "../api/client";
@@ -63,6 +64,7 @@ export default function ScheduledItemModal({
       await setPostAlbums(item.id, changes.album_ids);
       await setPostGroups(item.id, changes.group_ids);
       await setPostProfiles(item.id, changes.profile_ids);
+      await setPostPerformers(item.id, changes.performer_ids);
       return saved;
     },
     onSuccess: (saved: Post) => {
@@ -71,6 +73,8 @@ export default function ScheduledItemModal({
       void qc.invalidateQueries({ queryKey: ["post-albums", item.id] });
       void qc.invalidateQueries({ queryKey: ["post-groups", item.id] });
       void qc.invalidateQueries({ queryKey: ["post-profiles", item.id] });
+      void qc.invalidateQueries({ queryKey: ["post-performers", item.id] });
+      void qc.invalidateQueries({ queryKey: ["instagram-format", item.id] });
       void qc.invalidateQueries({ queryKey: ["merged-tags", item.id] });
     },
   });

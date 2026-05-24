@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
-from services import events, image, import_pipeline, instagram, reddit, storage, tags as tags_svc
+from services import events, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -370,11 +370,36 @@ def get_instagram_format(
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
     signature = _read_signature(db)
+
+    # Performer @-mentions go between description and signature; hashtags merge into the
+    # standard hashtag block (deduplicated against any manual tags the user typed).
+    perf_mention, perf_hashtags = performers_svc.for_post(db, post_id)
+
+    base_caption = instagram.build_caption(
+        title=post.title, description=post.description, signature=signature
+    )
+    if perf_mention:
+        # Caption is title \n\n description \n\n signature; we insert mentions before
+        # signature if signature is present, otherwise at the end.
+        if signature and signature.strip() and base_caption.endswith(signature.strip()):
+            head = base_caption[: -len(signature.strip())].rstrip("\n")
+            caption = f"{head}\n\n{perf_mention}\n\n{signature.strip()}" if head else f"{perf_mention}\n\n{signature.strip()}"
+        else:
+            caption = f"{base_caption}\n\n{perf_mention}" if base_caption else perf_mention
+    else:
+        caption = base_caption
+
+    # Hashtag block: performer hashtags first (specific, attribution), then post tags.
+    hashtags = list(perf_hashtags)
+    seen = {h.lower() for h in hashtags}
+    for h in instagram.build_hashtags(post.tags):
+        if h.lower() not in seen:
+            seen.add(h.lower())
+            hashtags.append(h)
+
     return InstagramFormat(
-        caption=instagram.build_caption(
-            title=post.title, description=post.description, signature=signature
-        ),
-        hashtags=instagram.build_hashtags(post.tags),
+        caption=caption,
+        hashtags=hashtags,
         title=post.title,
         description=post.description,
         signature=signature,

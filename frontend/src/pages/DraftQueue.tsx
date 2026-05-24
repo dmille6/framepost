@@ -12,6 +12,7 @@ import {
   schedulePost,
   setPostAlbums,
   setPostGroups,
+  setPostPerformers,
   setPostProfiles,
   updatePost,
   uploadFileWithProgress,
@@ -135,6 +136,7 @@ export default function DraftQueue() {
       await setPostAlbums(id, changes.album_ids);
       await setPostGroups(id, changes.group_ids);
       await setPostProfiles(id, changes.profile_ids);
+      await setPostPerformers(id, changes.performer_ids);
       return saved;
     },
     onSuccess: (saved) => {
@@ -144,6 +146,7 @@ export default function DraftQueue() {
       void qc.invalidateQueries({ queryKey: ["post-albums", saved.id] });
       void qc.invalidateQueries({ queryKey: ["post-groups", saved.id] });
       void qc.invalidateQueries({ queryKey: ["post-profiles", saved.id] });
+      void qc.invalidateQueries({ queryKey: ["post-performers", saved.id] });
       void qc.invalidateQueries({ queryKey: ["merged-tags", saved.id] });
     },
   });

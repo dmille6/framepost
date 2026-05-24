@@ -9,18 +9,21 @@ import {
   getMergedTags,
   getPostAlbums,
   getPostGroups,
+  getPostPerformers,
   getPostProfiles,
   listAlbums,
   listConnectedPlatforms,
   listGroups,
   listProfiles,
   thumbnailUrl,
+  type Performer,
   type Post,
 } from "../api/client";
 import AISuggestPanel from "./AISuggestPanel";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
 import Lightbox from "./Lightbox";
 import MultiSelectChips from "./MultiSelectChips";
+import PerformersField from "./PerformersField";
 import TagsInput from "./TagsInput";
 import TrendingPanel from "./TrendingPanel";
 
@@ -34,6 +37,7 @@ export type EditorChanges = {
   album_ids: string[];
   group_ids: string[];
   profile_ids: string[];
+  performer_ids: string[];
   target_platforms: string[] | null;
 };
 
@@ -72,6 +76,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     queryKey: ["post-profiles", post.id],
     queryFn: () => getPostProfiles(post.id),
   });
+  const { data: postPerformers = [] } = useQuery({
+    queryKey: ["post-performers", post.id],
+    queryFn: () => getPostPerformers(post.id),
+  });
   const { data: merged } = useQuery({
     queryKey: ["merged-tags", post.id],
     queryFn: () => getMergedTags(post.id),
@@ -82,6 +90,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [albumIds, setAlbumIds] = useState<Set<string>>(new Set());
   const [groupIds, setGroupIds] = useState<Set<string>>(new Set());
   const [profileIds, setProfileIds] = useState<Set<string>>(new Set());
+  const [performers, setPerformers] = useState<Performer[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [targetSet, setTargetSet] = useState<Set<string>>(new Set());
@@ -103,6 +112,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   useEffect(() => { setAlbumIds(new Set(postAlbums)); }, [post.id, postAlbums.join(",")]);
   useEffect(() => { setGroupIds(new Set(postGroups)); }, [post.id, postGroups.join(",")]);
   useEffect(() => { setProfileIds(new Set(postProfiles)); }, [post.id, postProfiles.join(",")]);
+  useEffect(() => { setPerformers(postPerformers); }, [post.id, postPerformers.map((p) => p.id).join(",")]);
 
   // Default for target_platforms: if post has an explicit list, use it; otherwise default
   // to all connected platforms with default_target=on (which the user already configured
@@ -135,6 +145,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     !setsEqual(albumIds, new Set(postAlbums)) ||
     !setsEqual(groupIds, new Set(postGroups)) ||
     !setsEqual(profileIds, new Set(postProfiles)) ||
+    performers.map((p) => p.id).join(",") !== postPerformers.map((p) => p.id).join(",") ||
     !setsEqual(targetSet, expectedTargetSet);
 
   function handleSave() {
@@ -152,6 +163,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       album_ids: [...albumIds],
       group_ids: [...groupIds],
       profile_ids: [...profileIds],
+      performer_ids: performers.map((p) => p.id),
       target_platforms: targetsToSave,
     });
   }
@@ -259,6 +271,8 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         hintTitle={title}
         hintTags={tags}
       />
+
+      <PerformersField selected={performers} onChange={setPerformers} />
 
       <Field label="Tags" hint="Comma-separated · Tab to autocomplete from past tags">
         <TagsInput value={tags} onChange={setTags} />

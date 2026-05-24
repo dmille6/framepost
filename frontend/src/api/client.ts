@@ -1003,6 +1003,49 @@ export type TagUsage = { tag: string; count: number };
 
 export const fetchUsedTags = () => apiFetch<TagUsage[]>("/api/tags/used");
 
+// --- Performers ------------------------------------------------------------
+
+export type Performer = {
+  id: string;
+  display_name: string;
+  instagram_handle: string | null;
+  usage_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export const listPerformers = (q?: string) => {
+  const qs = q ? `?q=${encodeURIComponent(q)}` : "";
+  return apiFetch<Performer[]>(`/api/performers${qs}`);
+};
+
+export const createPerformer = (display_name: string, instagram_handle?: string | null) =>
+  apiFetch<Performer>("/api/performers", {
+    method: "POST",
+    body: JSON.stringify({ display_name, instagram_handle: instagram_handle || null }),
+  });
+
+export const updatePerformer = (
+  id: string,
+  patch: { display_name?: string; instagram_handle?: string | null },
+) =>
+  apiFetch<Performer>(`/api/performers/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const deletePerformer = (id: string) =>
+  apiFetch<{ ok: boolean }>(`/api/performers/${id}`, { method: "DELETE" });
+
+export const getPostPerformers = (post_id: string) =>
+  apiFetch<Performer[]>(`/api/performers/by-post/${post_id}`);
+
+export const setPostPerformers = (post_id: string, performer_ids: string[]) =>
+  apiFetch<Performer[]>(`/api/performers/by-post/${post_id}`, {
+    method: "PUT",
+    body: JSON.stringify({ performer_ids }),
+  });
+
 // --- Reels ----------------------------------------------------------------
 
 export type ReelCrop = { x: number; y: number; width: number; height: number };

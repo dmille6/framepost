@@ -20,6 +20,7 @@ from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
 from services import backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, image, retry, storage, tags, trending, watcher
+from services import performers as performers_svc
 from services.platforms import bluesky, flickr, pinterest, pixelfed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -348,16 +349,30 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     ).scalar_one_or_none()
     signature = (sig_row.value if sig_row and sig_row.value else "").strip()
 
+    # Performer @-mentions + their hashtags. Mentions get priority on tight budgets
+    # (Bluesky) because they're attribution — losing a tag is annoying but losing a
+    # credited performer is rude.
+    perf_mention, perf_hashtags = performers_svc.for_post(db, post.id)
+
     if platform == "bluesky":
         # 300-graphemes hard cap. Skip signature (would eat budget). Build:
-        # title + blank + description + blank + hashtags
-        # Hashtags = bluesky_default_hashtags (always on) + post-specific tags, fit until 300.
+        # title + blank + description + blank + mentions + blank + hashtags
+        # Hashtags = bluesky_default_hashtags + post-specific tags + performer hashtags,
+        # fit greedily until 300.
         parts: list[str] = []
         if title:
             parts.append(title)
         if description:
             parts.append(description)
         body = "\n\n".join(parts)
+
+        # Mentions go in as a whole block (cheap, attribution-critical). Bail out if
+        # even adding the mentions overflows — performers come before tags in priority.
+        BUDGET = 300
+        if perf_mention:
+            candidate = (body + "\n\n" + perf_mention) if body else perf_mention
+            if len(candidate) <= BUDGET:
+                body = candidate
 
         # Read default hashtags from app_config (set in Settings → Platforms → Bluesky).
         defaults_row = db.execute(
@@ -373,6 +388,13 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
             if cleaned and cleaned not in seen:
                 seen.add(cleaned)
                 ordered_tags.append(f"#{cleaned}")
+        # Performer hashtags before generic post tags — they're more specific. Preserve
+        # the helper's case (handle stays lower, display-name fallback stays CamelCase).
+        for raw_tag in perf_hashtags:
+            key = raw_tag.lstrip("#").lower()
+            if key and key not in seen:
+                seen.add(key)
+                ordered_tags.append(raw_tag)
         # Then post-specific tags.
         for raw in tag_str.split():
             cleaned = "".join(ch for ch in raw.lower() if ch.isalnum() or ch == "_")
@@ -382,7 +404,6 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
 
         # Fit as many tags as the 300-char budget allows. Stop greedily once the next tag
         # would push us over.
-        BUDGET = 300
         if ordered_tags:
             current = body
             sep = "\n\n" if current else ""
@@ -396,7 +417,7 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
 
         return body[:300]
 
-    # Pixelfed (and future Mastodon): long text OK. Caption + hashtags + signature.
+    # Pixelfed (and future Mastodon): long text OK. Caption + mentions + signature + hashtags.
     parts = []
     if title:
         parts.append(title)
@@ -404,11 +425,20 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
         parts.append(description)
     if signature:
         parts.append(signature)
+    if perf_mention:
+        parts.append(perf_mention)
     body = "\n\n".join(parts)
-    # Hashtag block at the bottom, IG-style (works on Pixelfed too).
+    # Hashtag block at the bottom, IG-style (works on Pixelfed too). Performer hashtags
+    # blend in alongside post tags; we de-dupe so #roxielarouge doesn't appear twice if
+    # the user also typed it as a manual tag.
+    hashtags: list[str] = []
+    seen: set[str] = set()
+    for raw_tag in perf_hashtags:
+        key = raw_tag.lstrip("#").lower()
+        if key and key not in seen:
+            seen.add(key)
+            hashtags.append(raw_tag)  # preserves CamelCase fallback for readability
     if tag_str:
-        hashtags = []
-        seen: set[str] = set()
         for raw in tag_str.split():
             cleaned = "".join(ch for ch in raw.lower() if ch.isalnum() or ch == "_")
             if cleaned and cleaned not in seen:
@@ -416,8 +446,8 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
                 hashtags.append(f"#{cleaned}")
             if len(hashtags) >= 30:
                 break
-        if hashtags:
-            body = f"{body}\n\n{' '.join(hashtags)}".strip()
+    if hashtags:
+        body = f"{body}\n\n{' '.join(hashtags)}".strip()
     return body
 
 
@@ -445,12 +475,22 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         # Pinterest has structured title/description/link rather than a blob, so we don't
         # use _build_caption_for's output — we pass the fields directly. Link defaults to the
         # photo's Flickr URL (drives the killer perpetual referral traffic) when present.
+        #
+        # Performer handling: Pinterest has no @-mention culture, so we skip the mentions
+        # block. But the performer hashtags belong in description — we prepend their
+        # tokens to the tags string so pinterest.post_pin's existing hashtag builder
+        # de-dupes them against post.tags naturally.
+        _perf_performers = performers_svc.get_post_performers(db, post.id)
+        perf_hashtag_tokens = performers_svc.hashtag_tokens(_perf_performers)
+        merged_tags = " ".join(
+            [t.lstrip("#") for t in perf_hashtag_tokens] + ((post.tags or "").split())
+        )
         result = pinterest.post_pin(
             db=db,
             src=src,
             title=post.title,
             description=post.description,
-            tags=post.tags,
+            tags=merged_tags or None,
             link=post.flickr_url,
             alt_text=alt,
         )

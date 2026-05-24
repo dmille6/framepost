@@ -260,6 +260,22 @@ class TrendingTag(Base):
     )
 
 
+class Performer(Base):
+    __tablename__ = "performers"
+    id = Column(String, primary_key=True)
+    display_name = Column(Text, nullable=False, unique=True)
+    instagram_handle = Column(Text)  # stored without leading @
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+    updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+
+
+class PostPerformer(Base):
+    __tablename__ = "post_performers"
+    post_id = Column(String, ForeignKey("posts.id", ondelete="CASCADE"), primary_key=True)
+    performer_id = Column(String, ForeignKey("performers.id", ondelete="CASCADE"), primary_key=True)
+    position = Column(Integer, nullable=False, server_default="0")
+
+
 class Reel(Base):
     __tablename__ = "reels"
     id = Column(String, primary_key=True)
