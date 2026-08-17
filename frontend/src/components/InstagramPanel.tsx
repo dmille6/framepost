@@ -3,8 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   fetchInstagramFormat,
+  fetchInstagramStatus,
+  fetchPostPlatforms,
+  igPostNow,
   instagramImageUrl,
   markInstagramPosted,
+  type PostPlatformStatus,
 } from "../api/client";
 import { absoluteTime, relativeTime } from "../lib/time";
 import CopyableBox from "./CopyableBox";
@@ -12,15 +16,182 @@ import InstagramEngagementTracker from "./InstagramEngagementTracker";
 import { CardHeader } from "./PageHeader";
 import { SkeletonRows } from "./Skeleton";
 
-type Format = "square" | "portrait";
-type Fit = "pad" | "crop";
-type Bg = "black" | "white";
-
 type Props = {
   postId: string;
 };
 
+/** Instagram tab — automation-first since the Graph-API integration went live.
+ *
+ * Connected: shows the auto-post status (posted → permalink; pending → live
+ * countdown; failed → error + retry; never attempted → "Post now" queue button)
+ * plus the manual engagement tracker. The worker handles captions, alt text, and
+ * portrait crop/pad variants — nothing to copy.
+ *
+ * Not connected: falls back to the original copy-paste assist (caption, hashtags,
+ * sized-image download) with a pointer at Settings → Platforms.
+ */
 export default function InstagramPanel({ postId }: Props) {
+  const qc = useQueryClient();
+
+  const { data: igConn } = useQuery({
+    queryKey: ["instagram-status"],
+    queryFn: fetchInstagramStatus,
+  });
+
+  const { data: platforms, isLoading: platformsLoading } = useQuery({
+    queryKey: ["post-platforms", postId],
+    queryFn: () => fetchPostPlatforms(postId),
+    // Poll while an automated publish is queued so the tab flips to the permalink
+    // on its own when the worker fires (within a minute).
+    refetchInterval: (query) => {
+      const ig = (query.state.data as PostPlatformStatus[] | undefined)?.find(
+        (p) => p.platform === "instagram",
+      );
+      return ig?.status === "pending" ? 5000 : false;
+    },
+  });
+
+  // Legacy manual-marked state + fallback assist content both come from here.
+  const { data: fmt } = useQuery({
+    queryKey: ["instagram-format", postId],
+    queryFn: () => fetchInstagramFormat(postId),
+  });
+
+  const postNow = useMutation({
+    mutationFn: () => igPostNow(postId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["post-platforms", postId] });
+    },
+  });
+
+  if (igConn === undefined || platformsLoading) return <SkeletonRows count={4} height={36} />;
+
+  if (!igConn.connected) {
+    return <LegacyAssist postId={postId} />;
+  }
+
+  const ig = (platforms ?? []).find((p) => p.platform === "instagram");
+  const manuallyMarked = !ig && !!fmt?.posted_to_instagram_at;
+  const posted = ig?.status === "posted";
+  const pending = ig?.status === "pending";
+  const failed = ig?.status === "failed";
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <CardHeader
+        title="Instagram"
+        subtitle={
+          posted ? (
+            <span title={ig?.posted_at ? absoluteTime(ig.posted_at) : undefined}>
+              Posted automatically {ig?.posted_at ? relativeTime(ig.posted_at) : ""} as @
+              {igConn.account}
+            </span>
+          ) : pending ? (
+            "Queued — the worker posts it within a minute."
+          ) : failed ? (
+            "Automatic publish failed."
+          ) : manuallyMarked ? (
+            <span title={absoluteTime(fmt!.posted_to_instagram_at)}>
+              Marked posted manually {relativeTime(fmt!.posted_to_instagram_at)} (pre-automation)
+            </span>
+          ) : (
+            "Not on Instagram yet."
+          )
+        }
+        action={
+          posted && ig?.remote_url ? (
+            <a
+              href={ig.remote_url}
+              target="_blank"
+              rel="noreferrer"
+              className="fp-btn"
+              style={{ padding: "7px 12px", fontSize: 12, textDecoration: "none" }}
+            >
+              View post ↗
+            </a>
+          ) : pending ? (
+            <span
+              style={{
+                fontSize: 12,
+                color: "var(--text-dim)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <span className="fp-spinner" style={{ width: 12, height: 12 }} />
+              publishing…
+            </span>
+          ) : !manuallyMarked ? (
+            <button
+              onClick={() => postNow.mutate()}
+              className="fp-btn"
+              disabled={postNow.isPending}
+              style={{ padding: "7px 12px", fontSize: 12 }}
+              title="Publish through the automated pipeline (crop/pad variants included)"
+            >
+              {failed ? "Retry now" : "Post now"}
+            </button>
+          ) : undefined
+        }
+      />
+
+      {failed && ig?.error_message && (
+        <div
+          style={{
+            padding: "10px 12px",
+            borderRadius: 8,
+            background: "var(--danger-tint)",
+            border: "0.5px solid rgba(245, 156, 156, 0.25)",
+            color: "var(--danger)",
+            fontSize: 12,
+            lineHeight: 1.5,
+            wordBreak: "break-word",
+          }}
+        >
+          {ig.error_message}
+          {ig.retry_count > 0 && (
+            <span style={{ opacity: 0.7 }}> · {ig.retry_count} attempt(s)</span>
+          )}
+        </div>
+      )}
+
+      {pending && ig?.error_message && (
+        <div style={{ fontSize: 11, color: "var(--text-fade)" }}>
+          Last attempt: {ig.error_message}
+        </div>
+      )}
+
+      {postNow.isError && (
+        <div style={{ fontSize: 12, color: "var(--danger)" }}>
+          {(postNow.error as Error).message}
+        </div>
+      )}
+
+      {!ig && !manuallyMarked && (
+        <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.6 }}>
+          Captions, hashtags, performer mentions, and alt text are applied automatically.
+          Portraits taller than Instagram's limit get the crop/pad treatment from the Edit
+          tab's <strong>Instagram fit</strong> controls.
+        </div>
+      )}
+
+      {/* Engagement: auto-synced counts aren't wired yet, so the manual tracker stays —
+          it feeds the Activity feed regardless of how the photo got to IG. */}
+      {(posted || manuallyMarked) && <InstagramEngagementTracker postId={postId} />}
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Legacy copy-paste assist — only rendered when Instagram isn't connected.
+// -----------------------------------------------------------------------------
+
+type Format = "square" | "portrait";
+type Fit = "pad" | "crop";
+type Bg = "black" | "white";
+
+function LegacyAssist({ postId }: Props) {
   const qc = useQueryClient();
   const { data, isLoading, error } = useQuery({
     queryKey: ["instagram-format", postId],
@@ -80,6 +251,22 @@ export default function InstagramPanel({ postId }: Props) {
           </button>
         }
       />
+
+      <div
+        style={{
+          padding: "10px 12px",
+          borderRadius: 8,
+          background: "var(--teal-tint)",
+          border: "0.5px solid rgba(93,202,165,0.3)",
+          fontSize: 12,
+          color: "var(--text-dim)",
+          lineHeight: 1.5,
+        }}
+      >
+        FramePost can post to Instagram automatically now — connect it in{" "}
+        <strong>Settings → Platforms → Instagram</strong> and this tab replaces itself with
+        one-click publishing.
+      </div>
 
       {/* Caption + hashtags */}
       <div style={{ display: "grid", gap: 12 }}>
@@ -153,18 +340,11 @@ export default function InstagramPanel({ postId }: Props) {
           Hashtags as first comment (cleaner caption)
         </label>
 
-        {!data.signature && (
-          <div style={{ fontSize: 11, color: "var(--text-fade)" }}>
-            Tip: set <strong>Settings → General → Instagram signature</strong> to auto-append a
-            studio line (e.g. "📷 Darrell Miller Photography") to every caption.
-          </div>
-        )}
-
         {data.alt_text && (
           <>
             <BlockHeader
               label="Alt text"
-              help="Click to copy. Paste into IG's 'Write alt text' field (Advanced settings on upload). Accessibility + Google Image SEO."
+              help="Click to copy. Paste into IG's 'Write alt text' field (Advanced settings on upload)."
               length={data.alt_text.length}
             />
             <CopyableBox text={data.alt_text}>
@@ -187,13 +367,6 @@ export default function InstagramPanel({ postId }: Props) {
               </pre>
             </CopyableBox>
           </>
-        )}
-        {!data.alt_text && (
-          <div style={{ fontSize: 11, color: "var(--text-fade)" }}>
-            No alt text yet. Run AI Suggest from the Edit tab to generate one
-            (accessibility + Google Image SEO; sent automatically on Bluesky / Pixelfed /
-            Pinterest, copy-paste here for IG).
-          </div>
         )}
       </div>
 
@@ -288,8 +461,6 @@ export default function InstagramPanel({ postId }: Props) {
         </div>
       </div>
 
-      {/* Manual engagement tracker — only show after the user has marked the post as
-          posted to IG, since otherwise the section doesn't make sense. */}
       {posted && <InstagramEngagementTracker postId={postId} />}
     </div>
   );

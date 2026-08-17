@@ -14,7 +14,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from database import get_session
-from models import AppConfig, EngagementSnapshot, FlickrEngagement, Post, PostComment, PostPlatform, User
+from models import AppConfig, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
 from services import events, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
 from services.platforms import flickr
@@ -621,6 +621,63 @@ def get_instagram_image(
             "Cache-Control": "private, max-age=300",
         },
     )
+
+
+class IgPostNowResponse(BaseModel):
+    queued: bool
+    status: str
+
+
+@router.post("/{post_id}/instagram/post-now", response_model=IgPostNowResponse)
+def instagram_post_now(
+    post_id: str,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Queue this post for automated Instagram publish — replaces the old copy-paste
+    flow. We don't publish in-request: the portrait path uploads a staging variant and
+    waits out CDN propagation, which can blow past proxy timeouts. Instead the row goes
+    `pending` with next_retry_at=now and the worker's per-minute retry job fires it,
+    reusing the exact scheduler fanout path (variant pipeline included)."""
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    cred = db.execute(
+        select(PlatformCredential).where(PlatformCredential.platform == "instagram")
+    ).scalar_one_or_none()
+    if not cred or not cred.access_token:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Instagram isn't connected — Settings → Platforms → Instagram.",
+        )
+    if post.status not in ("posted", "late"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Post hasn't been published yet — Instagram fires automatically as part of "
+            "the scheduled fan-out.",
+        )
+    if not post.flickr_photo_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Instagram needs the photo on Flickr first (Meta ingests the image from the "
+            "Flickr rendition), and this post never made it there.",
+        )
+    pp = db.get(PostPlatform, (post_id, cred.id))
+    if pp and pp.status == "posted":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Already posted to Instagram.")
+    if not pp:
+        pp = PostPlatform(post_id=post_id, platform_id=cred.id)
+        db.add(pp)
+    pp.status = "pending"
+    pp.error_message = None
+    # Naive UTC to match the retry job's comparison clock.
+    pp.next_retry_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    events.log_event(
+        db, post_id=post_id, event_type="instagram_queued", actor="user",
+        details={"attempt": (pp.retry_count or 0) + 1},
+    )
+    db.commit()
+    return IgPostNowResponse(queued=True, status="pending")
 
 
 class InstagramMarkBody(BaseModel):

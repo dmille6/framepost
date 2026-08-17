@@ -275,6 +275,12 @@ export const instagramImageUrl = (
   bg: "black" | "white",
 ) => `/api/posts/${postId}/instagram-image?fmt=${fmt}&fit=${fit}&bg=${bg}`;
 
+/** Queue automated IG publish (replaces the copy-paste flow). Worker fires within a minute. */
+export const igPostNow = (postId: string) =>
+  apiFetch<{ queued: boolean; status: string }>(`/api/posts/${postId}/instagram/post-now`, {
+    method: "POST",
+  });
+
 export const markInstagramPosted = (postId: string, posted: boolean) =>
   apiFetch<Post>(`/api/posts/${postId}/instagram`, {
     method: "PATCH",
