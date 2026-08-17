@@ -71,10 +71,12 @@ def _require_app_keys() -> tuple[str, str]:
     return settings.flickr_api_key, settings.flickr_api_secret
 
 
-def begin_authorize(callback_url: str, *, perms: str = "write") -> RequestTokenResult:
+def begin_authorize(callback_url: str, *, perms: str = "delete") -> RequestTokenResult:
     """Step 1: get a request token from Flickr and build the authorize URL.
 
-    `perms` ∈ {read, write, delete}. We need write for upload; delete is overkill for v1.
+    `perms` ∈ {read, write, delete}. Delete (a superset of write) is required: the
+    re-post action and the IG staging-variant cleanup both call flickr.photos.delete —
+    the original write-only grant made those fail with Flickr error 99.
     """
     api_key, api_secret = _require_app_keys()
     client = OAuth1Client(
@@ -390,11 +392,22 @@ _NSID_RE = _re.compile(r"\b(\d+@N\d+)\b")
 _DISPLAY_SIZE_PREFERENCE = ("Large 1600", "Large 2048", "Large", "Medium 800", "Original")
 
 
-def get_display_image_url(db: Session, photo_id: str) -> str:
+def get_display_image_url(
+    db: Session, photo_id: str, *, preference: tuple[str, ...] | None = None
+) -> str:
     """Direct live.staticflickr.com JPEG URL for a photo we uploaded.
 
     Static URLs embed the photo secret, so they resolve for third-party fetchers
     regardless of the photo's Flickr privacy setting.
+
+    NOTE: never hand Meta an `_o` Original URL — their fetcher rejects that URI class
+    outright ("The media URI doesn't meet our requirements", verified 2026-08-17)
+    while accepting normal derivative URLs of the very same photo. Original stays the
+    last-resort fallback only.
+
+    preference: override the derivative ladder — staging variants are ≤1440px, so
+    "Large 2048" is their exact native pixels while the default's "Large 1600" would
+    downscale to 1200.
     """
     root = rest_call(db, "flickr.photos.getSizes", photo_id=photo_id)
     sizes = {
@@ -402,7 +415,7 @@ def get_display_image_url(db: Session, photo_id: str) -> str:
         for el in root.findall("sizes/size")
         if el.get("label") and el.get("source")
     }
-    for label in _DISPLAY_SIZE_PREFERENCE:
+    for label in preference or _DISPLAY_SIZE_PREFERENCE:
         if sizes.get(label):
             return sizes[label]
     if sizes:  # unexpected label set — take whatever Flickr offered rather than fail

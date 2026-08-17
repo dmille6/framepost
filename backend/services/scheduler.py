@@ -19,7 +19,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, image, retry, storage, tags, trending, watcher
+from services import backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -506,6 +506,9 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
     elif cred.platform == "instagram":
         # Meta ingests from a public URL rather than an upload, so we hand it the photo's
         # Flickr rendition — the canonical public copy, already up by the time fanout runs.
+        # Out-of-range aspect ratios get a crop/pad variant staged as a hidden Flickr
+        # photo instead (see services/ig_variant.py), honoring the per-post ig_fit /
+        # ig_crop_offset choices from the editor.
         if not post.flickr_photo_id:
             raise instagram.InstagramError(
                 "Instagram needs the photo on Flickr first — Meta fetches the image from a "
@@ -513,18 +516,51 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 "this post.",
                 permanent=True,
             )
-        if not instagram.aspect_ok(post.width or 0, post.height or 0):
-            raise instagram.InstagramError(
-                f"aspect ratio {post.width}×{post.height} is outside Instagram's "
-                "4:5–1.91:1 feed range — use the Instagram assist tab for this one "
-                "(auto-padding via a staging album is the planned fix).",
-                permanent=True,
+        floor, ratio_key, floor_tested = ig_variant.supported_floor(db)
+        ratio = (post.width / post.height) if post.width and post.height else None
+        fit = post.ig_fit or "crop"
+        pp0 = db.get(PostPlatform, (post.id, cred.id))
+        staging_id: str | None = None
+
+        if ig_variant.needs_transform(ratio, floor):
+            staging_id, image_url = ig_variant.ensure_staged(
+                db, post, pp0, platform_id=cred.id,
+                ratio_key=ratio_key, fit=fit, offset=post.ig_crop_offset,
             )
-        image_url = flickr.get_display_image_url(db, post.flickr_photo_id)
-        result = instagram.post_photo(db=db, image_url=image_url, caption=text, alt_text=alt)
+        else:
+            image_url = flickr.get_display_image_url(db, post.flickr_photo_id)
+
+        try:
+            result = instagram.post_photo(db=db, image_url=image_url, caption=text, alt_text=alt)
+        except instagram.InstagramError as e:
+            # The 3:4 probe: we optimistically assume Meta's 2025 grid change reached the
+            # API. The first aspect rejection settles it — record 4:5, regenerate, retry
+            # once. Costs one wasted upload exactly once per install.
+            if ratio_key == "3:4" and ig_variant.is_aspect_error(e) and ratio is not None \
+                    and ratio < instagram.MIN_ASPECT - ig_variant.EPS:
+                log.info("post %s: Meta rejected 3:4 — recording 4:5 floor and retrying",
+                         post.id[:8])
+                ig_variant.record_floor(db, "4:5")
+                staging_id, image_url = ig_variant.ensure_staged(
+                    db, post, db.get(PostPlatform, (post.id, cred.id)),
+                    platform_id=cred.id, ratio_key="4:5", fit=fit,
+                    offset=post.ig_crop_offset, force=True,
+                )
+                result = instagram.post_photo(
+                    db=db, image_url=image_url, caption=text, alt_text=alt
+                )
+            else:
+                raise
+        else:
+            if staging_id and ratio_key == "3:4" and not floor_tested:
+                ig_variant.record_floor(db, "3:4")
+
         remote_id, remote_url = result["remote_id"], result["url"]
         # Feeds the manual engagement tracker + the assist tab's "already posted" state.
         post.posted_to_instagram_at = fired_at
+        # Staging variant served its purpose — pull it off Flickr (sweep catches stragglers).
+        if staging_id:
+            ig_variant.cleanup_staged(db, db.get(PostPlatform, (post.id, cred.id)))
     else:
         raise RuntimeError(f"unsupported platform: {cred.platform}")
 
@@ -885,6 +921,12 @@ def daily_cleanup() -> None:
             log.info("daily cleanup: purged %d reel mp4(s)", n)
         except Exception:
             log.exception("reel purge failed")
+            db.rollback()
+
+        try:
+            ig_variant.purge_orphans(db)
+        except Exception:
+            log.exception("ig_variant orphan sweep failed")
             db.rollback()
 
         try:

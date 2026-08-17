@@ -82,6 +82,10 @@ def sync_recent_photos(db: Session, *, per_page: int = 500, max_pages: int = 4) 
             if not fid:
                 continue
             machine_tags = ph.get("machine_tags") or ""
+            # Hidden IG staging variants are transient re-uploads of photos we already
+            # track — caching them would trip the Flickr-side duplicate checks.
+            if "framepost:ig_variant=" in machine_tags:
+                continue
             title = ph.get("title") or ""
             url = ph.get("url_o") or ""
             try:

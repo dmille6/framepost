@@ -13,6 +13,7 @@ import {
   getPostGroups,
   getPostPerformers,
   getPostProfiles,
+  igPreviewUrl,
   listAlbums,
   listConnectedPlatforms,
   listGroups,
@@ -48,6 +49,8 @@ export type EditorChanges = {
   show: string | null;
   city: string | null;
   alt_text: string | null;
+  ig_fit: "crop" | "pad" | "pad_blur" | null;
+  ig_crop_offset: number | null;
 };
 
 type Props = {
@@ -73,6 +76,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [city, setCity] = useState(post.city ?? "");
   const [altText, setAltText] = useState(post.alt_text ?? "");
   const [venue, setVenue] = useState<Venue | null>(null);
+  // IG auto-transform: fit mode + crop-window nudge. Offset null = face-anchored auto.
+  const [igFit, setIgFit] = useState<"crop" | "pad" | "pad_blur">(post.ig_fit ?? "crop");
+  const [igOffset, setIgOffset] = useState<number | null>(post.ig_crop_offset);
+  const [igSlider, setIgSlider] = useState<number>(post.ig_crop_offset ?? 0.5);
 
   // Venue lookup — fetch the full venue list once, then resolve by ID. List is small
   // (typically <50 venues per user) so client-side resolution is fine.
@@ -192,7 +199,9 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     !setsEqual(groupIds, new Set(postGroups)) ||
     !setsEqual(profileIds, new Set(postProfiles)) ||
     performers.map((p) => p.id).join(",") !== postPerformers.map((p) => p.id).join(",") ||
-    !setsEqual(targetSet, expectedTargetSet);
+    !setsEqual(targetSet, expectedTargetSet) ||
+    igFit !== (post.ig_fit ?? "crop") ||
+    igOffset !== post.ig_crop_offset;
 
   function handleSave() {
     // If user's selection matches what defaults would produce, send null to mean "use defaults".
@@ -215,11 +224,18 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       show: show.trim() || null,
       city: city.trim() || null,
       alt_text: altText.trim() || null,
+      ig_fit: igFit === "crop" ? null : igFit,
+      ig_crop_offset: igOffset,
     });
   }
 
   const mp = post.width && post.height ? ((post.width * post.height) / 1_000_000).toFixed(1) : null;
   const captured = post.captured_at ? new Date(post.captured_at).toLocaleString() : "—";
+  // IG feed range is 4:5 … 1.91:1 (the worker probes whether Meta quietly allows 3:4).
+  // Anything outside gets the auto-transform, so surface the fit controls.
+  const igRatio = post.width && post.height ? post.width / post.height : null;
+  const igNeedsTransform =
+    igRatio !== null && (igRatio < 0.8 - 0.005 || igRatio > 1.91 + 0.005);
 
   function addTagInline(tag: string) {
     const parts = tags.split(",").map((t) => t.trim()).filter(Boolean);
@@ -510,6 +526,105 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
                 </label>
               );
             })}
+          </div>
+        </Field>
+      )}
+
+      {igNeedsTransform && targetSet.has("instagram") && (
+        <Field
+          label="Instagram fit"
+          hint="This photo is taller than Instagram's feed limit — choose how the auto-post squeezes it in."
+        >
+          <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+            <img
+              key={`${igFit}-${igFit === "crop" ? igOffset ?? "auto" : "na"}`}
+              src={igPreviewUrl(post.id, igFit, igFit === "crop" ? igOffset : null)}
+              alt="Instagram preview"
+              style={{
+                width: 140,
+                borderRadius: 8,
+                border: "0.5px solid var(--border-strong)",
+                background: "var(--surface)",
+                flexShrink: 0,
+              }}
+            />
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {(
+                  [
+                    ["crop", "Smart crop"],
+                    ["pad", "Pad black"],
+                    ["pad_blur", "Pad blur"],
+                  ] as const
+                ).map(([value, label]) => {
+                  const active = igFit === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setIgFit(value)}
+                      style={{
+                        padding: "6px 12px",
+                        border: `0.5px solid ${active ? "rgba(93,202,165,0.3)" : "var(--border-strong)"}`,
+                        background: active ? "var(--teal-tint)" : "transparent",
+                        color: active ? "var(--text)" : "var(--text-dim)",
+                        borderRadius: 999,
+                        fontSize: 12,
+                        fontWeight: active ? 500 : 400,
+                        cursor: "pointer",
+                        transition: "background 120ms ease, border-color 120ms ease",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {igFit === "crop" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(igSlider * 100)}
+                    onChange={(e) => setIgSlider(Number(e.target.value) / 100)}
+                    onPointerUp={() => setIgOffset(igSlider)}
+                    onKeyUp={() => setIgOffset(igSlider)}
+                    style={{ accentColor: "var(--teal)", width: "100%" }}
+                    aria-label="Crop window position (top to bottom)"
+                  />
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontSize: 11,
+                      color: "var(--text-dim)",
+                    }}
+                  >
+                    <span>Top</span>
+                    <span>
+                      {igOffset === null ? (
+                        "Auto — face detect"
+                      ) : (
+                        <>
+                          {Math.round(igOffset * 100)}%{" "}
+                          <a
+                            onClick={() => {
+                              setIgOffset(null);
+                              setIgSlider(0.5);
+                            }}
+                            style={{ cursor: "pointer", color: "var(--teal)" }}
+                          >
+                            reset to auto
+                          </a>
+                        </>
+                      )}
+                    </span>
+                    <span>Bottom</span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </Field>
       )}

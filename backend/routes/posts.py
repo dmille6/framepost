@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
-from services import events, faces, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
+from services import events, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -85,6 +85,8 @@ class PostOut(BaseModel):
     show: str | None = None
     city: str | None = None
     alt_text: str | None = None
+    ig_fit: str | None = None
+    ig_crop_offset: float | None = None
     created_at: datetime
 
     class Config:
@@ -133,6 +135,9 @@ class PostUpdate(BaseModel):
     show: str | None = Field(default=None, max_length=200)
     city: str | None = Field(default=None, max_length=200)
     alt_text: str | None = Field(default=None, max_length=2000)
+    # IG auto-transform (0015): fit mode + crop-window nudge from the editor slider.
+    ig_fit: str | None = Field(default=None, pattern="^(crop|pad|pad_blur)$")
+    ig_crop_offset: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 @router.post(
@@ -437,6 +442,38 @@ def get_face_center(
     if result is None:
         return FaceCenter(x=None, y=None, detected=False)
     return FaceCenter(x=result[0], y=result[1], detected=True)
+
+
+@router.get("/{post_id}/ig-preview")
+def get_ig_crop_preview(
+    post_id: str,
+    fit: str = Query("crop", regex="^(crop|pad|pad_blur)$"),
+    offset: float | None = Query(None, ge=0.0, le=1.0),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Live preview of the auto-transform the worker will apply at Instagram fanout
+    time — drives the crop slider in the metadata editor. offset=None uses the same
+    face-anchored auto position the worker would. X-IG-Ratio names the target ratio
+    (3:4 vs 4:5 — depends on what the runtime probe has learned about Meta's floor)."""
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    try:
+        data, ratio_key = ig_variant.render_preview(db, post, fit=fit, offset=offset)
+    except FileNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    except Exception as e:
+        log.exception("ig-preview render failed for %s", post_id)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"render failed: {e}")
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={
+            "X-IG-Ratio": ratio_key,
+            "Cache-Control": "private, max-age=60",
+        },
+    )
 
 
 class InstagramFormat(BaseModel):

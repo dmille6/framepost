@@ -69,6 +69,11 @@ class Post(Base):
     show = Column(Text)
     city = Column(Text)
     alt_text = Column(Text)
+    # Instagram auto-transform (0015): how to fit out-of-range aspect ratios.
+    # ig_fit: crop | pad | pad_blur, null = crop. ig_crop_offset: 0..1 window position
+    # along the cropped axis, null = face-anchored auto.
+    ig_fit = Column(String)
+    ig_crop_offset = Column(Float)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
@@ -236,6 +241,10 @@ class PostPlatform(Base):
     error_message = Column(Text)
     retry_count = Column(Integer, nullable=False, server_default="0")
     next_retry_at = Column(DateTime)
+    # Hidden Flickr staging photo for the IG variant, "photo_id|ratio_key". Set before
+    # the publish attempt (survives rollback) so retries reuse the upload and the daily
+    # orphan sweep can tell live from abandoned. Cleared after successful publish.
+    staging_remote_id = Column(Text)
 
 
 class AppConfig(Base):

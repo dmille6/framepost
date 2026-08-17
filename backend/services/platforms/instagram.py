@@ -301,9 +301,25 @@ def post_photo(
     alt = (alt_text or "").strip()
     if alt:
         data["alt_text"] = alt[:MAX_ALT_TEXT]
-    with _client() as c:
-        r = c.post(f"/{ig_user_id}/media", data=data)
+    # "Media download has failed" is Meta's fetcher racing CDN propagation of image_url
+    # (bites freshly-uploaded staging variants). It's transient despite the 400 — retry
+    # in-line with a beat between attempts before giving the retry queue its turn.
+    for fetch_attempt in range(3):
+        with _client() as c:
+            r = c.post(f"/{ig_user_id}/media", data=data)
+        if r.status_code < 400:
+            break
+        if "download" in _error_text(r).lower() and fetch_attempt < 2:
+            log.info("Meta couldn't fetch image_url (attempt %d) — waiting for CDN", fetch_attempt + 1)
+            time.sleep(10.0)
+            continue
+        break
     if r.status_code >= 400:
+        if "download" in _error_text(r).lower():
+            raise InstagramError(
+                f"Meta couldn't fetch the image URL after retries: {_error_text(r)}",
+                permanent=False,  # CDN propagation — worth the retry queue
+            )
         _raise_api_error(r, "media container creation")
     container_id = r.json().get("id")
     if not container_id:

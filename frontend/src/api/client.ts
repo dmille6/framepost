@@ -112,6 +112,9 @@ export type Post = {
   show: string | null;
   city: string | null;
   alt_text: string | null;
+  // IG auto-transform (0015): fit mode + crop-window nudge. null = crop / face-auto.
+  ig_fit: "crop" | "pad" | "pad_blur" | null;
+  ig_crop_offset: number | null;
   created_at: string;
 };
 
@@ -210,10 +213,20 @@ export type PostUpdate = Partial<{
   show: string | null;
   city: string | null;
   alt_text: string | null;
+  ig_fit: "crop" | "pad" | "pad_blur" | null;
+  ig_crop_offset: number | null;
 }>;
 
 export const updatePost = (id: string, body: PostUpdate) =>
   apiFetch<Post>(`/api/posts/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+
+/** Live preview URL for the Instagram auto-transform (crop slider in the editor).
+ *  Plain <img src> — auth rides on the session cookie. */
+export function igPreviewUrl(id: string, fit: string, offset: number | null): string {
+  const params = new URLSearchParams({ fit });
+  if (offset !== null) params.set("offset", offset.toFixed(3));
+  return `/api/posts/${id}/ig-preview?${params}`;
+}
 
 export const deletePost = (id: string) =>
   apiFetch<{ ok: true; post_id: string; was_on_flickr: boolean }>(
