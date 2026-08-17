@@ -383,6 +383,33 @@ import re as _re
 _NSID_RE = _re.compile(r"\b(\d+@N\d+)\b")
 
 
+# Rendition preference for cross-platform re-hosting (e.g. Instagram's image_url, which
+# Meta fetches server-side and caps at 8 MB). Large 1600 comfortably beats IG's 1080-px
+# downscale target; originals from 60-70 MP bodies can blow the size cap, so they're the
+# last resort.
+_DISPLAY_SIZE_PREFERENCE = ("Large 1600", "Large 2048", "Large", "Medium 800", "Original")
+
+
+def get_display_image_url(db: Session, photo_id: str) -> str:
+    """Direct live.staticflickr.com JPEG URL for a photo we uploaded.
+
+    Static URLs embed the photo secret, so they resolve for third-party fetchers
+    regardless of the photo's Flickr privacy setting.
+    """
+    root = rest_call(db, "flickr.photos.getSizes", photo_id=photo_id)
+    sizes = {
+        el.get("label"): el.get("source")
+        for el in root.findall("sizes/size")
+        if el.get("label") and el.get("source")
+    }
+    for label in _DISPLAY_SIZE_PREFERENCE:
+        if sizes.get(label):
+            return sizes[label]
+    if sizes:  # unexpected label set — take whatever Flickr offered rather than fail
+        return next(iter(sizes.values()))
+    raise FlickrError(f"flickr.photos.getSizes returned no sizes for {photo_id}")
+
+
 def resolve_group_id(db: Session, url_or_id: str) -> str:
     """Return a Flickr group NSID from any of:
     - bare NSID like '512395@N21'

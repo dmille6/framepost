@@ -5,15 +5,19 @@ import { useSearchParams } from "react-router-dom";
 import {
   ApiError,
   type BlueskyStatus,
+  type InstagramStatus,
   type PinterestStatus,
   type PixelfedStatus,
   connectBluesky,
+  connectInstagram,
   disconnectBluesky,
+  disconnectInstagram,
   disconnectPinterest,
   disconnectPixelfed,
   fetchAppConfig,
   fetchBlueskyStatus,
   fetchFlickrStatus,
+  fetchInstagramStatus,
   fetchPinterestBoards,
   fetchPinterestStatus,
   fetchPixelfedStatus,
@@ -24,6 +28,7 @@ import {
   setPinterestDefaultBoard,
   setPlatformDefaultTarget,
   testBluesky,
+  testInstagram,
 } from "../api/client";
 import { CardHeader } from "../components/PageHeader";
 import { SkeletonRows } from "../components/Skeleton";
@@ -71,6 +76,7 @@ export default function SettingsPlatforms() {
       )}
 
       <FlickrPanel />
+      <InstagramPanel />
       <BlueskyPanel />
       <PixelfedPanel />
       <PinterestPanel />
@@ -106,6 +112,190 @@ function FlickrPanel() {
         }
       />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Instagram — API publishing via a pasted Instagram-Login long-lived token.
+// The copy-paste assist tab stays available for posts the API can't take
+// (portrait aspect ratios, carousels with per-image tweaks, etc.).
+// ---------------------------------------------------------------------------
+function InstagramPanel() {
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery({
+    queryKey: ["instagram-status"],
+    queryFn: fetchInstagramStatus,
+  });
+
+  const [token, setToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  const connect = useMutation({
+    mutationFn: (access_token: string) => connectInstagram(access_token),
+    onSuccess: () => {
+      setToken("");
+      setError(null);
+      void qc.invalidateQueries({ queryKey: ["instagram-status"] });
+    },
+    onError: (e) => {
+      setError(e instanceof ApiError ? e.message : "Connection failed");
+    },
+  });
+
+  const disconnect = useMutation({
+    mutationFn: () => disconnectInstagram(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["instagram-status"] }),
+  });
+
+  const test = useMutation({
+    mutationFn: () => testInstagram(),
+    onSuccess: (r) => {
+      const quota =
+        typeof r.quota_usage === "number" && typeof r.quota_total === "number"
+          ? ` API quota: ${r.quota_usage}/${r.quota_total} posts in the last 24h.`
+          : "";
+      const expiry = r.token_expires
+        ? ` Token auto-renews; current expiry ${relativeTime(r.token_expires)}.`
+        : "";
+      setTestResult({ kind: "ok", text: `Connected as @${r.account}.${quota}${expiry}` });
+    },
+    onError: (e) => setTestResult({ kind: "error", text: e instanceof Error ? e.message : "Test failed" }),
+  });
+
+  const toggleDefault = useMutation({
+    mutationFn: (next: boolean) => setPlatformDefaultTarget("instagram", next),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["instagram-status"] }),
+  });
+
+  if (isLoading) return <div className="fp-card"><SkeletonRows count={3} /></div>;
+  const connected = data?.connected ?? false;
+
+  return (
+    <div className="fp-card">
+      <CardHeader
+        title="Instagram"
+        subtitle={connected
+          ? <InstagramSubtitle status={data!} />
+          : "Auto-publish landscape/square photos via the Instagram API (posts use the Flickr rendition, so photos must also go to Flickr). Portrait shots still use the assist tab."}
+      />
+
+      {!connected ? (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!token.trim()) return;
+            connect.mutate(token.trim());
+          }}
+          style={{ display: "grid", gap: 10 }}
+        >
+          <Field
+            label="Long-lived access token"
+            hint={
+              <>
+                Create a Business-type app at{" "}
+                <a href="https://developers.facebook.com/apps" target="_blank" rel="noreferrer">
+                  developers.facebook.com
+                </a>
+                , add the Instagram product ("API setup with Instagram business login"), add your
+                account under Generate access tokens, and paste the token here. Needs the{" "}
+                <code>instagram_business_basic</code> + <code>instagram_business_content_publish</code>{" "}
+                permissions and a professional (Business/Creator) account. FramePost renews it
+                automatically from then on.
+              </>
+            }
+          >
+            <input
+              className="fp-input"
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="IGAA…"
+              autoComplete="off"
+            />
+          </Field>
+          {error && <div style={{ color: "var(--danger)", fontSize: 13 }}>{error}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button type="submit" className="fp-btn" disabled={connect.isPending || !token.trim()}>
+              {connect.isPending && <span className="fp-spinner" />}
+              {connect.isPending ? "Connecting" : "Connect Instagram"}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          <DefaultTargetToggle
+            value={data?.default_target ?? true}
+            onToggle={(v) => toggleDefault.mutate(v)}
+            label="Auto-post new scheduled photos to Instagram (landscape/square only)"
+          />
+          {testResult && (
+            <div
+              style={{
+                fontSize: 12,
+                padding: "8px 12px",
+                borderRadius: 8,
+                background: testResult.kind === "ok" ? "var(--teal-tint)" : "var(--danger-tint)",
+                color: testResult.kind === "ok" ? "var(--teal)" : "var(--danger)",
+              }}
+            >
+              {testResult.text}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            {data?.profile_url && (
+              <a
+                href={data.profile_url}
+                target="_blank"
+                rel="noreferrer"
+                className="fp-btn-ghost"
+                style={{ padding: "7px 12px", fontSize: 13 }}
+              >
+                View profile ↗
+              </a>
+            )}
+            <button className="fp-btn-ghost" onClick={() => test.mutate()} disabled={test.isPending}>
+              {test.isPending ? "Testing" : "Test connection"}
+            </button>
+            <button
+              className="fp-btn-danger"
+              onClick={() => {
+                if (confirm("Disconnect Instagram? FramePost will stop auto-posting to Instagram; the copy-paste assist tab keeps working.")) {
+                  disconnect.mutate();
+                }
+              }}
+              disabled={disconnect.isPending}
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InstagramSubtitle({ status }: { status: InstagramStatus }) {
+  return (
+    <span>
+      Connected as <strong>@{status.account}</strong>
+      {status.last_success_at && (
+        <>
+          {" · "}
+          <span title={absoluteTime(status.last_success_at)}>
+            last success {relativeTime(status.last_success_at)}
+          </span>
+        </>
+      )}
+      {status.token_expires && (
+        <>
+          {" · "}
+          <span title={absoluteTime(status.token_expires)}>
+            token renews {relativeTime(status.token_expires)}
+          </span>
+        </>
+      )}
+    </span>
   );
 }
 

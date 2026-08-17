@@ -16,7 +16,7 @@ from config import settings
 from database import get_session
 from models import PlatformCredential, Post, User
 from routes.auth import current_user
-from services.platforms import bluesky, flickr, pinterest, pixelfed
+from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
 log = logging.getLogger("framepost.platforms")
 router = APIRouter()
@@ -469,6 +469,77 @@ def pinterest_set_default_board(
 
 
 # -----------------------------------------------------------------------------
+# Instagram — Instagram API with Instagram Login (pasted long-lived token)
+# -----------------------------------------------------------------------------
+# No OAuth dance: for a single-user app the Meta dashboard's "Generate token" button
+# produces the long-lived token directly (see services/platforms/instagram.py docstring),
+# so connect is a simple paste-and-validate like Bluesky.
+
+
+class InstagramConnectBody(BaseModel):
+    access_token: str = Field(min_length=20, max_length=2000)
+
+
+@router.get("/instagram/status")
+def instagram_status(
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+) -> dict[str, Any]:
+    return instagram.current_status(db)
+
+
+@router.post("/instagram/connect")
+def instagram_connect(
+    body: InstagramConnectBody,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    try:
+        cred = instagram.connect(db, access_token=body.access_token)
+    except instagram.InstagramError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST if e.permanent else status.HTTP_502_BAD_GATEWAY,
+            str(e),
+        )
+    return {
+        "ok": True,
+        "account": cred.account_name,
+        "connected_at": cred.connected_at.isoformat() if cred.connected_at else None,
+    }
+
+
+@router.post("/instagram/disconnect")
+def instagram_disconnect(
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    return {"ok": True, "removed": instagram.disconnect(db)}
+
+
+@router.post("/instagram/test")
+def instagram_test(
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Verify the token is alive and report the rolling-24h publish quota. Doesn't post."""
+    try:
+        quota = instagram.publishing_quota(db)
+        status_info = instagram.current_status(db)
+    except instagram.InstagramError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST if e.permanent else status.HTTP_502_BAD_GATEWAY,
+            str(e),
+        )
+    return {
+        "ok": True,
+        "account": status_info.get("account"),
+        "quota_usage": quota.get("quota_usage"),
+        "quota_total": quota.get("quota_total"),
+        "token_expires": status_info.get("token_expires"),
+    }
+
+
+# -----------------------------------------------------------------------------
 # Cross-platform per-post default-target toggle
 # -----------------------------------------------------------------------------
 
@@ -518,7 +589,7 @@ def list_connected_platforms(
 
     rows = db.execute(
         select(PlatformCredential).where(
-            PlatformCredential.platform.in_(("bluesky", "pixelfed", "mastodon"))
+            PlatformCredential.platform.in_(("bluesky", "pixelfed", "mastodon", "instagram"))
         )
     ).scalars().all()
     for row in rows:

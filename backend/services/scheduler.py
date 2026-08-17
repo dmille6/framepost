@@ -21,7 +21,7 @@ from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
 from services import backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, image, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
-from services.platforms import bluesky, flickr, pinterest, pixelfed
+from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("framepost.worker")
@@ -503,6 +503,28 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
             alt_text=alt,
         )
         remote_id, remote_url = result["remote_id"], result["url"]
+    elif cred.platform == "instagram":
+        # Meta ingests from a public URL rather than an upload, so we hand it the photo's
+        # Flickr rendition — the canonical public copy, already up by the time fanout runs.
+        if not post.flickr_photo_id:
+            raise instagram.InstagramError(
+                "Instagram needs the photo on Flickr first — Meta fetches the image from a "
+                "public URL and FramePost uses the Flickr rendition. Flickr was skipped for "
+                "this post.",
+                permanent=True,
+            )
+        if not instagram.aspect_ok(post.width or 0, post.height or 0):
+            raise instagram.InstagramError(
+                f"aspect ratio {post.width}×{post.height} is outside Instagram's "
+                "4:5–1.91:1 feed range — use the Instagram assist tab for this one "
+                "(auto-padding via a staging album is the planned fix).",
+                permanent=True,
+            )
+        image_url = flickr.get_display_image_url(db, post.flickr_photo_id)
+        result = instagram.post_photo(db=db, image_url=image_url, caption=text, alt_text=alt)
+        remote_id, remote_url = result["remote_id"], result["url"]
+        # Feeds the manual engagement tracker + the assist tab's "already posted" state.
+        post.posted_to_instagram_at = fired_at
     else:
         raise RuntimeError(f"unsupported platform: {cred.platform}")
 
@@ -563,7 +585,7 @@ def fanout_to_platforms(
     if targets is None:
         creds = db.execute(
             select(PlatformCredential).where(
-                PlatformCredential.platform.in_(("bluesky", "pixelfed", "pinterest")),
+                PlatformCredential.platform.in_(("bluesky", "pixelfed", "pinterest", "instagram")),
                 PlatformCredential.default_target == 1,
             )
         ).scalars().all()
@@ -815,6 +837,18 @@ def weekly_trending_refresh() -> None:
         db.close()
 
 
+def daily_instagram_token_refresh() -> None:
+    """Keep the Instagram long-lived token alive even through quiet stretches — lazy
+    refresh inside post_photo only fires when something is actually being posted."""
+    db = SessionLocal()
+    try:
+        instagram.refresh_stale_token(db)
+    except Exception:
+        log.exception("daily instagram token refresh failed")
+    finally:
+        db.close()
+
+
 def daily_cleanup() -> None:
     """Daily cron job — runs at app_config.cleanup_time (default 03:00 UTC):
        1. SQLite hot backup to /mnt/photo-data/backup/.
@@ -889,6 +923,8 @@ def main() -> int:
     scheduler.add_job(submit_due_groups, "interval", minutes=1, id="submit_due_groups")
     scheduler.add_job(retry_due_platform_posts, "interval", minutes=1, id="retry_platform_posts")
     scheduler.add_job(daily_flickr_sync, "cron", hour=flickr_h, minute=flickr_m, id="daily_flickr_sync")
+    scheduler.add_job(daily_instagram_token_refresh, "cron", hour=5, minute=30,
+                      id="instagram_token_refresh")
     scheduler.add_job(daily_cleanup, "cron", hour=cleanup_h, minute=cleanup_m, id="daily_cleanup")
     scheduler.add_job(weekly_trending_refresh, "cron", day_of_week="mon", hour=2, minute=0,
                       id="weekly_trending_refresh")

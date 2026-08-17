@@ -596,6 +596,40 @@ export const setPinterestDefaultBoard = (board_id: string, board_name: string) =
   );
 
 // ---- shared default-target toggle ----
+// ---- Instagram (API publishing via Instagram Login token) ----
+export type InstagramStatus = {
+  connected: boolean;
+  account: string | null;
+  account_type?: string | null;
+  profile_url?: string | null;
+  connected_at?: string | null;
+  token_expires?: string | null;
+  last_success_at?: string | null;
+  last_error?: string | null;
+  default_target?: boolean;
+};
+
+export const fetchInstagramStatus = () =>
+  apiFetch<InstagramStatus>("/api/platforms/instagram/status");
+
+export const connectInstagram = (access_token: string) =>
+  apiFetch<{ ok: true; account: string; connected_at: string | null }>(
+    "/api/platforms/instagram/connect",
+    { method: "POST", body: JSON.stringify({ access_token }) },
+  );
+
+export const disconnectInstagram = () =>
+  apiFetch<{ ok: true; removed: boolean }>("/api/platforms/instagram/disconnect", { method: "POST" });
+
+export const testInstagram = () =>
+  apiFetch<{
+    ok: true;
+    account: string | null;
+    quota_usage: number | null;
+    quota_total: number | null;
+    token_expires: string | null;
+  }>("/api/platforms/instagram/test", { method: "POST", body: JSON.stringify({}) });
+
 export const setPlatformDefaultTarget = (platform: string, default_target: boolean) =>
   apiFetch<{ ok: true; default_target: boolean }>(
     `/api/platforms/${platform}/default-target`,
