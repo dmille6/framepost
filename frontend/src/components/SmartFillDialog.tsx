@@ -76,7 +76,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 4 }}>
             {mode === "sequential"
               ? `Distribute ${postIds.length} draft${postIds.length === 1 ? "" : "s"} across the calendar at a chosen cadence. The one-post-per-hour rule applies — clashes auto-bump to the next day.`
-              : `Scatter ${postIds.length} draft${postIds.length === 1 ? "" : "s"} randomly across the next 6 months at popular post times (9-11 AM / 6-8 PM local). Already-scheduled days are skipped.`}
+              : `Scatter ${postIds.length} draft${postIds.length === 1 ? "" : "s"} randomly across the next 12 months at popular post times (9-11 AM / 6-8 PM local). Already-scheduled days are skipped.`}
           </div>
         </div>
 
@@ -126,7 +126,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
               lineHeight: 1.6,
             }}
           >
-            Each post lands on a random unoccupied day in the next 180 days, at one of these
+            Each post lands on a random unoccupied day in the next 365 days, at one of these
             popular local hours: <strong>9 AM, 10 AM, 11 AM, 6 PM, 7 PM, 8 PM</strong>. Schedule
             fuzz still applies so post times look natural. Re-running this gives different dates.
           </div>

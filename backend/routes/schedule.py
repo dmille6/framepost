@@ -269,7 +269,7 @@ class SmartFillRequest(BaseModel):
     skip_weekends: bool = False
     confirm: bool = False  # dry-run unless True
     # When "random_scatter", ignore start_date/cadence/time_of_day and instead pick random
-    # unoccupied days in the next 180 days at popular post times (9-11am / 6-8pm local).
+    # unoccupied days in the next 365 days at popular post times (9-11am / 6-8pm local).
     mode: str = Field(default="sequential", pattern=r"^(sequential|random_scatter)$")
 
 
@@ -319,15 +319,15 @@ def _next_eligible(
 # windows that map to typical IG/Flickr engagement spikes — pre-work browse, lunch break,
 # after-work scroll, evening downtime.
 _POPULAR_HOURS = [9, 10, 11, 18, 19, 20]
-_SCATTER_HORIZON_DAYS = 180
+_SCATTER_HORIZON_DAYS = 365
 
 
 def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFillResponse:
-    """Scatter the selected posts across the next 6 months at popular local-time slots.
+    """Scatter the selected posts across the next 12 months at popular local-time slots.
 
     Algorithm:
       1. Validate posts (same eligibility check as the sequential path).
-      2. Find days in [tomorrow, +180 days] that don't already have any scheduled post.
+      2. Find days in [tomorrow, +365 days] that don't already have any scheduled post.
       3. Shuffle, pick N free days.
       4. For each, pick a random popular hour from _POPULAR_HOURS, convert local→UTC.
       5. Apply per-hour collision check; fall back to another hour or another day if taken.
@@ -431,7 +431,7 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
                     title=post.title,
                     original_filename=post.original_filename,
                     scheduled_at=None,
-                    skipped_reason="no free popular-hour slot found in the next 180 days",
+                    skipped_reason="no free popular-hour slot found in the next 365 days",
                 )
             )
             continue
