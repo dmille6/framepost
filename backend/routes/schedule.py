@@ -328,7 +328,7 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
     Algorithm:
       1. Validate posts (same eligibility check as the sequential path).
       2. Find days in [tomorrow, +365 days] that don't already have any scheduled post.
-      3. Shuffle, pick N free days.
+      3. Stratify: one segment of the horizon per post, one random day per segment.
       4. For each, pick a random popular hour from _POPULAR_HOURS, convert local→UTC.
       5. Apply per-hour collision check; fall back to another hour or another day if taken.
       6. Apply the configured fuzz so multiple scatter calls don't all land at :00:00.
@@ -381,7 +381,25 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
             eligible_count, len(free_days),
         )
 
-    random.shuffle(free_days)
+    # Stratified pick instead of a plain shuffle: split the chronological free-day list
+    # into one segment per post and draw a random day from each segment. A 40-shot batch
+    # then spreads ~evenly across the whole horizon (segment width ± jitter) instead of
+    # producing the same-week clumps uniform draws are prone to — important because a
+    # whole show's photos arrive as one batch and shouldn't land bunched together. The
+    # picks are shuffled afterwards so scheduling order carries no show-chronology
+    # signal; unpicked days follow as spares for the (rare) slot-collision fallback.
+    free_days.sort()
+    if eligible_count and free_days:
+        n = min(eligible_count, len(free_days))
+        bounds = [round(i * len(free_days) / n) for i in range(n + 1)]
+        picks = [random.choice(free_days[a:b]) for a, b in zip(bounds, bounds[1:]) if b > a]
+        picked_set = set(picks)
+        spares = [d for d in free_days if d not in picked_set]
+        random.shuffle(picks)
+        random.shuffle(spares)
+        free_days = picks + spares
+    else:
+        random.shuffle(free_days)
     # Reserve set of (date, hour) slots taken during THIS scatter run so we don't double-book.
     used_local_slots: set[tuple[date_type, int]] = set()
 
