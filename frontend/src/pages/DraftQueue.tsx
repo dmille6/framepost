@@ -18,6 +18,7 @@ import {
   uploadFileWithProgress,
 } from "../api/client";
 import type { EditorChanges } from "../components/MetadataEditor";
+
 import BulkEditDialog from "../components/BulkEditDialog";
 import DraftCard from "../components/DraftCard";
 import EmptyState from "../components/EmptyState";
@@ -31,6 +32,52 @@ import Topbar from "../components/Topbar";
 import UploadZone, { type UploadItem } from "../components/UploadZone";
 import WatchFolderStatus from "../components/WatchFolderStatus";
 import { usePageTitle } from "../hooks/usePageTitle";
+
+// --- Show/batch grouping -----------------------------------------------------
+// Lightroom exports land named like "2026-Jan-NoRingCircus-Show (4 of 277).jpg" —
+// stripping the sequence counter + extension yields a natural per-show batch key.
+// Files without the counter pattern group by capture date instead. One chip click
+// selects the whole show for the Bulk Edit → Smart Fill flow.
+function batchKey(p: Post): string | null {
+  const base = (p.original_filename || "").replace(/\.[A-Za-z0-9]+$/, "").trim();
+  const stripped = base.replace(/\s*[(\[]?\d+\s+of\s+\d+[)\]]?\s*$/i, "").replace(/[-_\s]+$/, "").trim();
+  if (stripped && stripped !== base) return stripped;
+  if (p.captured_at) {
+    const d = new Date(p.captured_at);
+    return `Shot ${d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}`;
+  }
+  return null;
+}
+
+// "Ready to schedule" checklist (expanded 2026-08-24 per review): a draft is ready
+// when it has a title, tags, and alt text has been generated (null = the 15-min AI
+// sweep hasn't reached it yet; "" = attempted, counts as done). Venue/performers stay
+// optional — not every photo has them.
+function isReady(p: Post): boolean {
+  return !!p.title && !!p.tags && p.alt_text !== null;
+}
+
+function readyMissing(p: Post): string[] {
+  const out: string[] = [];
+  if (!p.title) out.push("title");
+  if (!p.tags) out.push("tags");
+  if (p.alt_text === null) out.push("alt text (auto — pending)");
+  return out;
+}
+
+function computeBatches(drafts: Post[]): { key: string; ids: string[] }[] {
+  const map = new Map<string, string[]>();
+  for (const p of drafts) {
+    const key = batchKey(p);
+    if (!key) continue;
+    map.set(key, [...(map.get(key) ?? []), p.id]);
+  }
+  return [...map.entries()]
+    .filter(([, ids]) => ids.length >= 3) // singletons/pairs aren't a "show"
+    .map(([key, ids]) => ({ key, ids }))
+    .sort((a, b) => b.ids.length - a.ids.length)
+    .slice(0, 8);
+}
 
 export default function DraftQueue() {
   usePageTitle("Drafts");
@@ -71,10 +118,12 @@ export default function DraftQueue() {
   const [sortKey, setSortKey] = useState<"newest" | "oldest" | "captured" | "largest" | "ready">("newest");
   const [filterReady, setFilterReady] = useState(false);
 
+  const batches = useMemo(() => computeBatches(drafts), [drafts]);
+
   const visibleDrafts = useMemo(() => {
     let list = drafts;
     if (filterReady) {
-      list = list.filter((p) => !!p.title && !!p.tags);
+      list = list.filter(isReady);
     }
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -96,8 +145,8 @@ export default function DraftQueue() {
         case "largest":
           return (b.file_size_bytes ?? 0) - (a.file_size_bytes ?? 0);
         case "ready": {
-          const aReady = !!a.title && !!a.tags ? 1 : 0;
-          const bReady = !!b.title && !!b.tags ? 1 : 0;
+          const aReady = isReady(a) ? 1 : 0;
+          const bReady = isReady(b) ? 1 : 0;
           if (aReady !== bReady) return bReady - aReady;
           return b.created_at.localeCompare(a.created_at);
         }
@@ -279,7 +328,7 @@ export default function DraftQueue() {
 
   const stats = [
     { label: "Drafts", value: drafts.length },
-    { label: "Ready to schedule", value: drafts.filter((p) => p.title && p.tags).length },
+    { label: "Ready to schedule", value: drafts.filter(isReady).length },
     { label: "Scheduled this week", value: scheduledThisWeek.length },
     { label: "Scheduled total", value: scheduledPending.length },
     { label: "Published", value: published.length },
@@ -338,7 +387,7 @@ export default function DraftQueue() {
                     />
                     <button
                       onClick={() => setFilterReady((v) => !v)}
-                      title="Show only drafts with both a title and tags"
+                      title={`Show only drafts that pass the ready checklist: title, tags, alt text generated. Currently ${drafts.filter(isReady).length} of ${drafts.length}.`}
                       style={{
                         background: filterReady ? "var(--teal)" : "transparent",
                         color: filterReady ? "#0a1f17" : "var(--text-dim)",
@@ -425,18 +474,72 @@ export default function DraftQueue() {
                   </>
                 )}
               </div>
+              {batches.length > 0 && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ fontSize: 11, color: "var(--text-fade)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                    Shows
+                  </span>
+                  {batches.map((b) => {
+                    const allSelected = multiSelect && b.ids.every((id) => checkedIds.has(id));
+                    return (
+                      <button
+                        key={b.key}
+                        onClick={() => {
+                          setMultiSelect(true);
+                          setCheckedIds((prev) => {
+                            const next = new Set(prev);
+                            if (allSelected) b.ids.forEach((id) => next.delete(id));
+                            else b.ids.forEach((id) => next.add(id));
+                            return next;
+                          });
+                        }}
+                        title={
+                          allSelected
+                            ? "Deselect this show's drafts"
+                            : `Select all ${b.ids.length} drafts from this show — then Bulk Edit for shared venue/show/performers, Smart Fill to scatter`
+                        }
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "5px 12px",
+                          border: `0.5px solid ${allSelected ? "rgba(93,202,165,0.3)" : "var(--border-strong)"}`,
+                          background: allSelected ? "var(--teal-tint)" : "transparent",
+                          color: allSelected ? "var(--text)" : "var(--text-dim)",
+                          borderRadius: 999,
+                          fontSize: 12,
+                          fontWeight: allSelected ? 500 : 400,
+                          cursor: "pointer",
+                          maxWidth: 280,
+                        }}
+                      >
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {b.key}
+                        </span>
+                        <span style={{ color: "var(--text-fade)", fontVariantNumeric: "tabular-nums" }}>
+                          {b.ids.length}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               <div className="fp-grid-cards">
                 {visibleDrafts.map((p) => (
-                  <DraftCard
+                  <div
                     key={p.id}
-                    post={p}
-                    selected={selected?.id === p.id}
-                    onSelect={() => setSelectedId(p.id)}
-                    onDelete={() => deleteMutation.mutate(p.id)}
-                    multiSelectMode={multiSelect}
-                    isChecked={checkedIds.has(p.id)}
-                    onToggleCheck={() => toggleCheck(p.id)}
-                  />
+                    title={isReady(p) ? undefined : `Not ready — missing: ${readyMissing(p).join(", ")}`}
+                  >
+                    <DraftCard
+                      post={p}
+                      selected={selected?.id === p.id}
+                      onSelect={() => setSelectedId(p.id)}
+                      onDelete={() => deleteMutation.mutate(p.id)}
+                      multiSelectMode={multiSelect}
+                      isChecked={checkedIds.has(p.id)}
+                      onToggleCheck={() => toggleCheck(p.id)}
+                    />
+                  </div>
                 ))}
                 {visibleDrafts.length === 0 && (
                   <div style={{ gridColumn: "1 / -1", padding: 40, textAlign: "center", color: "var(--text-fade)", fontSize: 13 }}>
