@@ -51,6 +51,12 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
         message = String((detail as { message: unknown }).message);
       }
     } catch { /* not JSON */ }
+    // Session died (expired cookie, backend restart). Broadcast so AuthProvider can
+    // flip the app to the login screen instead of every widget failing cryptically.
+    // /api/auth/* is excluded — a 401 from login/me is normal flow, not session death.
+    if (res.status === 401 && !path.startsWith("/api/auth/")) {
+      window.dispatchEvent(new Event("framepost:unauthorized"));
+    }
     throw new ApiError(res.status, message, payload);
   }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
@@ -64,6 +70,7 @@ export type HealthPayload = {
   photo_volume_free_gb: number;
   flickr_last_success: string | null;
   last_backup: string | null;
+  platform_warnings: { platform: string; severity: string; message: string }[];
   version: string;
 };
 

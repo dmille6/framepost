@@ -87,6 +87,60 @@ def purge_expired_originals(db: Session) -> int:
     return purged
 
 
+def scan_orphans(db: Session) -> dict[str, int]:
+    """Reconcile disk ↔ DB (Codex review finding: import can strand files if the DB
+    commit fails after the file move, and rows can outlive their files).
+
+    - Files in originals/ / thumbnails/ / previews/ with no matching post row, older
+      than 24h (never touch an import that might be mid-flight): moved to
+      errors/orphans/ for human review — never deleted.
+    - Posts whose PERMANENT artifact (thumbnail) is missing on disk: logged loudly.
+      A missing original is normal after the 30-day retention purge; a missing
+      thumbnail means the archival record of a posted photo is gone.
+
+    Runs in daily cleanup. Returns counts for the log/summary.
+    """
+    import time
+
+    post_ids = {pid for (pid,) in db.execute(select(Post.id)).all()}
+    quarantine = storage.ERRORS / "orphans"
+    now = time.time()
+    summary = {"files_quarantined": 0, "rows_missing_thumbnail": 0}
+
+    for directory in (storage.ORIGINALS, storage.THUMBNAILS, storage.PREVIEWS):
+        if not directory.exists():
+            continue
+        for f in directory.iterdir():
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            if f.stem in post_ids:
+                continue
+            try:
+                if now - f.stat().st_mtime < 24 * 3600:
+                    continue  # possibly an import still in flight
+                quarantine.mkdir(parents=True, exist_ok=True)
+                target = quarantine / f"{directory.name}__{f.name}"
+                f.rename(target)
+                summary["files_quarantined"] += 1
+                log.warning("orphan file %s/%s → quarantined (no matching post row)",
+                            directory.name, f.name)
+            except OSError as e:
+                log.warning("couldn't quarantine orphan %s: %s", f, e)
+
+    posted = db.execute(
+        select(Post).where(Post.status.in_(("posted", "late")), Post.thumbnail_path.is_not(None))
+    ).scalars().all()
+    for post in posted:
+        if not Path(post.thumbnail_path).exists():
+            summary["rows_missing_thumbnail"] += 1
+            log.error("post %s (%r) has NO thumbnail on disk — archival record missing",
+                      post.id[:8], (post.title or "")[:40])
+
+    if summary["files_quarantined"] or summary["rows_missing_thumbnail"]:
+        log.info("orphan scan: %s", summary)
+    return summary
+
+
 def _reel_retention_days(db: Session) -> int:
     """Reel MP4s expire faster than originals — they're easy to regenerate and bulky.
     Default 30 days; configurable via app_config.reel_retention_days."""

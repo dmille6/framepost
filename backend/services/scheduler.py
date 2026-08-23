@@ -19,7 +19,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
+from services import alt_text as alt_text_svc, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -930,9 +930,27 @@ def daily_cleanup() -> None:
             db.rollback()
 
         try:
+            cleanup.scan_orphans(db)
+        except Exception:
+            log.exception("disk/DB orphan scan failed")
+            db.rollback()
+
+        try:
             backup.wal_checkpoint()
         except Exception:
             log.exception("WAL checkpoint failed")
+    finally:
+        db.close()
+
+
+def fill_missing_alt_text_job() -> None:
+    """15-min sweep: AI alt text for any post missing it (new imports + back catalog)."""
+    db = SessionLocal()
+    try:
+        alt_text_svc.fill_missing_alt_text(db)
+    except Exception:
+        log.exception("alt-text sweep failed")
+        db.rollback()
     finally:
         db.close()
 
@@ -968,6 +986,7 @@ def main() -> int:
     scheduler.add_job(daily_instagram_token_refresh, "cron", hour=5, minute=30,
                       id="instagram_token_refresh")
     scheduler.add_job(daily_cleanup, "cron", hour=cleanup_h, minute=cleanup_m, id="daily_cleanup")
+    scheduler.add_job(fill_missing_alt_text_job, "interval", minutes=15, id="fill_missing_alt_text")
     scheduler.add_job(weekly_trending_refresh, "cron", day_of_week="mon", hour=2, minute=0,
                       id="weekly_trending_refresh")
     scheduler.add_job(

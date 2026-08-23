@@ -30,6 +30,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     retry: false,
   });
 
+  // apiFetch broadcasts this on any non-auth 401 — the session is gone, so clear the
+  // cached user and let the router show the login screen immediately instead of every
+  // widget failing with cryptic "not authenticated" labels.
+  useEffect(() => {
+    const onUnauthorized = () => qc.setQueryData(["me"], null);
+    window.addEventListener("framepost:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("framepost:unauthorized", onUnauthorized);
+  }, [qc]);
+
   const loginMutation = useMutation({
     mutationFn: ({ username, password }: { username: string; password: string }) =>
       apiLogin(username, password),

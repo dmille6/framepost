@@ -27,6 +27,9 @@ function reasonsFor(h: HealthPayload): { text: string; href?: string }[] {
       });
     }
   }
+  for (const w of h.platform_warnings ?? []) {
+    out.push({ text: w.message, href: "/settings/platforms" });
+  }
   return out;
 }
 
@@ -49,6 +52,7 @@ export default function StatusBanner() {
     d: data.db_writable,
     p: data.photo_volume_writable,
     f: Math.floor(data.photo_volume_free_gb),
+    t: (data.platform_warnings ?? []).map((w) => w.platform + w.severity).join(","),
   });
   if (dismissed === key) return null;
 
