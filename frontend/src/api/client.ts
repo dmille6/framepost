@@ -673,7 +673,7 @@ export const setPlatformDefaultTarget = (platform: string, default_target: boole
 
 // ---- Activity feed (cross-platform comments + likes) ----
 export type CommentActivityItem = {
-  kind: "comment" | "like";
+  kind: "comment" | "like" | "engagement";
   id: number;
   post_id: string;
   post_title: string | null;

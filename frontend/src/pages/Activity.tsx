@@ -480,6 +480,10 @@ function ActivityRow({ item, divider }: { item: CommentActivityItem; divider: bo
           >
             {item.body || <span style={{ color: "var(--text-fade)" }}>(empty comment)</span>}
           </div>
+        ) : item.kind === "engagement" ? (
+          <div style={{ fontSize: 13, color: "var(--text-dim)" }}>
+            <span style={{ color: "#ff6b9c" }}>&#9650;</span> {item.body}
+          </div>
         ) : (
           <div style={{ fontSize: 13, color: "var(--text-dim)" }}>liked your post</div>
         )}

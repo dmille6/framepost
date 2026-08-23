@@ -119,6 +119,49 @@ def list_activity(
             seen_at=li.seen_at,
         ))
 
+    # Instagram can never expose per-user like lists (Meta privacy policy), and in a
+    # Development-mode Meta app even comment text is filtered to app-role users. So IG
+    # presence in the stream is synthesized: like/comment-count DELTAS between
+    # consecutive engagement snapshots. Synthetic items are born seen (they are not
+    # actionable the way a comment is) and are skipped in unread-only view.
+    if not only_unread:
+        snaps = db.execute(
+            select(EngagementSnapshot, Post.title)
+            .join(Post, Post.id == EngagementSnapshot.post_id)
+            .where(EngagementSnapshot.platform == "instagram")
+            .order_by(EngagementSnapshot.post_id, EngagementSnapshot.sampled_at)
+        ).all()
+        prev_by_post: dict[str, EngagementSnapshot] = {}
+        for snap, title in snaps:
+            before = prev_by_post.get(snap.post_id)
+            prev_by_post[snap.post_id] = snap
+            if before is None:
+                d_likes, d_comments = snap.likes, snap.comments_count
+            else:
+                d_likes = snap.likes - before.likes
+                d_comments = snap.comments_count - before.comments_count
+            if d_likes <= 0 and d_comments <= 0:
+                continue
+            bits = []
+            if d_likes > 0:
+                bits.append(f"+{d_likes} like" + ("s" if d_likes != 1 else ""))
+            if d_comments > 0:
+                bits.append(f"+{d_comments} comment" + ("s" if d_comments != 1 else ""))
+            items.append(ActivityItem(
+                kind="engagement",
+                id=snap.id,
+                post_id=snap.post_id,
+                post_title=title,
+                platform="instagram",
+                author_handle=None,
+                author_display_name=None,
+                author_url=None,
+                body=" · ".join(bits),
+                posted_at=snap.sampled_at,
+                fetched_at=snap.sampled_at,
+                seen_at=snap.sampled_at,
+            ))
+
     items.sort(key=_sort_key, reverse=True)
     return items[offset : offset + limit]
 
