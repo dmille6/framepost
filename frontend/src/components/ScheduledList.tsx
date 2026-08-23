@@ -44,6 +44,9 @@ export default function ScheduledList({ items, onPick }: Props) {
             }}
           >
             {day}
+            <span style={{ color: "var(--text-fade)", marginLeft: 8, fontWeight: 400 }}>
+              {relativeDayLabel(new Date(day))}
+            </span>
           </div>
           {group.map((item) => (
             <Row key={item.id} item={item} onClick={() => onPick(item)} />
@@ -52,6 +55,18 @@ export default function ScheduledList({ items, onPick }: Props) {
       ))}
     </div>
   );
+}
+
+function relativeDayLabel(d: Date): string {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const that = new Date(d);
+  that.setHours(0, 0, 0, 0);
+  const diff = Math.round((that.getTime() - today.getTime()) / 86_400_000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff < 0) return `${-diff} day${diff === -1 ? "" : "s"} ago`;
+  return `in ${diff} days`;
 }
 
 function Row({ item, onClick }: { item: ScheduledItem; onClick: () => void }) {

@@ -39,6 +39,14 @@ export default function Scheduled() {
   }
 
   const range = useMemo(() => {
+    if (view === "list") {
+      // List = the whole remaining queue from right now, soonest first — "what fires
+      // next", not a month page. 400 days comfortably covers the 365-day scatter horizon.
+      const start = new Date();
+      const end = new Date(start);
+      end.setDate(end.getDate() + 400);
+      return { from: start.toISOString(), to: end.toISOString() };
+    }
     // Pull a window that comfortably covers the visible 6-week grid (42 days starting on a Sunday).
     const start = new Date(month);
     start.setDate(start.getDate() - 14);
@@ -46,7 +54,7 @@ export default function Scheduled() {
     end.setMonth(end.getMonth() + 1);
     end.setDate(end.getDate() + 14);
     return { from: start.toISOString(), to: end.toISOString() };
-  }, [month]);
+  }, [month, view]);
 
   const { data: items = [] } = useQuery({
     queryKey: ["schedule", range.from, range.to],
@@ -85,7 +93,11 @@ export default function Scheduled() {
       <div className="fp-page fp-fade-in">
         <PageHeader
           title="Scheduled"
-          subtitle={`${items.length} post${items.length === 1 ? "" : "s"} scheduled in this window`}
+          subtitle={
+            view === "list"
+              ? `${items.length} post${items.length === 1 ? "" : "s"} in the queue`
+              : `${items.length} post${items.length === 1 ? "" : "s"} scheduled in this window`
+          }
           actions={
             <div
               role="tablist"
