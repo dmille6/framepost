@@ -37,7 +37,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   const [description, setDescription] = useState("");
   const [tags, setTags] = useState("");
   const [tagsMode, setTagsMode] = useState<"append" | "replace">("append");
-  const [privacy, setPrivacy] = useState("private");
+  const [privacy, setPrivacy] = useState("public");
   const [safety, setSafety] = useState("safe");
   const [contentType, setContentType] = useState("photo");
   const [albumIds, setAlbumIds] = useState<Set<string>>(new Set());

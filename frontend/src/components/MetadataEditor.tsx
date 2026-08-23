@@ -69,7 +69,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [title, setTitle] = useState(post.title ?? "");
   const [description, setDescription] = useState(post.description ?? "");
   const [tags, setTags] = useState(post.tags ?? "");
-  const [privacy, setPrivacy] = useState(post.privacy ?? "private");
+  const [privacy, setPrivacy] = useState(post.privacy ?? "public");
   const [safety, setSafety] = useState(post.safety_level ?? "safe");
   const [contentType, setContentType] = useState(post.content_type ?? "photo");
   const [show, setShow] = useState(post.show ?? "");

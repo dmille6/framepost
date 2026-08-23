@@ -123,9 +123,9 @@ def import_image(
     priv_row = db.execute(
         select(AppConfig).where(AppConfig.key == "default_privacy")
     ).scalar_one_or_none()
-    default_privacy = (priv_row.value if priv_row and priv_row.value else "private")
+    default_privacy = (priv_row.value if priv_row and priv_row.value else "public")
     if default_privacy not in ("private", "friends_family", "public"):
-        default_privacy = "private"
+        default_privacy = "public"
     post = Post(
         id=post_id,
         title=iptc_fields["title"],
