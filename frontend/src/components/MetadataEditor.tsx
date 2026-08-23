@@ -340,7 +340,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
             value={show}
             onChange={(e) => setShow(e.target.value)}
             list="show-suggestions"
-            placeholder="Slow Burn Burlesque"
+            placeholder="(no show set — type to add)"
           />
           <datalist id="show-suggestions">
             {recentShows.map((s) => (
@@ -354,7 +354,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
             value={city}
             onChange={(e) => setCity(e.target.value)}
             list="city-suggestions"
-            placeholder="New Orleans, LA"
+            placeholder="(no city set — type to add)"
           />
           <datalist id="city-suggestions">
             {recentCities.map((c) => (
