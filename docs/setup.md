@@ -28,9 +28,13 @@ docker compose run --rm backend python -m admin generate-encryption-key
 
 Paste both into `.env`.
 
-Register a Flickr API app at https://www.flickr.com/services/apps/create — paste `FLICKR_API_KEY` and `FLICKR_API_SECRET` into `.env`. (Required from Phase 3 onward.)
+Register a Flickr API app at https://www.flickr.com/services/apps/create —
+paste `FLICKR_API_KEY` and `FLICKR_API_SECRET` into `.env`. When authorizing
+the Flickr connection in Settings, the app requests **delete** permissions —
+needed by the re-post action and the Instagram staging-variant cleanup.
 
-`ANTHROPIC_API_KEY` is only required from Phase 5 (AI tagging).
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are optional — without them AI
+tagging and the background alt-text sweep stay idle.
 
 ## 3. First-run
 
@@ -50,12 +54,41 @@ docker compose up -d
 
 The app is reachable at `http://<host-ip>/` over your LAN/VPN.
 
-Health check: `curl http://<host-ip>/health` should return `{"status":"ok",...}` once the worker has fired its first heartbeat (within ~1 minute of startup).
+Health check: `curl http://<host-ip>/health` should return `{"status":"ok",...}`
+once the worker has fired its first heartbeat (within ~1 minute of startup).
+The payload includes `platform_warnings` — token-expiry and connection
+problems surface there and in the in-app banner.
 
-## 4. SMB share (Phase 2)
+## 4. Connect platforms
 
-Lightroom exports land in `/mnt/photo-data/incoming/`. To expose it to the Lightroom workstation, set up a Samba share pointing at `/mnt/photo-data/incoming/` with write access for the photographer. Detailed steps will be added when Phase 2 ships.
+All connections live in **Settings → Platforms** and are stored encrypted:
 
-## 5. Restoring from backup
+- **Flickr** — OAuth browser flow (required first; everything else fans out
+  after the Flickr post)
+- **Bluesky** — handle + app password
+- **Pixelfed** — instance URL, OAuth flow
+- **Pinterest** — OAuth flow, pick a default board
+- **Instagram** — paste a long-lived token from your Meta app; the full
+  walkthrough (with the tester-role gotchas) is in [instagram.md](instagram.md)
 
-See `docs/restore.md`.
+Check **Settings → General** for timezone, default publish time, **default
+privacy** (applies to every import), schedule fuzz, and retention windows.
+
+## 5. SMB share
+
+Lightroom exports land in `/mnt/photo-data/incoming/`. Expose that directory
+to the Lightroom workstation as a Samba share with write access; the watcher
+polls every 5 s and waits for files to finish writing before importing.
+
+## 6. Tests
+
+```bash
+docker compose exec backend python -m pytest tests/ -q
+```
+
+Covers scheduling math (stratified scatter, learned hours, fuzz), caption
+building (title dedupe, hashtag legality), and Instagram crop geometry.
+
+## 7. Restoring from backup
+
+See [restore.md](restore.md).
