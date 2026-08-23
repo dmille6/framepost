@@ -400,6 +400,15 @@ export const postNow = (postId: string) =>
     method: "POST",
   });
 
+export type PopularHours = {
+  hours: number[];
+  learned: boolean;
+  sample_posts: number;
+};
+
+export const fetchPopularHours = () =>
+  apiFetch<PopularHours>("/api/schedule/popular-hours");
+
 export type SmartFillSlot = {
   post_id: string;
   title: string | null;

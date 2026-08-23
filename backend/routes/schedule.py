@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import logging
 import random
+from collections import defaultdict
 from datetime import date as date_type, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from database import get_session
-from models import AppConfig, Post, User
+from models import AppConfig, EngagementSnapshot, Post, User
 from routes.auth import current_user
 from routes.posts import PostOut
 from services import events
@@ -315,11 +316,99 @@ def _next_eligible(
     return None
 
 
-# Popular post times for the random_scatter mode (local hours). Mixes morning + evening
+# Fallback post times for the random_scatter mode (local hours). Mixes morning + evening
 # windows that map to typical IG/Flickr engagement spikes — pre-work browse, lunch break,
-# after-work scroll, evening downtime.
+# after-work scroll, evening downtime. Once the account has enough engagement history the
+# scheduler learns its own hours instead (see _learned_popular_hours).
 _POPULAR_HOURS = [9, 10, 11, 18, 19, 20]
 _SCATTER_HORIZON_DAYS = 365
+
+# Engagement-learned hours: an hour bucket needs this many posts before its average
+# counts, and the candidate pool is always topped up to this size from the defaults.
+_MIN_HOUR_SAMPLES = 5
+_LEARNED_HOUR_COUNT = 6
+
+
+def _learned_popular_hours(db: Session) -> tuple[list[int], bool, int]:
+    """Rank local posting hours by realized engagement across all platforms.
+
+    Data: latest engagement_snapshots row per (post, platform), summed per post.
+    Score: likes + 2×comments — views are excluded because only Flickr reports them
+    and their scale would drown the cross-platform signal. Hours are the post's
+    fired time converted to the configured local timezone.
+
+    Hours with fewer than _MIN_HOUR_SAMPLES posts don't qualify (one lucky photo at
+    3 AM shouldn't move the schedule); the pool is topped up from _POPULAR_HOURS to
+    _LEARNED_HOUR_COUNT entries so scatter always has variety.
+
+    Returns (hours, learned, sample_posts): learned=False means pure defaults.
+    """
+    sub = (
+        select(
+            EngagementSnapshot.post_id,
+            EngagementSnapshot.platform,
+            func.max(EngagementSnapshot.sampled_at).label("latest"),
+        )
+        .group_by(EngagementSnapshot.post_id, EngagementSnapshot.platform)
+        .subquery()
+    )
+    rows = db.execute(
+        select(
+            Post.id,
+            Post.posted_at,
+            EngagementSnapshot.likes,
+            EngagementSnapshot.comments_count,
+        )
+        .join(EngagementSnapshot, EngagementSnapshot.post_id == Post.id)
+        .join(
+            sub,
+            (sub.c.post_id == EngagementSnapshot.post_id)
+            & (sub.c.platform == EngagementSnapshot.platform)
+            & (sub.c.latest == EngagementSnapshot.sampled_at),
+        )
+        .where(Post.posted_at.is_not(None))
+    ).all()
+
+    scores: dict[str, tuple[datetime, float]] = {}
+    for pid, posted_at, likes, comments in rows:
+        dt, sc = scores.get(pid, (posted_at, 0.0))
+        scores[pid] = (dt, sc + (likes or 0) + 2 * (comments or 0))
+
+    tz = _user_timezone(db)
+    buckets: dict[int, list[float]] = defaultdict(list)
+    for posted_at, sc in scores.values():
+        local_hour = posted_at.replace(tzinfo=timezone.utc).astimezone(tz).hour
+        buckets[local_hour].append(sc)
+
+    ranked = sorted(
+        ((sum(v) / len(v), h) for h, v in buckets.items() if len(v) >= _MIN_HOUR_SAMPLES),
+        reverse=True,
+    )
+    hours = [h for _, h in ranked[:_LEARNED_HOUR_COUNT]]
+    learned = bool(hours)
+    for h in _POPULAR_HOURS:
+        if len(hours) >= _LEARNED_HOUR_COUNT:
+            break
+        if h not in hours:
+            hours.append(h)
+    return hours, learned, len(scores)
+
+
+class PopularHoursOut(BaseModel):
+    hours: list[int]
+    learned: bool
+    sample_posts: int
+
+
+@router.get("/popular-hours", response_model=PopularHoursOut)
+def popular_hours(
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """The hour pool random_scatter will actually use — surfaced in the Smart Fill
+    dialog so the user sees whether the scheduler is running on learned hours yet."""
+    hours, learned, n = _learned_popular_hours(db)
+    return PopularHoursOut(hours=hours, learned=learned, sample_posts=n)
 
 
 def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFillResponse:
@@ -329,7 +418,8 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
       1. Validate posts (same eligibility check as the sequential path).
       2. Find days in [tomorrow, +365 days] that don't already have any scheduled post.
       3. Stratify: one segment of the horizon per post, one random day per segment.
-      4. For each, pick a random popular hour from _POPULAR_HOURS, convert local→UTC.
+      4. For each, pick a random hour from the engagement-learned pool (defaults to
+         _POPULAR_HOURS until there's history), convert local→UTC.
       5. Apply per-hour collision check; fall back to another hour or another day if taken.
       6. Apply the configured fuzz so multiple scatter calls don't all land at :00:00.
     """
@@ -337,6 +427,9 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
     fuzz = _schedule_fuzz_minutes(db)
     now_local = datetime.now(tz)
     today_local = now_local.date()
+    hour_pool, hours_learned, _n = _learned_popular_hours(db)
+    if hours_learned:
+        log.info("random_scatter using engagement-learned hours: %s", hour_pool)
 
     # Posts to schedule, in deterministic order. Eligibility check matches the sequential path.
     posts: list[tuple[str, Post | None, str | None]] = []
@@ -406,7 +499,7 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
     def _pick_slot(d: date_type) -> datetime | None:
         """Return a UTC-naive datetime for a popular hour on date d that's free; None if all
         tried hours collide with existing posts."""
-        hours = list(_POPULAR_HOURS)
+        hours = list(hour_pool)
         random.shuffle(hours)
         for hr in hours:
             if (d, hr) in used_local_slots:

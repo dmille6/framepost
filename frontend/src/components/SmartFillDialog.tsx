@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import {
   ApiError,
+  fetchPopularHours,
   smartFill,
   type SmartFillRequest,
   type SmartFillResponse,
   thumbnailUrl,
 } from "../api/client";
+
+function formatHour(h: number): string {
+  if (h === 0) return "12 AM";
+  if (h < 12) return `${h} AM`;
+  if (h === 12) return "12 PM";
+  return `${h - 12} PM`;
+}
 
 type Props = {
   postIds: string[];
@@ -25,6 +33,16 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
   const [skipWeekends, setSkipWeekends] = useState(false);
   const [preview, setPreview] = useState<SmartFillResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // The hour pool random_scatter will actually use — learned from engagement once
+  // there's enough history, defaults until then.
+  const { data: popular } = useQuery({
+    queryKey: ["popular-hours"],
+    queryFn: fetchPopularHours,
+  });
+  const hourText = (popular?.hours ?? [9, 10, 11, 18, 19, 20])
+    .map(formatHour)
+    .join(", ");
 
   const buildRequest = (confirm: boolean): SmartFillRequest => ({
     post_ids: postIds,
@@ -76,7 +94,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 4 }}>
             {mode === "sequential"
               ? `Distribute ${postIds.length} draft${postIds.length === 1 ? "" : "s"} across the calendar at a chosen cadence. The one-post-per-hour rule applies — clashes auto-bump to the next day.`
-              : `Scatter ${postIds.length} draft${postIds.length === 1 ? "" : "s"} randomly across the next 12 months at popular post times (9-11 AM / 6-8 PM local). Already-scheduled days are skipped.`}
+              : `Scatter ${postIds.length} draft${postIds.length === 1 ? "" : "s"} randomly across the next 12 months at ${popular?.learned ? "your best-performing post times" : "popular post times"}. Already-scheduled days are skipped.`}
           </div>
         </div>
 
@@ -127,8 +145,18 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
             }}
           >
             Each post lands on a random unoccupied day in the next 365 days, at one of these
-            popular local hours: <strong>9 AM, 10 AM, 11 AM, 6 PM, 7 PM, 8 PM</strong>. Schedule
-            fuzz still applies so post times look natural. Re-running this gives different dates.
+            local hours: <strong>{hourText}</strong>
+            {popular?.learned ? (
+              <>
+                {" "}
+                — <span style={{ color: "var(--teal)" }}>learned from your engagement</span> across{" "}
+                {popular.sample_posts} posts.
+              </>
+            ) : (
+              <> (defaults until there's enough engagement history).</>
+            )}{" "}
+            Schedule fuzz still applies so post times look natural. Re-running this gives
+            different dates.
           </div>
         )}
 
