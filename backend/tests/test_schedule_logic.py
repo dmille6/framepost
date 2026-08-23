@@ -66,6 +66,20 @@ def test_learned_hours_ranks_high_engagement_hour_first(db):
     assert len(hours) == _LEARNED_HOUR_COUNT  # topped up from defaults
 
 
+def test_learned_hours_clamps_to_waking_window(db):
+    # A strong 1 AM bucket (enough samples, huge engagement) must still be excluded —
+    # the user chose an 8:00–23:00 window over the raw data.
+    for i in range(_MIN_HOUR_SAMPLES + 2):
+        p = _mk_post(db, datetime(2026, 5, 1 + i, 1, 30, 0))
+        _snap(db, p, "flickr", likes=500, comments=100)
+    db.commit()
+
+    hours, learned, _ = _learned_popular_hours(db)
+    assert learned is False  # nothing qualified inside the window
+    assert 1 not in hours
+    assert hours == _POPULAR_HOURS
+
+
 def test_learned_hours_respects_min_samples(db):
     # One viral 3 AM post must NOT drag 3 AM into the pool.
     p = _mk_post(db, datetime(2026, 5, 1, 3, 0, 0))

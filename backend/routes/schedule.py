@@ -325,8 +325,12 @@ _SCATTER_HORIZON_DAYS = 365
 
 # Engagement-learned hours: an hour bucket needs this many posts before its average
 # counts, and the candidate pool is always topped up to this size from the defaults.
+# Learned hours are clamped to a waking-hours window (user preference 2026-08-24) —
+# the 1 AM bucket scored well on real data but late-night slots are excluded by choice.
 _MIN_HOUR_SAMPLES = 5
 _LEARNED_HOUR_COUNT = 6
+_CLAMP_MIN_HOUR = 8   # inclusive — no learned slot before 8 AM local
+_CLAMP_MAX_HOUR = 23  # inclusive — no learned slot after 11 PM local
 
 
 def _learned_popular_hours(db: Session) -> tuple[list[int], bool, int]:
@@ -381,7 +385,11 @@ def _learned_popular_hours(db: Session) -> tuple[list[int], bool, int]:
         buckets[local_hour].append(sc)
 
     ranked = sorted(
-        ((sum(v) / len(v), h) for h, v in buckets.items() if len(v) >= _MIN_HOUR_SAMPLES),
+        (
+            (sum(v) / len(v), h)
+            for h, v in buckets.items()
+            if len(v) >= _MIN_HOUR_SAMPLES and _CLAMP_MIN_HOUR <= h <= _CLAMP_MAX_HOUR
+        ),
         reverse=True,
     )
     hours = [h for _, h in ranked[:_LEARNED_HOUR_COUNT]]

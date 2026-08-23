@@ -430,6 +430,98 @@ def _sync_pixelfed(db: Session, post_platforms: list[tuple[PostPlatform, Platfor
     return summary
 
 
+# -----------------------------------------------------------------------------
+# Instagram (Instagram API with Instagram Login — graph.instagram.com)
+# -----------------------------------------------------------------------------
+
+_IG_GRAPH = "https://graph.instagram.com/v23.0"
+_IG_COMMENT_FIELDS = "id,text,timestamp,username,replies{id,text,timestamp,username}"
+
+
+def _sync_instagram(db: Session, post_platforms: list[tuple[PostPlatform, PlatformCredential]]) -> dict[str, int]:
+    """Engagement + comments for API-published IG posts.
+
+    Per-user like lists aren't exposed (Meta privacy policy) — we get like_count only,
+    so no _upsert_like here. Comments include one level of replies. The token rides in
+    an Authorization header and paging uses the `after` cursor rather than Meta's
+    paging.next URL — next embeds the access token in the query string, which httpx
+    would then echo into the worker logs.
+
+    Manually-marked IG posts (posted_to_instagram_at set, no post_platforms row) have
+    no media id to query; the manual tracker remains their path.
+    """
+    summary = {"sampled": 0, "comments_new": 0, "errors": 0}
+    for pp, cred in post_platforms:
+        if not pp.remote_id or not cred.access_token:
+            continue
+        try:
+            token = decrypt_token(cred.access_token)
+            headers = {"Authorization": f"Bearer {token}"}
+            with httpx.Client(timeout=30.0) as c:
+                r1 = c.get(
+                    f"{_IG_GRAPH}/{pp.remote_id}",
+                    headers=headers,
+                    params={"fields": "like_count,comments_count"},
+                )
+                if r1.status_code >= 400:
+                    if "does not exist" in r1.text:
+                        # Post was deleted on Instagram itself — permanent, not an error.
+                        # Keep the pp row (it records that we DID publish) but stop
+                        # asking Meta about it every day.
+                        log.info("instagram media %s gone (deleted on IG) — skipping %s",
+                                 pp.remote_id, pp.post_id[:8])
+                        continue
+                    raise RuntimeError(f"media fetch HTTP {r1.status_code}: {r1.text[:200]}")
+                media = r1.json()
+                like_count = int(media.get("like_count") or 0)
+                comments_count = int(media.get("comments_count") or 0)
+                _snapshot(
+                    db, post_id=pp.post_id, platform="instagram",
+                    likes=like_count, comments_count=comments_count,
+                )
+
+                after: str | None = None
+                for _page in range(5 if comments_count > 0 else 0):
+                    params: dict[str, str] = {"fields": _IG_COMMENT_FIELDS, "limit": "50"}
+                    if after:
+                        params["after"] = after
+                    r2 = c.get(
+                        f"{_IG_GRAPH}/{pp.remote_id}/comments",
+                        headers=headers, params=params,
+                    )
+                    if r2.status_code >= 400:
+                        raise RuntimeError(f"comments HTTP {r2.status_code}: {r2.text[:200]}")
+                    body = r2.json()
+                    for com in body.get("data") or []:
+                        replies = ((com.get("replies") or {}).get("data")) or []
+                        for entry in [com, *replies]:
+                            cid = entry.get("id")
+                            if not cid:
+                                continue
+                            uname = entry.get("username")
+                            if _upsert_comment(
+                                db,
+                                post_id=pp.post_id,
+                                platform="instagram",
+                                remote_id=str(cid),
+                                author_handle=f"@{uname}" if uname else None,
+                                author_display_name=uname,
+                                author_url=f"https://www.instagram.com/{uname}/" if uname else None,
+                                body=entry.get("text") or "",
+                                posted_at=_parse_iso(entry.get("timestamp")),
+                            ):
+                                summary["comments_new"] += 1
+                    paging = body.get("paging") or {}
+                    after = (paging.get("cursors") or {}).get("after") if paging.get("next") else None
+                    if not after:
+                        break
+            summary["sampled"] += 1
+        except Exception as e:
+            log.warning("instagram sync failed for %s: %s", pp.post_id[:8], e)
+            summary["errors"] += 1
+    return summary
+
+
 def _parse_iso(s: str | None) -> datetime | None:
     if not s:
         return None
@@ -476,6 +568,7 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
     # Non-Flickr platforms: walk post_platforms rows for posted-status posts in window.
     bluesky_targets: list[tuple[PostPlatform, PlatformCredential]] = []
     pixelfed_targets: list[tuple[PostPlatform, PlatformCredential]] = []
+    instagram_targets: list[tuple[PostPlatform, PlatformCredential]] = []
     rows = db.execute(
         select(PostPlatform, PlatformCredential, Post)
         .join(PlatformCredential, PlatformCredential.id == PostPlatform.platform_id)
@@ -490,11 +583,14 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
             bluesky_targets.append((pp, cred))
         elif cred.platform == "pixelfed":
             pixelfed_targets.append((pp, cred))
+        elif cred.platform == "instagram":
+            instagram_targets.append((pp, cred))
 
     out = {
         "flickr": _sync_flickr(db, flickr_posts),
         "bluesky": _sync_bluesky(db, bluesky_targets),
         "pixelfed": _sync_pixelfed(db, pixelfed_targets),
+        "instagram": _sync_instagram(db, instagram_targets),
     }
     db.commit()
     log.info("comments+engagement sync: %s", json.dumps(out))
