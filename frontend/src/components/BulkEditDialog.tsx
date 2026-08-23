@@ -304,7 +304,11 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
             </div>
           </Field>
 
-          <Field
+          {/* BlockField (div), NOT Field (label): a <label> routes clicks to its first
+              form control, which becomes the first chip's × button once a performer is
+              tagged — so clicking in to add a second performer silently removed the
+              first. That's the "can only tag one performer" bug. */}
+          <BlockField
             label="Performers"
             hint={
               performersMode === "append"
@@ -329,7 +333,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
                 Replace
               </ModeChip>
             </div>
-          </Field>
+          </BlockField>
 
           {/* Venue + Show + City — structured context. Venue uses apply-toggle because
               "no venue" is ambiguous; show/city use empty == skip. */}
@@ -603,6 +607,27 @@ function Field({
       {children}
       {hint && <span style={{ fontSize: 11, color: "var(--text-fade)" }}>{hint}</span>}
     </label>
+  );
+}
+
+// Div-based variant of Field for children that contain interactive widgets (chips,
+// dropdowns): wrapping those in a <label> makes every stray click activate the first
+// nested button/input, with data-eating results.
+function BlockField({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <span style={{ fontSize: 12, color: "var(--text-dim)", fontWeight: 500 }}>{label}</span>
+      {children}
+      {hint && <span style={{ fontSize: 11, color: "var(--text-fade)" }}>{hint}</span>}
+    </div>
   );
 }
 

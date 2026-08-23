@@ -112,6 +112,9 @@ export default function PerformersField({ selected, onChange, label = "Performer
         setCreatingName(trimmed);
       }
     } else if (e.key === "Escape") {
+      // Swallow it — the surrounding dialog also listens for Escape on window and
+      // would close, discarding everything the user has entered.
+      e.stopPropagation();
       setOpen(false);
       setCreatingName(null);
     } else if (e.key === "Backspace" && query === "" && selected.length > 0) {

@@ -90,7 +90,13 @@ export default function DraftQueue() {
   // count stays current as posts fire.
   const { data: scheduled = [] } = useQuery({
     queryKey: ["schedule", "all"],
-    queryFn: () => listScheduled(),
+    // Explicit wide range: the backend's no-arg default window is -7/+60 days, which
+    // silently undercounted "Scheduled total" once the scatter went year-wide.
+    queryFn: () =>
+      listScheduled(
+        new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+        new Date(Date.now() + 400 * 86400 * 1000).toISOString(),
+      ),
     refetchInterval: 60_000,
   });
   const { data: published = [] } = useQuery({

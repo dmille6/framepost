@@ -102,6 +102,9 @@ export default function VenueField({ selected, onChange, label = "Venue" }: Prop
       if (highlight < filtered.length) pick(filtered[highlight]);
       else if (showCreate) setCreatingName(trimmed);
     } else if (e.key === "Escape") {
+      // Swallow it — the surrounding dialog also listens for Escape on window and
+      // would close, discarding everything the user has entered.
+      e.stopPropagation();
       setOpen(false);
       setCreatingName(null);
     }

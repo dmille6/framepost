@@ -17,6 +17,14 @@ from sqlalchemy.orm import Session
 from models import Performer, Post, PostPerformer, Venue
 
 
+def _hashtag_safe(handle: str | None) -> str:
+    """Reduce an IG handle to hashtag-legal characters (letters, digits, underscore).
+    Instagram mentions accept periods; hashtags terminate at them."""
+    if not handle:
+        return ""
+    return "".join(ch for ch in handle.lower() if ch.isalnum() or ch == "_")
+
+
 def get_post_performers(db: Session, post_id: str) -> list[Performer]:
     """Return performers tagged on a post, in insertion order (position ASC)."""
     return list(db.execute(
@@ -42,11 +50,15 @@ def hashtag_tokens(performers: list[Performer]) -> list[str]:
     seen: set[str] = set()
     for p in performers:
         if p.instagram_handle:
-            token = p.instagram_handle.lower()
+            # IG handles allow periods but IG HASHTAGS don't — "#mx.eli.rose" renders
+            # as a dead "#mx". Strip anything outside [a-z0-9_] for the hashtag form.
+            token = _hashtag_safe(p.instagram_handle)
+            if not token:
+                token = "".join(ch for ch in p.display_name if ch.isalnum())
         else:
             token = "".join(ch for ch in p.display_name if ch.isalnum())
-            if not token:
-                continue
+        if not token:
+            continue
         if token.lower() in seen:
             continue
         seen.add(token.lower())
@@ -192,7 +204,9 @@ def caption_context_for_post(db: Session, post: Post) -> CaptionContext:
             if mk not in seen_mention_keys:
                 mention_handles.append(handle)
                 seen_mention_keys.add(mk)
-        hashtag_token = handle if handle else _camel_token(display_name)
+        # Handles can carry periods (valid in @mentions, fatal in #hashtags) — sanitize,
+        # falling back to the CamelCase display name if nothing survives.
+        hashtag_token = (_hashtag_safe(handle) if handle else "") or _camel_token(display_name)
         if hashtag_token:
             hk = hashtag_token.lower()
             if hk not in seen_hashtag_keys:

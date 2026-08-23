@@ -113,19 +113,29 @@ export default function DraftCard({
           <TrashIcon />
         </button>
       )}
+      {/* position:absolute takes the img out of flow so the box truly stays 4:3 —
+          aspect-ratio alone is only a *preferred* size, and an in-flow img with
+          cyclic height resolves to its natural height, growing the box. That's why
+          mixed-aspect imports rendered cards at wildly different heights (and
+          overlapped in dense rows). */}
       <div
         style={{
           aspectRatio: "4 / 3",
           background: "#0a0a0a",
           overflow: "hidden",
-          display: "grid",
-          placeItems: "center",
+          position: "relative",
         }}
       >
         <img
           src={thumbnailUrl(post.id)}
           alt={post.title ?? post.original_filename ?? ""}
-          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+          }}
         />
       </div>
       <div style={{ padding: "10px 12px" }}>

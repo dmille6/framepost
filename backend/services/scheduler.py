@@ -342,6 +342,10 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     keep it tight; Pixelfed/Mastodon allow longer text so we include the full description."""
     title = (post.title or "").strip()
     description = (post.description or "").strip()
+    # Users often open the description with the title line (Lightroom IPTC does this
+    # too) — stacking both produced captions that start with the same line twice.
+    if title and description.lower().startswith(title.lower()):
+        title = ""
     tag_str = (post.tags or "").strip()
     # Pull the IG signature row — convenient since the user already configured it for IG.
     sig_row = db.execute(
