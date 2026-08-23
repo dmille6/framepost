@@ -28,7 +28,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from models import Post
+from sqlalchemy import select
+
+from models import AppConfig, Post
 from services import duplicate, events, exif, image, iptc, storage
 
 log = logging.getLogger("framepost.import")
@@ -114,12 +116,23 @@ def import_image(
         raise
 
     now = datetime.now(timezone.utc)
+    # Honor Settings -> General -> default privacy. The Post column default is
+    # "private" (safe fallback), but imports ignored the configured value entirely —
+    # so a user with default_privacy=public got private Flickr posts that looked
+    # like they never went up (IG still worked: static URLs bypass privacy).
+    priv_row = db.execute(
+        select(AppConfig).where(AppConfig.key == "default_privacy")
+    ).scalar_one_or_none()
+    default_privacy = (priv_row.value if priv_row and priv_row.value else "private")
+    if default_privacy not in ("private", "friends_family", "public"):
+        default_privacy = "private"
     post = Post(
         id=post_id,
         title=iptc_fields["title"],
         description=iptc_fields["description"],
         tags=iptc_fields["tags"],
         status="pending",
+        privacy=default_privacy,
         original_filename=original_filename,
         original_path=str(final_path),
         thumbnail_path=str(thumb_path),
