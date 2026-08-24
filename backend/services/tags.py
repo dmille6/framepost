@@ -33,13 +33,32 @@ def normalize_tag(s: str) -> str:
     return cleaned.replace(" ", "")
 
 
+def _explode_social_blob(item: str) -> list[str]:
+    """A pasted Instagram-style block ("#tag1 #tag2 @handle ...") arrives as ONE comma
+    item; the space-collapse in normalize_tag would weld it into a single unusable
+    mega-tag. When an item contains # or @, treat those symbols as token starts, split
+    there, and strip the symbols — tags are stored bare and each platform's caption
+    builder adds its own # form."""
+    import re
+    if "#" not in item and "@" not in item:
+        return [item]
+    out: list[str] = []
+    for tok in re.split(r"(?=[#@])", item):
+        tok = tok.strip().lstrip("#@").strip()
+        if tok:
+            out.append(tok)
+    return out
+
+
 def normalize_tag_csv(s: str | None) -> str | None:
     """Normalize a comma-separated tag string: each tag is space-collapsed, dupes removed
-    case-insensitively. Returns None for empty input so the DB column stays NULL rather
-    than empty-string."""
+    case-insensitively. Pasted #hashtag/@mention runs are exploded into individual tags.
+    Returns None for empty input so the DB column stays NULL rather than empty-string."""
     if not s or not s.strip():
         return None
-    parts = parse_csv(s)
+    parts: list[str] = []
+    for raw in parse_csv(s):
+        parts.extend(_explode_social_blob(raw))
     seen: set[str] = set()
     out: list[str] = []
     for p in parts:
