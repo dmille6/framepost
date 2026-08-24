@@ -19,6 +19,7 @@ import {
   type PostUpdate,
   type Venue,
 } from "../api/client";
+import ApplyTemplateDialog from "./ApplyTemplateDialog";
 import MultiSelectChips from "./MultiSelectChips";
 import PerformersField from "./PerformersField";
 import VenueField from "./VenueField";
@@ -50,6 +51,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   const [applyVenue, setApplyVenue] = useState<Apply>("off");
   const [bulkShow, setBulkShow] = useState("");
   const [bulkCity, setBulkCity] = useState("");
+  const [templateOpen, setTemplateOpen] = useState(false);
 
   // Per-section apply toggles. Selects + multi-select sections need explicit opt-in
   // because "empty" is ambiguous (vs text fields where empty == don't change).
@@ -246,7 +248,34 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
 
         {/* Body */}
         <div style={{ padding: 20, display: "grid", gap: 16, overflow: "auto" }}>
-          <Field label="Title" hint="Replaces the title on all selected drafts. Leave blank to keep each draft's existing title.">
+          <BlockField
+            label="Title"
+            hint="Replaces the title on all selected drafts. Leave blank to keep each draft's existing title."
+            action={
+              <button
+                type="button"
+                onClick={() => setTemplateOpen(true)}
+                disabled={busy}
+                title="Fill title and description from a saved pattern (Settings → Title Templates)"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  padding: "3px 10px",
+                  borderRadius: 999,
+                  border: "0.5px solid rgba(93,202,165,0.35)",
+                  background: "var(--teal-tint)",
+                  color: "var(--teal)",
+                  fontSize: 11,
+                  fontWeight: 500,
+                  cursor: busy ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                ⧉ Use template
+              </button>
+            }
+          >
             <input
               className="fp-input"
               value={title}
@@ -254,7 +283,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
               placeholder="(don't change)"
               disabled={busy}
             />
-          </Field>
+          </BlockField>
 
           <Field label="Description" hint="Replaces. Leave blank to keep existing.">
             <textarea
@@ -587,6 +616,20 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
           </div>
         </div>
       </div>
+
+      {templateOpen && (
+        <ApplyTemplateDialog
+          initialTitle={title}
+          initialDescription={description}
+          onCancel={() => setTemplateOpen(false)}
+          onApply={({ title: t, description: d }) => {
+            // Fills the bulk fields; the user still reviews before Apply-to-N.
+            setTitle(t);
+            if (d) setDescription(d);
+            setTemplateOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -616,15 +659,30 @@ function Field({
 function BlockField({
   label,
   hint,
+  action,
   children,
 }: {
   label: string;
   hint?: string;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <div style={{ display: "grid", gap: 6 }}>
-      <span style={{ fontSize: 12, color: "var(--text-dim)", fontWeight: 500 }}>{label}</span>
+      <span
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          fontSize: 12,
+          color: "var(--text-dim)",
+          fontWeight: 500,
+        }}
+      >
+        <span>{label}</span>
+        {action}
+      </span>
       {children}
       {hint && <span style={{ fontSize: 11, color: "var(--text-fade)" }}>{hint}</span>}
     </div>
