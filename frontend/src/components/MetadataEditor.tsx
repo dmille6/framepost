@@ -319,11 +319,29 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         hint={
           <button
             type="button"
-            onClick={() => setTemplateOpen(true)}
-            className="fp-link"
-            style={{ fontSize: 11 }}
+            onClick={(e) => {
+              // Field wraps its children in a <label>; without this the click also
+              // activates the label and focuses the title input behind the dialog.
+              e.preventDefault();
+              setTemplateOpen(true);
+            }}
+            title="Fill title and description from a saved pattern (Settings → Title Templates)"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "3px 10px",
+              borderRadius: 999,
+              border: "0.5px solid rgba(93,202,165,0.35)",
+              background: "var(--teal-tint)",
+              color: "var(--teal)",
+              fontSize: 11,
+              fontWeight: 500,
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
           >
-            Apply template →
+            ⧉ Use template
           </button>
         }
       >
