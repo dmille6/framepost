@@ -32,7 +32,23 @@ function saveStored(s: StoredValues) {
 }
 
 function renderTemplate(template: string, values: Record<string, string>): string {
-  return template.replace(/\{([a-z][a-z0-9_]*)\}/g, (_, key) => values[key] ?? "");
+  const filled = template.replace(/\{([a-z][a-z0-9_]*)\}/g, (_, key) => values[key] ?? "");
+  // A blank optional field leaves debris: doubled spaces, a dangling " / " or " — ",
+  // an empty quoted phrase, trailing punctuation. Tidy so the result reads written.
+  return filled
+    .replace(/""/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/([-–—/|·])\s*([-–—/|·])/g, "$1")
+    .replace(/^[\s,.;:\-–—/|·]+/, "")
+    .replace(/[\s,;:\-–—/|·]+$/, "")
+    .trim();
+}
+
+/** A field is optional when the template author marks it so — either an explicit flag
+ *  or "(optional)" in the label, the convention the seeded templates already use. */
+function isOptional(f: { key: string; label: string; optional?: boolean }): boolean {
+  return f.optional === true || /\(\s*optional\s*\)/i.test(f.label || "");
 }
 
 export default function ApplyTemplateDialog({
@@ -92,9 +108,12 @@ export default function ApplyTemplateDialog({
       ? renderTemplate(selected.description_template, values)
       : "";
 
-  const allFilled = selected
-    ? selected.fields.every((f) => (values[f.key] || "").trim().length > 0)
-    : false;
+  // Optional fields must not block Apply — the Landscape template ships one labelled
+  // "(optional)", which left the button permanently greyed out.
+  const missingRequired = selected
+    ? selected.fields.filter((f) => !isOptional(f) && !(values[f.key] || "").trim())
+    : [];
+  const allFilled = !!selected && missingRequired.length === 0;
 
   function handleApply() {
     if (!selected) return;
@@ -299,10 +318,17 @@ export default function ApplyTemplateDialog({
             padding: "14px 20px",
             borderTop: "0.5px solid var(--border)",
             display: "flex",
+            alignItems: "center",
             justifyContent: "flex-end",
             gap: 8,
           }}
         >
+          {selected && missingRequired.length > 0 && (
+            // Never leave a disabled button unexplained.
+            <span style={{ marginRight: "auto", fontSize: 11.5, color: "var(--text-fade)" }}>
+              Fill in {missingRequired.map((f) => f.label).join(", ")} to apply
+            </span>
+          )}
           <button className="fp-btn-ghost" onClick={onCancel}>
             Cancel
           </button>
