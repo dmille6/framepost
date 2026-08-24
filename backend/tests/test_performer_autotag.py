@@ -84,3 +84,25 @@ def test_autotag_links_and_is_idempotent(db):
     db.commit()
     assert again == []
     assert db.query(PostPerformer).filter_by(post_id=post.id).count() == 2
+
+
+def test_bare_duplicate_of_claimed_handle_is_dropped():
+    # Lightroom exports a keyword and its synonym, so the performer arrives twice.
+    handles, keep = ps.extract_at_handles(
+        "2026, bebe.bardeaux, burlesque, @bebe.bardeaux, nola"
+    )
+    assert handles == ["bebe.bardeaux"]
+    assert keep == "2026, burlesque, nola"
+
+
+def test_bare_duplicate_matching_ignores_punctuation():
+    # "@mx.eli.rose" and a bare "mxelirose" are the same identity for hashtag purposes.
+    handles, keep = ps.extract_at_handles("@mx.eli.rose, mxelirose, stage")
+    assert handles == ["mx.eli.rose"]
+    assert keep == "stage"
+
+
+def test_unrelated_tags_survive():
+    handles, keep = ps.extract_at_handles("@juju, jujubes, stage")
+    assert handles == ["juju"]
+    assert keep == "jujubes, stage"

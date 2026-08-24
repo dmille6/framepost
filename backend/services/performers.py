@@ -278,6 +278,13 @@ def extract_at_handles(raw_tags: str | None) -> tuple[list[str], str | None]:
                 handles.append(handle)
         else:
             keep.append(token)
+
+    # Lightroom exports a keyword AND its synonyms, so the same performer often arrives
+    # twice: "@bebe.bardeaux" and a bare "bebe.bardeaux". Drop bare duplicates of any
+    # handle we just claimed — left in tags they'd make caption_context treat the handle
+    # as already mentioned and skip the @mention, costing the attribution.
+    claimed = {_hashtag_safe(h) for h in handles}
+    keep = [t for t in keep if _hashtag_safe(t) not in claimed]
     return handles, (", ".join(keep) if keep else None)
 
 

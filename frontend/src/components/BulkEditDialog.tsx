@@ -79,6 +79,25 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
     queryFn: fetchRecentCities,
   });
 
+  // Performers already on the selected drafts — mostly from @-keyword auto-tagging at
+  // import. The Performers input below is add-to-all, so without this the user has no
+  // way to tell whether anything is already tagged.
+  const { data: existingPerformers = [] } = useQuery({
+    queryKey: ["bulk-existing-performers", postIds.join(",")],
+    queryFn: async () => {
+      const lists = await Promise.all(postIds.map((id) => getPostPerformers(id)));
+      const counts = new Map<string, { name: string; n: number }>();
+      for (const list of lists) {
+        for (const p of list) {
+          const prev = counts.get(p.id);
+          counts.set(p.id, { name: p.display_name, n: (prev?.n ?? 0) + 1 });
+        }
+      }
+      return [...counts.values()].sort((a, b) => b.n - a.n);
+    },
+    enabled: postIds.length > 0,
+  });
+
   const [progress, setProgress] = useState<{ done: number; failed: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -345,6 +364,18 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
                 : "Replaces each draft's performer list with these."
             }
           >
+            {existingPerformers.length > 0 && (
+              <div style={{ fontSize: 11, color: "var(--text-fade)", marginBottom: 6 }}>
+                Already tagged:{" "}
+                {existingPerformers.map((p, i) => (
+                  <span key={p.name}>
+                    {i > 0 && ", "}
+                    <span style={{ color: "var(--teal)" }}>{p.name}</span>
+                    {p.n < postIds.length ? ` (${p.n} of ${postIds.length})` : ""}
+                  </span>
+                ))}
+              </div>
+            )}
             <PerformersField selected={bulkPerformers} onChange={setBulkPerformers} label="" />
             <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
               <ModeChip
