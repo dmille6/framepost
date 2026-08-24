@@ -198,14 +198,24 @@ def caption_context_for_post(db: Session, post: Post) -> CaptionContext:
     def _add_entity(handle: str | None, display_name: str) -> None:
         """Add @-mention and #-hashtag for an entity, skipping if either is already
         present (in user-typed text/tags or already added by an earlier entity)."""
+        # Mentions and hashtags dedupe against DIFFERENT sources, because they are
+        # different things: a mention is redundant only if the user already wrote it in
+        # the caption text, while a hashtag is redundant if the tag list already carries
+        # it. A keyword tag never produces a mention, so tags must not suppress one —
+        # that silently cost attribution on photos carrying both "@handle" and a bare
+        # "handle" keyword (Lightroom exports a keyword and its synonyms).
         candidates = _candidate_keys(handle, display_name)
-        if _entity_already_in(text_lower, tags_lower, candidates):
-            return
-        if handle:
+        in_text = _entity_already_in(text_lower, "", candidates)
+        in_tags = _entity_already_in("", tags_lower, candidates)
+
+        if handle and not in_text:
             mk = handle.lower()
             if mk not in seen_mention_keys:
                 mention_handles.append(handle)
                 seen_mention_keys.add(mk)
+
+        if in_text or in_tags:
+            return  # the # form is already in the caption, or comes from the tag block
         # Handles can carry periods (valid in @mentions, fatal in #hashtags) — sanitize,
         # falling back to the CamelCase display name if nothing survives.
         hashtag_token = (_hashtag_safe(handle) if handle else "") or _camel_token(display_name)
@@ -279,12 +289,10 @@ def extract_at_handles(raw_tags: str | None) -> tuple[list[str], str | None]:
         else:
             keep.append(token)
 
-    # Lightroom exports a keyword AND its synonyms, so the same performer often arrives
-    # twice: "@bebe.bardeaux" and a bare "bebe.bardeaux". Drop bare duplicates of any
-    # handle we just claimed — left in tags they'd make caption_context treat the handle
-    # as already mentioned and skip the @mention, costing the attribution.
-    claimed = {_hashtag_safe(h) for h in handles}
-    keep = [t for t in keep if _hashtag_safe(t) not in claimed]
+    # A bare duplicate of a claimed handle ("bebe.bardeaux" alongside "@bebe.bardeaux")
+    # is KEPT — the photographer enters both deliberately and wants the bare form in the
+    # hashtag block. caption_context dedupes @mentions against caption TEXT only, so a
+    # kept tag no longer suppresses the mention.
     return handles, (", ".join(keep) if keep else None)
 
 

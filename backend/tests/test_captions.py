@@ -47,3 +47,38 @@ def test_caption_keeps_title_when_description_differs(db):
     db.commit()
     caption = _build_caption_for("pixelfed", post, db)
     assert caption.startswith("Juju\n\nFire poi")
+
+
+def test_bare_tag_does_not_suppress_the_mention(db):
+    """Regression: a keyword tag matching a performer's handle used to make the caption
+    builder treat the handle as already mentioned, dropping the @mention entirely."""
+    import uuid
+    from models import Performer, PostPerformer
+
+    perf = Performer(id=uuid.uuid4().hex, display_name="Bebe", instagram_handle="bebe.bardeaux")
+    post = _post(title="Bebe at Teaser Fest", description="Fire and feathers.",
+                 tags="burlesque, bebe.bardeaux, nola")
+    db.add_all([perf, post])
+    db.flush()
+    db.add(PostPerformer(post_id=post.id, performer_id=perf.id, position=0))
+    db.commit()
+
+    ctx = performers_svc.caption_context_for_post(db, post)
+    assert ctx.mention_block == "@bebe.bardeaux"     # mention survives the tag
+    assert ctx.hashtag_tokens == []                  # hashtag comes from the tag block
+
+
+def test_handle_written_in_text_still_suppresses_the_mention(db):
+    """The opposite case must keep working: don't double up when the user typed it."""
+    import uuid
+    from models import Performer, PostPerformer
+
+    perf = Performer(id=uuid.uuid4().hex, display_name="Eddie", instagram_handle="onlyeddielockwood")
+    post = _post(title="Eddie Lockwood", description="Eddie - @onlyeddielockwood - No Ring Circus")
+    db.add_all([perf, post])
+    db.flush()
+    db.add(PostPerformer(post_id=post.id, performer_id=perf.id, position=0))
+    db.commit()
+
+    ctx = performers_svc.caption_context_for_post(db, post)
+    assert ctx.mention_block == ""
