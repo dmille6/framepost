@@ -144,7 +144,8 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
               lineHeight: 1.6,
             }}
           >
-            Each post lands on a random unoccupied day in the next 365 days, at one of these
+            Each post lands on a random day in the next 365 days — every day fills to one
+            post before any day takes a second — at one of these
             local hours: <strong>{hourText}</strong>
             {popular?.learned ? (
               <>

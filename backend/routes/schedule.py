@@ -419,6 +419,73 @@ def popular_hours(
     return PopularHoursOut(hours=hours, learned=learned, sample_posts=n)
 
 
+# Scatter density. One post per day is the default shape; when EVERY day in the horizon
+# already has a post, scatter starts a second pass and allows two, and so on up to this
+# ceiling. Configurable via app_config.scatter_max_per_day.
+_DEFAULT_MAX_PER_DAY = 2
+
+
+def _scatter_max_per_day(db: Session) -> int:
+    row = db.execute(
+        select(AppConfig).where(AppConfig.key == "scatter_max_per_day")
+    ).scalar_one_or_none()
+    try:
+        val = int(row.value) if row and row.value else _DEFAULT_MAX_PER_DAY
+    except ValueError:
+        val = _DEFAULT_MAX_PER_DAY
+    return max(1, min(val, len(_POPULAR_HOURS)))
+
+
+def _stratified(days: list[date_type], n: int) -> list[date_type]:
+    """Pick n days spread evenly across a chronological list: split into n segments,
+    take one random day from each. Keeps a show's photos from clumping."""
+    if n <= 0 or not days:
+        return []
+    n = min(n, len(days))
+    bounds = [round(i * len(days) / n) for i in range(n + 1)]
+    return [random.choice(days[a:b]) for a, b in zip(bounds, bounds[1:]) if b > a]
+
+
+def _pick_days_tiered(
+    horizon_days: list[date_type],
+    day_counts: dict[date_type, int],
+    needed: int,
+    max_per_day: int,
+) -> tuple[list[date_type], list[date_type]]:
+    """Choose `needed` days, filling the calendar in density tiers.
+
+    Tier 0 considers only empty days, tier 1 only days holding exactly one post, and so
+    on up to max_per_day. Each tier is picked stratified across the whole horizon, so a
+    batch spreads evenly *within* its tier, and no day takes a second post while any day
+    in the horizon still has none.
+
+    Returns (picks, spares) — picks in shuffled assignment order (so scheduling order
+    carries no show-chronology signal), spares as fallback days for the rare case where
+    every popular hour on a picked day is already taken.
+    """
+    horizon_days = sorted(horizon_days)
+    counts = dict(day_counts)
+    picks: list[date_type] = []
+    for tier in range(max_per_day):
+        if len(picks) >= needed:
+            break
+        eligible = [d for d in horizon_days if counts.get(d, 0) == tier]
+        if not eligible:
+            continue
+        chosen = _stratified(eligible, needed - len(picks))
+        for d in chosen:
+            counts[d] = counts.get(d, 0) + 1
+        picks.extend(chosen)
+    picked = set(picks)
+    spares = [
+        d for d in horizon_days
+        if d not in picked and counts.get(d, 0) < max_per_day
+    ]
+    random.shuffle(picks)
+    random.shuffle(spares)
+    return picks, spares
+
+
 def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFillResponse:
     """Scatter the selected posts across the next 12 months at popular local-time slots.
 
@@ -454,8 +521,9 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
 
     eligible_count = sum(1 for _, _, err in posts if err is None)
 
-    # Days already booked (any post in this user's posted/pending schedule, in local-date space).
-    occupied_local_dates: set[date_type] = set()
+    # Posts already on each local day. Counts, not a boolean set: scatter fills every day
+    # to one post before any day takes a second (see _pick_days_tiered).
+    day_counts: dict[date_type, int] = {}
     existing = db.execute(
         select(Post.scheduled_at).where(Post.scheduled_at.is_not(None))
     ).scalars().all()
@@ -463,44 +531,27 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
         if sched is None:
             continue
         local_d = sched.replace(tzinfo=timezone.utc).astimezone(tz).date()
-        occupied_local_dates.add(local_d)
+        day_counts[local_d] = day_counts.get(local_d, 0) + 1
 
-    # Free days in window. Skip today (would need to be a future time too) — start at tomorrow.
-    free_days: list[date_type] = []
+    # Candidate days in window. Start at tomorrow (today would need a future hour too).
+    horizon_days: list[date_type] = []
     for i in range(1, _SCATTER_HORIZON_DAYS + 1):
         d = today_local + timedelta(days=i)
-        if d in occupied_local_dates:
-            continue
         if body.skip_weekends and d.weekday() >= 5:
             continue
-        free_days.append(d)
+        horizon_days.append(d)
 
-    if len(free_days) < eligible_count:
-        # Not enough free days — we'll fill what we can; the rest get "skipped" slots.
+    max_per_day = _scatter_max_per_day(db)
+    picks, spares = _pick_days_tiered(
+        horizon_days, day_counts, eligible_count, max_per_day
+    )
+    if len(picks) < eligible_count:
         log.warning(
-            "random_scatter: %d posts requested but only %d free days in horizon",
-            eligible_count, len(free_days),
+            "random_scatter: %d posts requested but only %d slots available "
+            "(%d-day horizon at max %d/day)",
+            eligible_count, len(picks), _SCATTER_HORIZON_DAYS, max_per_day,
         )
-
-    # Stratified pick instead of a plain shuffle: split the chronological free-day list
-    # into one segment per post and draw a random day from each segment. A 40-shot batch
-    # then spreads ~evenly across the whole horizon (segment width ± jitter) instead of
-    # producing the same-week clumps uniform draws are prone to — important because a
-    # whole show's photos arrive as one batch and shouldn't land bunched together. The
-    # picks are shuffled afterwards so scheduling order carries no show-chronology
-    # signal; unpicked days follow as spares for the (rare) slot-collision fallback.
-    free_days.sort()
-    if eligible_count and free_days:
-        n = min(eligible_count, len(free_days))
-        bounds = [round(i * len(free_days) / n) for i in range(n + 1)]
-        picks = [random.choice(free_days[a:b]) for a, b in zip(bounds, bounds[1:]) if b > a]
-        picked_set = set(picks)
-        spares = [d for d in free_days if d not in picked_set]
-        random.shuffle(picks)
-        random.shuffle(spares)
-        free_days = picks + spares
-    else:
-        random.shuffle(free_days)
+    day_iter_source = picks + spares
     # Reserve set of (date, hour) slots taken during THIS scatter run so we don't double-book.
     used_local_slots: set[tuple[date_type, int]] = set()
 
@@ -523,7 +574,7 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
         return None
 
     slots: list[SmartFillSlot] = []
-    day_iter = iter(free_days)
+    day_iter = iter(day_iter_source)
     for pid, post, err in posts:
         if err is not None:
             slots.append(
@@ -550,7 +601,12 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
                     title=post.title,
                     original_filename=post.original_filename,
                     scheduled_at=None,
-                    skipped_reason="no free popular-hour slot found in the next 365 days",
+                    skipped_reason=(
+                        f"calendar is full — every day in the next "
+                        f"{_SCATTER_HORIZON_DAYS} days already has {max_per_day} "
+                        "post(s). Raise the per-day limit in Settings, or schedule "
+                        "these manually."
+                    ),
                 )
             )
             continue
