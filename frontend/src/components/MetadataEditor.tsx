@@ -65,6 +65,23 @@ type Props = {
 const MAX_GROUPS = 5;
 const WARN_GROUPS = 8;
 
+/** "Bebe Bardeaux - @bebe.bardeaux" when the performer has a real name AND a handle;
+ *  just "@handle" when the name is only the handle (auto-created from a keyword). */
+export function formatPerformerForTemplate(p: { display_name: string; instagram_handle: string | null }): string {
+  const handle = (p.instagram_handle || "").replace(/^@+/, "");
+  if (!handle) return p.display_name;
+  if (p.display_name.toLowerCase() === handle.toLowerCase()) return `@${handle}`;
+  return `${p.display_name} - @${handle}`;
+}
+
+/** Capture date in the shape the seeded templates expect: "Jan 2026". */
+export function formatTemplateDate(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+}
+
 export default function MetadataEditor({ post, onSave, onSchedule, onDelete, scheduleLabel, saving }: Props) {
   const [title, setTitle] = useState(post.title ?? "");
   const [description, setDescription] = useState(post.description ?? "");
@@ -697,6 +714,14 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         <ApplyTemplateDialog
           initialTitle={title}
           initialDescription={description}
+          context={{
+            // Live editor state, so the dialog reflects unsaved edits too.
+            performers: performers.map(formatPerformerForTemplate),
+            venue: venue?.display_name ?? null,
+            show: show || null,
+            city: city || null,
+            date: formatTemplateDate(post.captured_at),
+          }}
           onCancel={() => setTemplateOpen(false)}
           onApply={({ title: t, description: d }) => {
             setTitle(t);

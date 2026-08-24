@@ -20,6 +20,7 @@ import {
   type Venue,
 } from "../api/client";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
+import { formatPerformerForTemplate, formatTemplateDate } from "./MetadataEditor";
 import MultiSelectChips from "./MultiSelectChips";
 import PerformersField from "./PerformersField";
 import VenueField from "./VenueField";
@@ -52,6 +53,14 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   const [bulkShow, setBulkShow] = useState("");
   const [bulkCity, setBulkCity] = useState("");
   const [templateOpen, setTemplateOpen] = useState(false);
+
+  // One representative draft supplies show / city / capture date for template prefill —
+  // a show batch shares those by definition, and fetching all N would be wasteful.
+  const { data: samplePost } = useQuery({
+    queryKey: ["bulk-sample-post", postIds[0]],
+    queryFn: () => getPost(postIds[0]),
+    enabled: postIds.length > 0,
+  });
 
   // Per-section apply toggles. Selects + multi-select sections need explicit opt-in
   // because "empty" is ambiguous (vs text fields where empty == don't change).
@@ -86,11 +95,15 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
     queryKey: ["bulk-existing-performers", postIds.join(",")],
     queryFn: async () => {
       const lists = await Promise.all(postIds.map((id) => getPostPerformers(id)));
-      const counts = new Map<string, { name: string; n: number }>();
+      const counts = new Map<string, { name: string; handle: string | null; n: number }>();
       for (const list of lists) {
         for (const p of list) {
           const prev = counts.get(p.id);
-          counts.set(p.id, { name: p.display_name, n: (prev?.n ?? 0) + 1 });
+          counts.set(p.id, {
+            name: p.display_name,
+            handle: p.instagram_handle ?? null,
+            n: (prev?.n ?? 0) + 1,
+          });
         }
       }
       return [...counts.values()].sort((a, b) => b.n - a.n);
@@ -652,6 +665,17 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
         <ApplyTemplateDialog
           initialTitle={title}
           initialDescription={description}
+          context={{
+            // Performers auto-tagged from @keywords across the selection, plus the
+            // batch's shared context — typed values in this dialog win where set.
+            performers: existingPerformers.map((p) =>
+              formatPerformerForTemplate({ display_name: p.name, instagram_handle: p.handle }),
+            ),
+            venue: bulkVenue?.display_name ?? null,
+            show: bulkShow || samplePost?.show || null,
+            city: bulkCity || samplePost?.city || null,
+            date: formatTemplateDate(samplePost?.captured_at),
+          }}
           onCancel={() => setTemplateOpen(false)}
           onApply={({ title: t, description: d }) => {
             // Fills the bulk fields; the user still reviews before Apply-to-N.

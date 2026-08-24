@@ -6,6 +6,8 @@ import { listTitleTemplates } from "../api/client";
 type Props = {
   initialTitle?: string | null;
   initialDescription?: string | null;
+  /** What the post/batch already knows — prefills fields (see contextValueFor). */
+  context?: TemplateContext;
   onCancel: () => void;
   onApply: (next: { title: string; description: string | null }) => void;
 };
@@ -28,6 +30,42 @@ function saveStored(s: StoredValues) {
     localStorage.setItem(LS_KEY, JSON.stringify(s));
   } catch {
     /* localStorage full or disabled — ignore */
+  }
+}
+
+/** What the post (or the selected batch) already knows — used to prefill template
+ *  fields so the dialog never asks for something FramePost can already answer. */
+export type TemplateContext = {
+  performers?: string[];   // formatted for display, e.g. "Bebe Bardeaux - @bebe.bardeaux"
+  venue?: string | null;
+  show?: string | null;
+  city?: string | null;
+  date?: string | null;    // already formatted, e.g. "Jan 2026"
+};
+
+/** Map a template field key onto the context. Keys follow the seeded templates:
+ *  performer/subject, event, venue, location, city, date. Anything unknown (e.g.
+ *  Landscape's free-text "context") stays blank. */
+function contextValueFor(key: string, ctx: TemplateContext | undefined): string {
+  if (!ctx) return "";
+  const performers = (ctx.performers ?? []).filter(Boolean);
+  switch (key) {
+    case "performer":
+    case "subject":
+      return performers.join(" & ");
+    case "event":
+    case "show":
+      return ctx.show || "";
+    case "venue":
+      return ctx.venue || "";
+    case "location":
+      return ctx.venue || ctx.city || "";
+    case "city":
+      return ctx.city || "";
+    case "date":
+      return ctx.date || "";
+    default:
+      return "";
   }
 }
 
@@ -54,6 +92,7 @@ function isOptional(f: { key: string; label: string; optional?: boolean }): bool
 export default function ApplyTemplateDialog({
   initialTitle,
   initialDescription,
+  context,
   onCancel,
   onApply,
 }: Props) {
@@ -88,10 +127,12 @@ export default function ApplyTemplateDialog({
     const stored = loadStored()[selected.id] ?? {};
     const initial: Record<string, string> = {};
     for (const f of selected.fields) {
-      initial[f.key] = stored[f.key] ?? "";
+      // Precedence: what this post actually is > what we typed last time > blank.
+      // Without the first, a repeat-shoot memory silently credits the wrong performer.
+      initial[f.key] = contextValueFor(f.key, context) || stored[f.key] || "";
     }
     setValues(initial);
-  }, [selected?.id, selected?.fields.length]);
+  }, [selected?.id, selected?.fields.length, JSON.stringify(context ?? {})]);
 
   // Esc closes
   useEffect(() => {
