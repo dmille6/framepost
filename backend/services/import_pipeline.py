@@ -32,6 +32,7 @@ from sqlalchemy import select
 
 from models import AppConfig, Post
 from services import duplicate, events, exif, image, iptc, storage
+from services import performers as performers_svc
 
 log = logging.getLogger("framepost.import")
 
@@ -126,11 +127,18 @@ def import_image(
     default_privacy = (priv_row.value if priv_row and priv_row.value else "public")
     if default_privacy not in ("private", "friends_family", "public"):
         default_privacy = "public"
+    # Lightroom keywords prefixed with @ name performers by IG handle. Pull them out of
+    # the tag list here — once linked, the performer system owns that identity and the
+    # caption builders emit both @mention and #hashtag forms. (Leaving the bare token in
+    # tags would make caption_context treat the handle as already present and drop the
+    # mention, losing attribution.)
+    at_handles, remaining_tags = performers_svc.extract_at_handles(iptc_fields["tags"])
+
     post = Post(
         id=post_id,
         title=iptc_fields["title"],
         description=iptc_fields["description"],
-        tags=iptc_fields["tags"],
+        tags=remaining_tags,
         status="pending",
         privacy=default_privacy,
         original_filename=original_filename,
@@ -156,6 +164,19 @@ def import_image(
         updated_at=now,
     )
     db.add(post)
+    db.flush()
+
+    if at_handles:
+        linked = performers_svc.autotag_from_handles(db, post_id, at_handles)
+        if linked:
+            events.log_event(
+                db,
+                post_id=post_id,
+                event_type="performer_autotagged",
+                actor=actor,
+                details={"from_keywords": at_handles, "linked": linked},
+            )
+
     events.log_event(
         db,
         post_id=post_id,

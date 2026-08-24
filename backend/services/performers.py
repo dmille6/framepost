@@ -9,9 +9,11 @@ Both blocks render in performer insertion order (PostPerformer.position).
 """
 from __future__ import annotations
 
+import re as _re
+import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from models import Performer, Post, PostPerformer, Venue
@@ -243,3 +245,81 @@ def caption_context_for_post(db: Session, post: Post) -> CaptionContext:
 
     mention = " ".join(f"@{h}" for h in mention_handles)
     return CaptionContext(mention_block=mention, hashtag_tokens=hashtag_tokens)
+
+
+# -----------------------------------------------------------------------------
+# Auto-tagging from @-prefixed IPTC keywords
+# -----------------------------------------------------------------------------
+
+_AT_KEYWORD = _re.compile(r"^@([A-Za-z0-9._]+)$")
+
+
+def extract_at_handles(raw_tags: str | None) -> tuple[list[str], str | None]:
+    """Split an IPTC keyword string into (@handles, remaining tag string).
+
+    Lightroom keywords like "@mx.eli.rose" name the performer by IG handle. Those
+    tokens are pulled OUT of the tag list — once the photo is linked to a performer,
+    the caption builders own that identity and emit both @mention and #hashtag forms.
+    Leaving the bare token in tags would suppress the mention (the dedupe in
+    caption_context_for_post treats it as already present) and lose attribution.
+    """
+    if not raw_tags:
+        return [], raw_tags
+    handles: list[str] = []
+    keep: list[str] = []
+    for part in raw_tags.replace("\n", ",").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        m = _AT_KEYWORD.match(token)
+        if m:
+            handle = m.group(1).strip(".")
+            if handle and handle.lower() not in {h.lower() for h in handles}:
+                handles.append(handle)
+        else:
+            keep.append(token)
+    return handles, (", ".join(keep) if keep else None)
+
+
+def find_or_create_by_handle(db: Session, handle: str) -> tuple[Performer, bool]:
+    """Look up a performer by IG handle (case-insensitive), creating one if absent.
+
+    A new performer gets display_name = the handle; the user renames it later in
+    Settings → Performers. Returns (performer, created).
+    """
+    handle = handle.lstrip("@").strip()
+    existing = db.execute(
+        select(Performer).where(func.lower(Performer.instagram_handle) == handle.lower())
+    ).scalars().first()
+    if existing:
+        return existing, False
+    # Don't collide with an existing display_name (unique) that has no handle set.
+    by_name = db.execute(
+        select(Performer).where(func.lower(Performer.display_name) == handle.lower())
+    ).scalars().first()
+    if by_name:
+        if not by_name.instagram_handle:
+            by_name.instagram_handle = handle
+        return by_name, False
+    p = Performer(id=uuid.uuid4().hex, display_name=handle, instagram_handle=handle)
+    db.add(p)
+    db.flush()
+    return p, True
+
+
+def autotag_from_handles(db: Session, post_id: str, handles: list[str]) -> list[dict]:
+    """Link a post to performers named by @handles. Returns a summary per handle."""
+    if not handles:
+        return []
+    existing_ids = {p.id for p in get_post_performers(db, post_id)}
+    position = len(existing_ids)
+    out: list[dict] = []
+    for h in handles:
+        performer, created = find_or_create_by_handle(db, h)
+        if performer.id in existing_ids:
+            continue
+        db.add(PostPerformer(post_id=post_id, performer_id=performer.id, position=position))
+        existing_ids.add(performer.id)
+        position += 1
+        out.append({"handle": h, "performer": performer.display_name, "created": created})
+    return out
