@@ -8,7 +8,7 @@ the analytics surface is "current totals per post, grouped by various dimensions
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -18,12 +18,17 @@ from sqlalchemy.orm import Session
 
 from database import get_session
 from models import (
+    AccountStat,
     AppConfig,
     FlickrEngagement,
     Group,
+    Performer,
+    PlatformCredential,
     Post,
     PostGroup,
+    PostPerformer,
     User,
+    Venue,
 )
 from routes.auth import current_user
 from services import engagement
@@ -285,3 +290,191 @@ def trigger_sync(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Flickr error: {e}")
     except RuntimeError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+
+# -----------------------------------------------------------------------------
+# Cross-platform analytics (0016). Everything below reads engagement_snapshots via
+# services/analytics_core, so Instagram / Bluesky / Pixelfed are first-class rather
+# than the Flickr-only view the endpoints above provide.
+# -----------------------------------------------------------------------------
+
+from services import analytics_core as ac  # noqa: E402
+
+
+class PlatformSummary(BaseModel):
+    platform: str
+    connected: bool
+    posts: int
+    median_quality: float | None
+    median_likes: float | None
+    median_comments: float | None
+    median_reach: float | None
+    median_views: float | None
+    saves_per_1k: float | None
+    shares_per_1k: float | None
+    comments_per_1k: float | None
+    visits_per_1k: float | None
+    follows_per_1k: float | None
+    low_sample: bool
+
+
+class LeaderboardRow(BaseModel):
+    key: str
+    label: str
+    posts: int
+    median_quality: float | None
+    saves_per_1k: float | None
+    comments_per_1k: float | None
+    visits_per_1k: float | None
+    lift: float | None          # vs. the median post on the same platform, as a ratio
+    low_sample: bool
+    last_posted: datetime | None
+
+
+class AccountPoint(BaseModel):
+    date: str
+    followers: int | None
+    reach: int | None
+    profile_views: int | None
+    accounts_engaged: int | None
+    website_clicks: int | None
+
+
+@router.get("/platforms", response_model=list[PlatformSummary])
+def platform_summaries(
+    window: str | None = Query(None, pattern="^(24h|48h|7d)$"),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Side-by-side platform comparison. Metrics a platform doesn't report come back
+    null — the UI must show a dash, never a zero, or Bluesky looks like it has terrible
+    reach when it simply has no such concept."""
+    connected = {
+        c.platform for c in db.execute(
+            select(PlatformCredential).where(PlatformCredential.access_token.is_not(None))
+        ).scalars()
+    }
+    samples = ac.collect_samples(db, window=window)
+    out: list[PlatformSummary] = []
+    for plat in ac.PLATFORMS:
+        subset = [s for s in samples if s.platform == plat]
+        if not subset and plat not in connected:
+            continue
+        out.append(PlatformSummary(platform=plat, connected=plat in connected, **ac.summarize(subset)))
+    return out
+
+
+@router.get("/leaderboard", response_model=list[LeaderboardRow])
+def leaderboard(
+    dimension: str = Query("performer", pattern="^(performer|venue|show|city)$"),
+    platform: str | None = Query(None),
+    window: str | None = Query(None, pattern="^(24h|48h|7d)$"),
+    limit: int = Query(15, ge=1, le=100),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Which performers / venues / shows / cities actually earn engagement.
+
+    Medians, not averages — one viral frame shouldn't crown a performer forever. `lift`
+    compares each group's median against the platform-wide median, so 1.4 means "40%
+    better than a typical post"; that is the number worth acting on, not the raw score.
+    """
+    samples = ac.collect_samples(db, platform=platform, window=window)
+    if not samples:
+        return []
+    baseline = ac._median([s.quality for s in samples]) or 0
+
+    groups: dict[str, tuple[str, list]] = {}
+    for s in samples:
+        if dimension == "performer":
+            names = db.execute(
+                select(Performer.id, Performer.display_name)
+                .join(PostPerformer, PostPerformer.performer_id == Performer.id)
+                .where(PostPerformer.post_id == s.post.id)
+            ).all()
+            keys = [(pid, name) for pid, name in names]
+        elif dimension == "venue":
+            v = db.get(Venue, s.post.venue_id) if s.post.venue_id else None
+            keys = [(v.id, v.display_name)] if v else []
+        elif dimension == "show":
+            keys = [(s.post.show, s.post.show)] if s.post.show else []
+        else:
+            keys = [(s.post.city, s.post.city)] if s.post.city else []
+        for key, label in keys:
+            slot = groups.setdefault(str(key), (label, []))
+            slot[1].append(s)
+
+    rows: list[LeaderboardRow] = []
+    for key, (label, subset) in groups.items():
+        summary = ac.summarize(subset)
+        mq = summary["median_quality"]
+        rows.append(
+            LeaderboardRow(
+                key=key, label=label, posts=summary["posts"],
+                median_quality=mq,
+                saves_per_1k=summary["saves_per_1k"],
+                comments_per_1k=summary["comments_per_1k"],
+                visits_per_1k=summary["visits_per_1k"],
+                lift=round(mq / baseline, 2) if (mq and baseline) else None,
+                low_sample=summary["low_sample"],
+                last_posted=max((x.posted_at for x in subset), default=None),
+            )
+        )
+    # Confident rows first, then by performance — a 1-post wonder shouldn't top the list.
+    rows.sort(key=lambda r: (not r.low_sample, r.median_quality or 0), reverse=True)
+    return rows[:limit]
+
+
+@router.get("/account-trend", response_model=list[AccountPoint])
+def account_trend(
+    platform: str = Query("instagram"),
+    days: int = Query(90, ge=7, le=730),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Daily audience series — follower growth and reach/profile-view trend."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+    rows = db.execute(
+        select(AccountStat)
+        .where(AccountStat.platform == platform, AccountStat.stat_date >= cutoff)
+        .order_by(AccountStat.stat_date)
+    ).scalars().all()
+    return [
+        AccountPoint(
+            date=r.stat_date.isoformat(), followers=r.followers, reach=r.reach,
+            profile_views=r.profile_views, accounts_engaged=r.accounts_engaged,
+            website_clicks=r.website_clicks,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/top-posts-v2")
+def top_posts_v2(
+    platform: str | None = Query(None),
+    window: str | None = Query(None, pattern="^(24h|48h|7d)$"),
+    limit: int = Query(12, ge=1, le=50),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Best posts by the platform-appropriate quality score, with the rate metrics
+    that explain WHY they did well."""
+    samples = ac.collect_samples(db, platform=platform, window=window)
+    samples.sort(key=lambda s: s.quality, reverse=True)
+    out = []
+    for s in samples[:limit]:
+        out.append({
+            "post_id": s.post.id,
+            "title": s.post.title,
+            "platform": s.platform,
+            "posted_at": s.posted_at.isoformat() if s.posted_at else None,
+            "quality": round(s.quality, 1),
+            "likes": s.likes, "comments": s.comments,
+            "views": s.views or None, "reach": s.reach,
+            "saves": s.saves, "shares": s.shares,
+            "profile_visits": s.profile_visits, "follows": s.follows,
+            "saves_per_1k": s.rate("saves"),
+            "comments_per_1k": s.rate("comments"),
+            "flickr_url": s.post.flickr_url,
+        })
+    return out

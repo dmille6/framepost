@@ -2,7 +2,12 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  fetchAccountTrend,
   fetchAnalyticsOverview,
+  fetchLeaderboard,
+  fetchPlatformSummaries,
+  fetchTopPostsV2,
+  type AccountPoint,
   fetchBestTimes,
   fetchGroupStats,
   fetchTagStats,
@@ -21,6 +26,29 @@ const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export default function Analytics() {
   usePageTitle("Analytics");
   const qc = useQueryClient();
+  // Cross-platform controls. `window` compares posts at the same AGE (a January post
+  // has had six more months to accumulate than a July one), `platform` narrows the lens.
+  const [platform, setPlatform] = useState<string | null>(null);
+  const [window_, setWindow] = useState<string | null>(null);
+  const [dimension, setDimension] = useState("performer");
+
+  const { data: platforms = [] } = useQuery({
+    queryKey: ["analytics-platforms", window_],
+    queryFn: () => fetchPlatformSummaries(window_),
+  });
+  const { data: board = [] } = useQuery({
+    queryKey: ["analytics-leaderboard", dimension, platform, window_],
+    queryFn: () => fetchLeaderboard(dimension, platform, window_),
+  });
+  const { data: trend = [] } = useQuery({
+    queryKey: ["analytics-account-trend"],
+    queryFn: () => fetchAccountTrend("instagram", 90),
+  });
+  const { data: topV2 = [] } = useQuery({
+    queryKey: ["analytics-top-v2", platform, window_],
+    queryFn: () => fetchTopPostsV2(platform, window_),
+  });
+
   const { data: overview } = useQuery({ queryKey: ["analytics-overview"], queryFn: fetchAnalyticsOverview });
   const { data: bestTimes = [] } = useQuery({ queryKey: ["analytics-best-times"], queryFn: fetchBestTimes });
   const { data: groupStats = [] } = useQuery({ queryKey: ["analytics-groups"], queryFn: fetchGroupStats });
@@ -66,6 +94,164 @@ export default function Analytics() {
             </button>
           }
         />
+
+        {/* ---- Cross-platform view (engagement_snapshots) ---------------------- */}
+        <div className="fp-card" style={{ marginBottom: 16 }}>
+          <CardHeader
+            title="All platforms"
+            subtitle="Medians, not totals — one viral frame shouldn't set the bar. A dash means the platform doesn't report that metric."
+            action={
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <Segmented
+                  value={window_ ?? "lifetime"}
+                  onChange={(v) => setWindow(v === "lifetime" ? null : v)}
+                  options={[
+                    { value: "lifetime", label: "Lifetime" },
+                    { value: "24h", label: "24h" },
+                    { value: "48h", label: "48h" },
+                    { value: "7d", label: "7d" },
+                  ]}
+                />
+              </div>
+            }
+          />
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 620 }}>
+              <thead>
+                <tr>
+                  {["Platform", "Posts", "Median score", "Likes", "Comments", "Reach", "Saves/1k", "Visits/1k"].map((h, i) => (
+                    <th key={h} style={{ textAlign: i === 0 ? "left" : "right", padding: "6px 10px", fontSize: 10.5, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-fade)", borderBottom: "0.5px solid var(--border)" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {platforms.map((p) => (
+                  <tr key={p.platform} style={{ cursor: "pointer", background: platform === p.platform ? "var(--teal-tint)" : "transparent" }}
+                      onClick={() => setPlatform(platform === p.platform ? null : p.platform)}
+                      title="Click to filter the sections below to this platform">
+                    <td style={{ padding: "8px 10px", borderBottom: "0.5px solid var(--border)", fontWeight: 500, textTransform: "capitalize" }}>
+                      {p.platform}
+                      {p.low_sample && p.posts > 0 && (
+                        <span title="Fewer than 5 posts — treat as provisional" style={{ marginLeft: 6, fontSize: 10, color: "var(--amber, #e0b268)" }}>· thin data</span>
+                      )}
+                    </td>
+                    <Num v={p.posts} />
+                    <Num v={p.median_quality} strong />
+                    <Num v={p.median_likes} />
+                    <Num v={p.median_comments} />
+                    <Num v={p.median_reach} />
+                    <Num v={p.saves_per_1k} />
+                    <Num v={p.visits_per_1k} />
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {platform && (
+            <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 8 }}>
+              Filtered to <strong style={{ textTransform: "capitalize" }}>{platform}</strong> —{" "}
+              <button className="fp-link" style={{ fontSize: 11.5 }} onClick={() => setPlatform(null)}>show all</button>
+            </div>
+          )}
+        </div>
+
+        {/* ---- Who / where earns engagement ------------------------------------ */}
+        <div className="fp-card" style={{ marginBottom: 16 }}>
+          <CardHeader
+            title="What earns engagement"
+            subtitle="Lift compares each group's median post against a typical post — 1.4 means 40% better. Thin rows sort last."
+            action={
+              <Segmented
+                value={dimension}
+                onChange={setDimension}
+                options={[
+                  { value: "performer", label: "Performers" },
+                  { value: "venue", label: "Venues" },
+                  { value: "show", label: "Shows" },
+                  { value: "city", label: "Cities" },
+                ]}
+              />
+            }
+          />
+          {board.length === 0 ? (
+            <div style={{ padding: 24, textAlign: "center", color: "var(--text-fade)", fontSize: 13 }}>
+              No tagged {dimension}s with engagement yet.
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 560 }}>
+                <thead>
+                  <tr>
+                    {["", "Posts", "Median score", "Lift", "Saves/1k", "Comments/1k"].map((h, i) => (
+                      <th key={h + i} style={{ textAlign: i === 0 ? "left" : "right", padding: "6px 10px", fontSize: 10.5, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-fade)", borderBottom: "0.5px solid var(--border)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {board.map((r) => (
+                    <tr key={r.key} style={{ opacity: r.low_sample ? 0.6 : 1 }}>
+                      <td style={{ padding: "8px 10px", borderBottom: "0.5px solid var(--border)" }}>
+                        {r.label}
+                        {r.low_sample && <span title="Fewer than 5 posts" style={{ marginLeft: 6, fontSize: 10, color: "var(--text-fade)" }}>· thin</span>}
+                      </td>
+                      <Num v={r.posts} />
+                      <Num v={r.median_quality} strong />
+                      <td style={{ padding: "8px 10px", borderBottom: "0.5px solid var(--border)", textAlign: "right", fontVariantNumeric: "tabular-nums",
+                                   color: r.lift == null ? "var(--text-fade)" : r.lift >= 1.2 ? "var(--teal)" : r.lift < 0.8 ? "var(--text-dim)" : "inherit" }}>
+                        {r.lift == null ? "—" : `${r.lift}x`}
+                      </td>
+                      <Num v={r.saves_per_1k} />
+                      <Num v={r.comments_per_1k} />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* ---- What worked ------------------------------------------------------ */}
+        {topV2.length > 0 && (
+          <div className="fp-card" style={{ marginBottom: 16 }}>
+            <CardHeader
+              title="What worked"
+              subtitle="Ranked by the platform's own quality score — saves, shares and follows outweigh likes, because they cost the viewer something."
+            />
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 660 }}>
+                <thead>
+                  <tr>
+                    {["Post", "Platform", "Score", "Likes", "Comments", "Reach", "Saves", "Visits"].map((h, i) => (
+                      <th key={h} style={{ textAlign: i < 2 ? "left" : "right", padding: "6px 10px", fontSize: 10.5, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-fade)", borderBottom: "0.5px solid var(--border)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {topV2.map((p) => (
+                    <tr key={`${p.post_id}-${p.platform}`}>
+                      <td style={{ padding: "8px 10px", borderBottom: "0.5px solid var(--border)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          title={p.title ?? ""}>
+                        {p.flickr_url ? (
+                          <a href={p.flickr_url} target="_blank" rel="noreferrer" style={{ color: "inherit" }}>{p.title || "(untitled)"}</a>
+                        ) : (p.title || "(untitled)")}
+                      </td>
+                      <td style={{ padding: "8px 10px", borderBottom: "0.5px solid var(--border)", textTransform: "capitalize", color: "var(--text-dim)" }}>{p.platform}</td>
+                      <Num v={p.quality} strong />
+                      <Num v={p.likes} />
+                      <Num v={p.comments} />
+                      <Num v={p.reach} />
+                      <Num v={p.saves} />
+                      <Num v={p.profile_visits} />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ---- Instagram audience ---------------------------------------------- */}
+        {trend.length > 0 && <AccountTrendCard points={trend} />}
 
         {overview && (
           <div className="fp-card" style={{ marginBottom: 16 }}>
@@ -331,6 +517,119 @@ function TopPostsCard({
               </div>
             </a>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/** Right-aligned numeric cell. Renders an em-dash for null so a metric the platform
+ *  doesn't report never reads as a zero. */
+function Num({ v, strong }: { v: number | null | undefined; strong?: boolean }) {
+  return (
+    <td
+      style={{
+        padding: "8px 10px",
+        borderBottom: "0.5px solid var(--border)",
+        textAlign: "right",
+        fontVariantNumeric: "tabular-nums",
+        fontWeight: strong ? 600 : 400,
+        color: v == null ? "var(--text-fade)" : "inherit",
+      }}
+    >
+      {v == null ? "—" : typeof v === "number" ? v.toLocaleString() : v}
+    </td>
+  );
+}
+
+function Segmented({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+}) {
+  return (
+    <div style={{ display: "inline-flex", border: "0.5px solid var(--border-strong)", borderRadius: 8, overflow: "hidden" }}>
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={o.value}
+            onClick={() => onChange(o.value)}
+            style={{
+              background: active ? "var(--hover)" : "transparent",
+              color: active ? "var(--text)" : "var(--text-dim)",
+              border: 0,
+              padding: "5px 11px",
+              fontSize: 12,
+              fontWeight: active ? 500 : 400,
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Follower + reach trend. A sparkline rather than a chart library — the shape and
+ *  the endpoints are what matter here. */
+function AccountTrendCard({ points }: { points: AccountPoint[] }) {
+  const followers = points.filter((p) => p.followers != null);
+  const first = followers[0]?.followers ?? null;
+  const last = followers[followers.length - 1]?.followers ?? null;
+  const delta = first != null && last != null ? last - first : null;
+  const reach = points.filter((p) => p.reach != null).map((p) => p.reach as number);
+  const maxReach = Math.max(1, ...reach);
+
+  return (
+    <div className="fp-card" style={{ marginBottom: 16 }}>
+      <CardHeader
+        title="Instagram audience"
+        subtitle={`Daily account stats · ${points.length} day${points.length === 1 ? "" : "s"} recorded`}
+      />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 14 }}>
+        {[
+          { l: "Followers", v: last?.toLocaleString() ?? "—", sub: delta != null ? `${delta >= 0 ? "+" : ""}${delta} in ${points.length}d` : null },
+          { l: "Reach (latest day)", v: points[points.length - 1]?.reach?.toLocaleString() ?? "—", sub: null },
+          { l: "Profile views", v: points[points.length - 1]?.profile_views?.toLocaleString() ?? "—", sub: null },
+          { l: "Accounts engaged", v: points[points.length - 1]?.accounts_engaged?.toLocaleString() ?? "—", sub: null },
+        ].map((c) => (
+          <div key={c.l} style={{ background: "var(--bg)", padding: "12px 14px", borderRadius: 10, border: "0.5px solid var(--border)" }}>
+            <div style={{ fontSize: 10.5, color: "var(--text-fade)", textTransform: "uppercase", letterSpacing: "0.04em", fontWeight: 500 }}>{c.l}</div>
+            <div style={{ fontSize: 20, fontWeight: 600, marginTop: 4, letterSpacing: "-0.02em" }}>{c.v}</div>
+            {c.sub && <div style={{ fontSize: 11, color: "var(--teal)", marginTop: 2 }}>{c.sub}</div>}
+          </div>
+        ))}
+      </div>
+      {reach.length > 1 && (
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 48 }}>
+          {points.map((p) => (
+            <div
+              key={p.date}
+              title={`${p.date} · reach ${p.reach ?? "—"} · profile views ${p.profile_views ?? "—"}`}
+              style={{
+                flex: 1,
+                height: `${((p.reach ?? 0) / maxReach) * 100}%`,
+                minHeight: 2,
+                background: "var(--teal)",
+                opacity: 0.55,
+                borderRadius: 2,
+              }}
+            />
+          ))}
+        </div>
+      )}
+      {points.length < 7 && (
+        <div style={{ fontSize: 11.5, color: "var(--text-fade)", marginTop: 10 }}>
+          Collecting baseline — trends get meaningful after a week or two of daily samples.
         </div>
       )}
     </div>

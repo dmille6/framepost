@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from crypto import decrypt_token
-from models import EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostLike, PostPlatform
+from models import AccountStat, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostLike, PostPlatform
 from services.platforms import bluesky as bluesky_svc
 from services.platforms import flickr
 
@@ -104,7 +104,11 @@ def _snapshot(
     likes: int = 0,
     comments_count: int = 0,
     reposts: int = 0,
+    **extra: int | None,
 ) -> None:
+    """Append one sample. `extra` carries the richer per-platform metrics added in
+    0016 (reach/saves/shares/profile_visits/follows); anything a platform doesn't
+    report stays NULL so analytics can tell "not reported" from "reported zero"."""
     db.add(
         EngagementSnapshot(
             post_id=post_id,
@@ -113,6 +117,7 @@ def _snapshot(
             likes=likes,
             comments_count=comments_count,
             reposts=reposts,
+            **{k: v for k, v in extra.items() if v is not None},
         )
     )
 
@@ -475,9 +480,16 @@ def _sync_instagram(db: Session, post_platforms: list[tuple[PostPlatform, Platfo
                 media = r1.json()
                 like_count = int(media.get("like_count") or 0)
                 comments_count = int(media.get("comments_count") or 0)
+                insights = _fetch_ig_media_insights(c, headers, pp.remote_id)
                 _snapshot(
                     db, post_id=pp.post_id, platform="instagram",
                     likes=like_count, comments_count=comments_count,
+                    views=insights.get("views") or 0,
+                    reach=insights.get("reach"),
+                    saves=insights.get("saved"),
+                    shares=insights.get("shares"),
+                    profile_visits=insights.get("profile_visits"),
+                    follows=insights.get("follows"),
                 )
 
                 after: str | None = None
@@ -520,6 +532,102 @@ def _sync_instagram(db: Session, post_platforms: list[tuple[PostPlatform, Platfo
             log.warning("instagram sync failed for %s: %s", pp.post_id[:8], e)
             summary["errors"] += 1
     return summary
+
+
+# Per-media insight metrics. Meta rejects the whole request if ANY metric is invalid
+# for that media type, so we ask for the safe set and drop to a minimal set on 400.
+_IG_MEDIA_METRICS = "reach,saved,shares,total_interactions,views,profile_visits,follows"
+_IG_MEDIA_METRICS_MIN = "reach,views"
+
+
+def _fetch_ig_media_insights(client: httpx.Client, headers: dict, media_id: str) -> dict[str, int]:
+    """{metric_name: value} for one media. Empty dict when insights are unavailable —
+    insights are best-effort and must never break the counts sync."""
+    for metrics in (_IG_MEDIA_METRICS, _IG_MEDIA_METRICS_MIN):
+        try:
+            r = client.get(
+                f"{_IG_GRAPH}/{media_id}/insights", headers=headers, params={"metric": metrics}
+            )
+        except httpx.HTTPError as e:
+            log.warning("instagram insights transport error for %s: %s", media_id, e)
+            return {}
+        if r.status_code == 200:
+            out: dict[str, int] = {}
+            for entry in r.json().get("data") or []:
+                name = entry.get("name")
+                values = entry.get("values") or [{}]
+                val = values[0].get("value")
+                if name is not None and isinstance(val, int):
+                    out[name] = val
+            return out
+        if r.status_code != 400:
+            log.warning("instagram insights HTTP %s for %s: %s",
+                        r.status_code, media_id, r.text[:160])
+            return {}
+    return {}
+
+
+def sync_instagram_account_stats(db: Session) -> dict[str, Any]:
+    """Daily audience-level numbers: follower count + reach / profile views /
+    accounts engaged / website clicks. One row per day, updated in place if re-run."""
+    cred = db.execute(
+        select(PlatformCredential).where(PlatformCredential.platform == "instagram")
+    ).scalar_one_or_none()
+    if not cred or not cred.access_token:
+        return {"skipped": "not connected"}
+    try:
+        token = decrypt_token(cred.access_token)
+        ig_user_id = json.loads(cred.extra_json or "{}").get("ig_user_id")
+        if not ig_user_id:
+            return {"skipped": "no ig_user_id"}
+        headers = {"Authorization": f"Bearer {token}"}
+        today = datetime.now(timezone.utc).date()
+        row = db.execute(
+            select(AccountStat).where(
+                AccountStat.platform == "instagram", AccountStat.stat_date == today
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = AccountStat(platform="instagram", stat_date=today)
+            db.add(row)
+
+        with httpx.Client(timeout=30.0) as c:
+            prof = c.get(
+                f"{_IG_GRAPH}/{ig_user_id}", headers=headers,
+                params={"fields": "followers_count,follows_count,media_count"},
+            )
+            if prof.status_code == 200:
+                p = prof.json()
+                row.followers = p.get("followers_count")
+                row.follows = p.get("follows_count")
+                row.media_count = p.get("media_count")
+
+            ins = c.get(
+                f"{_IG_GRAPH}/{ig_user_id}/insights", headers=headers,
+                params={
+                    "metric": "reach,profile_views,accounts_engaged,website_clicks",
+                    "period": "day",
+                    "metric_type": "total_value",
+                },
+            )
+            if ins.status_code == 200:
+                for entry in ins.json().get("data") or []:
+                    name = entry.get("name")
+                    val = (entry.get("total_value") or {}).get("value")
+                    if val is None:
+                        val = ((entry.get("values") or [{}])[0]).get("value")
+                    if name and isinstance(val, int):
+                        setattr(row, name, val)
+        row.sampled_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.commit()
+        return {
+            "followers": row.followers, "reach": row.reach,
+            "profile_views": row.profile_views, "accounts_engaged": row.accounts_engaged,
+        }
+    except Exception as e:  # noqa: BLE001 — audience stats are never worth failing a sync
+        log.warning("instagram account stats failed: %s", e)
+        db.rollback()
+        return {"error": str(e)[:160]}
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -591,6 +699,7 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
         "bluesky": _sync_bluesky(db, bluesky_targets),
         "pixelfed": _sync_pixelfed(db, pixelfed_targets),
         "instagram": _sync_instagram(db, instagram_targets),
+        "instagram_account": sync_instagram_account_stats(db),
     }
     db.commit()
     log.info("comments+engagement sync: %s", json.dumps(out))

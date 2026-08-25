@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Date,
     Column,
     DateTime,
     Float,
@@ -127,6 +128,29 @@ class EngagementSnapshot(Base):
     likes = Column(Integer, nullable=False, server_default="0")
     comments_count = Column(Integer, nullable=False, server_default="0")
     reposts = Column(Integer, nullable=False, server_default="0")
+    # Richer metrics (0016). NULL = this platform doesn't report it; 0 = it reported zero.
+    # Instagram fills all of these; Flickr/Bluesky/Pixelfed leave them NULL.
+    reach = Column(Integer)
+    saves = Column(Integer)
+    shares = Column(Integer)
+    profile_visits = Column(Integer)
+    follows = Column(Integer)
+
+
+class AccountStat(Base):
+    """One row per platform per day — audience-level numbers that aren't per-post."""
+    __tablename__ = "account_stats"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String, nullable=False)
+    stat_date = Column(Date, nullable=False)
+    followers = Column(Integer)
+    follows = Column(Integer)
+    media_count = Column(Integer)
+    reach = Column(Integer)
+    profile_views = Column(Integer)
+    accounts_engaged = Column(Integer)
+    website_clicks = Column(Integer)
+    sampled_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
 
 class TitleTemplate(Base):

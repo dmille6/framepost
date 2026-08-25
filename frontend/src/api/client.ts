@@ -958,6 +958,88 @@ export type TopPost = {
 export const fetchAnalyticsOverview = () =>
   apiFetch<AnalyticsOverview>("/api/analytics/overview");
 export const fetchBestTimes = () => apiFetch<TimeSlot[]>("/api/analytics/best-times");
+
+// ---- Cross-platform analytics (reads engagement_snapshots, all platforms) ----
+
+export type PlatformSummary = {
+  platform: string;
+  connected: boolean;
+  posts: number;
+  median_quality: number | null;
+  median_likes: number | null;
+  median_comments: number | null;
+  median_reach: number | null;
+  median_views: number | null;
+  saves_per_1k: number | null;
+  shares_per_1k: number | null;
+  comments_per_1k: number | null;
+  visits_per_1k: number | null;
+  follows_per_1k: number | null;
+  low_sample: boolean;
+};
+
+export type LeaderboardRow = {
+  key: string;
+  label: string;
+  posts: number;
+  median_quality: number | null;
+  saves_per_1k: number | null;
+  comments_per_1k: number | null;
+  visits_per_1k: number | null;
+  lift: number | null;
+  low_sample: boolean;
+  last_posted: string | null;
+};
+
+export type AccountPoint = {
+  date: string;
+  followers: number | null;
+  reach: number | null;
+  profile_views: number | null;
+  accounts_engaged: number | null;
+  website_clicks: number | null;
+};
+
+export type TopPostV2 = {
+  post_id: string;
+  title: string | null;
+  platform: string;
+  posted_at: string | null;
+  quality: number;
+  likes: number;
+  comments: number;
+  views: number | null;
+  reach: number | null;
+  saves: number | null;
+  shares: number | null;
+  profile_visits: number | null;
+  follows: number | null;
+  saves_per_1k: number | null;
+  comments_per_1k: number | null;
+  flickr_url: string | null;
+};
+
+const win = (w: string | null) => (w ? `&window=${w}` : "");
+
+export const fetchPlatformSummaries = (window: string | null) =>
+  apiFetch<PlatformSummary[]>(`/api/analytics/platforms?_=1${win(window)}`);
+
+export const fetchLeaderboard = (
+  dimension: string,
+  platform: string | null,
+  window: string | null,
+) =>
+  apiFetch<LeaderboardRow[]>(
+    `/api/analytics/leaderboard?dimension=${dimension}${platform ? `&platform=${platform}` : ""}${win(window)}`,
+  );
+
+export const fetchAccountTrend = (platform = "instagram", days = 90) =>
+  apiFetch<AccountPoint[]>(`/api/analytics/account-trend?platform=${platform}&days=${days}`);
+
+export const fetchTopPostsV2 = (platform: string | null, window: string | null) =>
+  apiFetch<TopPostV2[]>(
+    `/api/analytics/top-posts-v2?limit=12${platform ? `&platform=${platform}` : ""}${win(window)}`,
+  );
 export const fetchGroupStats = () => apiFetch<GroupStat[]>("/api/analytics/groups");
 export const fetchTagStats = (minPosts = 2, limit = 40) =>
   apiFetch<TagStat[]>(`/api/analytics/tags?min_posts=${minPosts}&limit=${limit}`);
