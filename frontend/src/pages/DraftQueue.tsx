@@ -532,20 +532,17 @@ export default function DraftQueue() {
               )}
               <div className="fp-grid-cards">
                 {visibleDrafts.map((p) => (
-                  <div
+                  <DraftCard
                     key={p.id}
+                    post={p}
                     title={isReady(p) ? undefined : `Not ready — missing: ${readyMissing(p).join(", ")}`}
-                  >
-                    <DraftCard
-                      post={p}
-                      selected={selected?.id === p.id}
-                      onSelect={() => setSelectedId(p.id)}
-                      onDelete={() => deleteMutation.mutate(p.id)}
-                      multiSelectMode={multiSelect}
-                      isChecked={checkedIds.has(p.id)}
-                      onToggleCheck={() => toggleCheck(p.id)}
-                    />
-                  </div>
+                    selected={selected?.id === p.id}
+                    onSelect={() => setSelectedId(p.id)}
+                    onDelete={() => deleteMutation.mutate(p.id)}
+                    multiSelectMode={multiSelect}
+                    isChecked={checkedIds.has(p.id)}
+                    onToggleCheck={() => toggleCheck(p.id)}
+                  />
                 ))}
                 {visibleDrafts.length === 0 && (
                   <div style={{ gridColumn: "1 / -1", padding: 40, textAlign: "center", color: "var(--text-fade)", fontSize: 13 }}>

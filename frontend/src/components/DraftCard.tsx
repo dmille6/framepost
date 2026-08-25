@@ -11,6 +11,11 @@ type Props = {
   multiSelectMode?: boolean;
   isChecked?: boolean;
   onToggleCheck?: () => void;
+  /** Hover text for the whole card (e.g. the ready-checklist reason). Applied to the
+   *  root element — do NOT wrap this component in a titled <div>: a <button> sizes to
+   *  fit-content, so inside a plain wrapper it grows to the image's natural width and
+   *  blows the grid out to one column. */
+  title?: string;
 };
 
 export default function DraftCard({
@@ -21,6 +26,7 @@ export default function DraftCard({
   multiSelectMode = false,
   isChecked = false,
   onToggleCheck,
+  title,
 }: Props) {
   const [hover, setHover] = useState(false);
   const mp = post.width && post.height ? ((post.width * post.height) / 1_000_000).toFixed(1) : null;
@@ -38,8 +44,13 @@ export default function DraftCard({
       onClick={() => (multiSelectMode && onToggleCheck ? onToggleCheck() : onSelect())}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      title={title}
       style={{
         display: "block",
+        // Buttons shrink-to-fit by default; pin the width so the card always fills its
+        // grid cell instead of expanding to its content.
+        width: "100%",
+        minWidth: 0,
         textAlign: "left",
         background: "var(--card)",
         border: `0.5px solid ${selected || isChecked ? "var(--teal)" : "var(--border)"}`,
