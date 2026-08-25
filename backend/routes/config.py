@@ -119,6 +119,15 @@ def _v_str(max_len: int = 200, allow_empty: bool = True):
     return check
 
 
+def _v_bool(raw: Any) -> str:
+    s = str(raw).strip().lower()
+    if s in {"true", "1", "yes", "on"}:
+        return "true"
+    if s in {"false", "0", "no", "off"}:
+        return "false"
+    raise ValueError("must be true or false")
+
+
 def _v_enum(values: set[str]):
     def check(raw: Any) -> str:
         s = str(raw)
@@ -210,6 +219,7 @@ def _v_subreddit_list(raw: Any) -> str:
 _EDITABLE: dict[str, Any] = {
     "studio_name": _v_str(max_len=120),
     "instagram_signature": _v_str(max_len=500),
+    "instagram_collabs": _v_bool,
     "bluesky_default_hashtags": _v_hashtag_list,
     "reddit_subreddits": _v_subreddit_list,
     "timezone": _v_str(max_len=64, allow_empty=False),

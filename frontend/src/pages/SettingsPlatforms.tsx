@@ -148,6 +148,12 @@ function InstagramPanel() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["instagram-status"] }),
   });
 
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: fetchAppConfig });
+  const saveCfg = useMutation({
+    mutationFn: patchAppConfig,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["config"] }),
+  });
+
   const test = useMutation({
     mutationFn: () => testInstagram(),
     onSuccess: (r) => {
@@ -227,8 +233,20 @@ function InstagramPanel() {
           <DefaultTargetToggle
             value={data?.default_target ?? true}
             onToggle={(v) => toggleDefault.mutate(v)}
-            label="Auto-post new scheduled photos to Instagram (landscape/square only)"
+            label="Auto-post new scheduled photos to Instagram"
           />
+          <div>
+            <DefaultTargetToggle
+              value={(cfg?.instagram_collabs ?? "true") !== "false"}
+              onToggle={(v) => saveCfg.mutate({ instagram_collabs: v ? "true" : "false" })}
+              label="Invite tagged performers as collaborators"
+            />
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginLeft: 26, marginTop: 2 }}>
+              Up to 3 per post, from the performers already tagged on it. Once a performer
+              accepts, the photo also appears on their profile and in their followers' feeds.
+              A handle Instagram refuses is dropped and the post still goes out.
+            </div>
+          </div>
           {testResult && (
             <div
               style={{

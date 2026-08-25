@@ -34,6 +34,7 @@ Hard API constraints enforced here / upstream:
 from __future__ import annotations
 
 import json
+import re
 import logging
 import time
 import uuid
@@ -62,6 +63,9 @@ MAX_ASPECT = 1.91
 # expiry, so we assume the full window on connect and let refresh correct it.
 TOKEN_LIFETIME = timedelta(days=60)
 REFRESH_LEEWAY = timedelta(days=7)
+
+# Meta accepts at most 3 co-authors per media.
+MAX_COLLABORATORS = 3
 
 # Instagram caps: caption 2200 chars, alt text 1000.
 MAX_CAPTION = 2200
@@ -276,14 +280,98 @@ def refresh_stale_token(db: Session) -> None:
 # Publishing
 # -----------------------------------------------------------------------------
 
+_COLLAB_REJECT_SUBCODE = 2207018
+
+
+def _bad_collaborator_handles(resp: httpx.Response, candidates: list[str]) -> list[str]:
+    """Which of `candidates` did Meta refuse? It names them in error_user_msg
+    ("The following user(s) cannot be accessed: foo, bar"); we intersect on that rather
+    than trusting the order, and fall back to "all of them" when the message is opaque.
+    """
+    try:
+        err = resp.json().get("error") or {}
+    except Exception:
+        return []
+    subcode = err.get("error_subcode")
+    blob = f"{err.get('error_user_msg') or ''} {err.get('message') or ''}".lower()
+    looks_like_collab = subcode == _COLLAB_REJECT_SUBCODE or "cannot be accessed" in blob
+    if not looks_like_collab:
+        return []
+    # Match whole tokens, not substrings: a handle like "eli" would otherwise be
+    # "found" inside a word like "delivery" and get dropped for no reason.
+    words = set(re.findall(r"[a-z0-9._]+", blob))
+    named = [h for h in candidates if h.lower().lstrip("@") in words]
+    return named or list(candidates)
+
+
+def _create_container(
+    ig_user_id: str, data: dict, collaborators: list[str]
+) -> tuple[str, list[str], list[str]]:
+    """Create the media container, degrading gracefully on bad collaborators.
+
+    Returns (container_id, collaborators_actually_sent, collaborators_dropped).
+    """
+    attempt_collabs = list(collaborators)
+    rejected: list[str] = []
+
+    # One pass per removable collaborator, plus a final pass with none.
+    for _ in range(len(collaborators) + 1):
+        body = dict(data)
+        if attempt_collabs:
+            body["collaborators"] = json.dumps(attempt_collabs)
+
+        # "Media download has failed" is Meta's fetcher racing CDN propagation of
+        # image_url (bites freshly-uploaded staging variants). Transient despite the
+        # 400 — retry in-line before handing off to the retry queue.
+        for fetch_attempt in range(3):
+            with _client() as c:
+                r = c.post(f"/{ig_user_id}/media", data=body)
+            if r.status_code < 400:
+                break
+            if "download" in _error_text(r).lower() and fetch_attempt < 2:
+                log.info("Meta couldn't fetch image_url (attempt %d) — waiting for CDN",
+                         fetch_attempt + 1)
+                time.sleep(10.0)
+                continue
+            break
+
+        if r.status_code < 400:
+            container_id = r.json().get("id")
+            if not container_id:
+                raise InstagramError(f"container creation returned no id: {r.text[:200]}")
+            return container_id, attempt_collabs, rejected
+
+        bad = _bad_collaborator_handles(r, attempt_collabs)
+        if bad:
+            rejected.extend(bad)
+            attempt_collabs = [h for h in attempt_collabs if h not in bad]
+            continue  # retry without the handles Meta refused
+
+        if "download" in _error_text(r).lower():
+            raise InstagramError(
+                f"Meta couldn't fetch the image URL after retries: {_error_text(r)}",
+                permanent=False,
+            )
+        _raise_api_error(r, "media container creation")
+
+    raise InstagramError("media container creation failed after dropping all collaborators")
+
+
 def post_photo(
     db: Session,
     *,
     image_url: str,
     caption: str,
     alt_text: str | None = None,
+    collaborators: list[str] | None = None,
 ) -> dict:
-    """Container → poll → publish. Returns {remote_id, url}."""
+    """Container → poll → publish. Returns {remote_id, url, collaborators}.
+
+    collaborators: up to MAX_COLLABORATORS Instagram usernames invited as co-authors.
+    Accepted invitations put the post on THEIR profile and in their followers' feeds —
+    roughly double the impressions of a solo post, which is why this is worth the extra
+    failure handling below. Feed images, carousels and Reels only (never Stories).
+    """
     row = _load_credential(db)
     _maybe_refresh(db, row)
     token = decrypt_token(row.access_token)
@@ -301,30 +389,22 @@ def post_photo(
     alt = (alt_text or "").strip()
     if alt:
         data["alt_text"] = alt[:MAX_ALT_TEXT]
-    # "Media download has failed" is Meta's fetcher racing CDN propagation of image_url
-    # (bites freshly-uploaded staging variants). It's transient despite the 400 — retry
-    # in-line with a beat between attempts before giving the retry queue its turn.
-    for fetch_attempt in range(3):
-        with _client() as c:
-            r = c.post(f"/{ig_user_id}/media", data=data)
-        if r.status_code < 400:
-            break
-        if "download" in _error_text(r).lower() and fetch_attempt < 2:
-            log.info("Meta couldn't fetch image_url (attempt %d) — waiting for CDN", fetch_attempt + 1)
-            time.sleep(10.0)
-            continue
-        break
-    if r.status_code >= 400:
-        if "download" in _error_text(r).lower():
-            raise InstagramError(
-                f"Meta couldn't fetch the image URL after retries: {_error_text(r)}",
-                permanent=False,  # CDN propagation — worth the retry queue
-            )
-        _raise_api_error(r, "media container creation")
-    container_id = r.json().get("id")
-    if not container_id:
-        raise InstagramError(f"container creation returned no id: {r.text[:200]}")
 
+    # Co-authors. Meta validates every handle and rejects the WHOLE container if any one
+    # is private, misspelled, or gone — so a stale handle in the performer roster would
+    # otherwise cost us the entire post. _create_container drops the named offenders and
+    # retries, so the photo always ships even if a credit doesn't.
+    wanted_collabs = [
+        h.lstrip("@").strip()
+        for h in (collaborators or [])
+        if h and h.strip()
+    ][:MAX_COLLABORATORS]
+
+    container_id, used_collabs, rejected = _create_container(
+        ig_user_id, data, wanted_collabs
+    )
+    if rejected:
+        log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
     # Step 2: wait for the container to be ready. Image containers usually come back
     # FINISHED on the first check.
     for attempt in range(STATUS_POLL_TRIES):
@@ -373,7 +453,12 @@ def post_photo(
     except Exception:
         log.warning("instagram permalink lookup failed for media %s", media_id)
 
-    return {"remote_id": str(media_id), "url": permalink}
+    return {
+        "remote_id": str(media_id),
+        "url": permalink,
+        "collaborators": used_collabs,
+        "collaborators_rejected": rejected,
+    }
 
 
 def publishing_quota(db: Session) -> dict:

@@ -459,6 +459,16 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     return body
 
 
+def _collabs_enabled(db) -> bool:
+    """Settings → Platforms → Instagram → 'Invite tagged performers as collaborators'.
+    Defaults ON: it's the highest-leverage reach mechanism available and degrades safely
+    (a refused handle is dropped, never a lost post)."""
+    row = db.execute(
+        select(AppConfig).where(AppConfig.key == "instagram_collabs")
+    ).scalar_one_or_none()
+    return (row.value if row and row.value else "true").lower() == "true"
+
+
 def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: datetime) -> None:
     """Attempt one platform fanout; persist outcome to post_platforms + activity timeline."""
     src = Path(post.original_path) if post.original_path else None
@@ -534,8 +544,23 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         else:
             image_url = flickr.get_display_image_url(db, post.flickr_photo_id)
 
+        # Co-author the post with the performers already tagged on it (from Lightroom
+        # @keywords). An accepted collab puts the photo on the performer's profile and
+        # in their followers' feeds — the cheapest reach available to a photographer who
+        # shoots people with their own audiences. Opt out per install via app_config.
+        collab_handles: list[str] = []
+        if _collabs_enabled(db):
+            collab_handles = [
+                p.instagram_handle
+                for p in performers_svc.get_post_performers(db, post.id)
+                if p.instagram_handle
+            ][:instagram.MAX_COLLABORATORS]
+
         try:
-            result = instagram.post_photo(db=db, image_url=image_url, caption=text, alt_text=alt)
+            result = instagram.post_photo(
+                db=db, image_url=image_url, caption=text, alt_text=alt,
+                collaborators=collab_handles,
+            )
         except instagram.InstagramError as e:
             # The 3:4 probe: we optimistically assume Meta's 2025 grid change reached the
             # API. The first aspect rejection settles it — record 4:5, regenerate, retry
@@ -551,7 +576,8 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                     offset=post.ig_crop_offset, force=True,
                 )
                 result = instagram.post_photo(
-                    db=db, image_url=image_url, caption=text, alt_text=alt
+                    db=db, image_url=image_url, caption=text, alt_text=alt,
+                    collaborators=collab_handles,
                 )
             else:
                 raise
@@ -560,6 +586,18 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 ig_variant.record_floor(db, "3:4")
 
         remote_id, remote_url = result["remote_id"], result["url"]
+        sent = result.get("collaborators") or []
+        refused = result.get("collaborators_rejected") or []
+        if sent or refused:
+            events.log_event(
+                db, post_id=post.id, event_type="instagram_collab", actor="worker",
+                details={"invited": sent, "rejected": refused},
+            )
+            if refused:
+                log.warning(
+                    "post %s: IG collab handles refused (private/invalid): %s",
+                    post.id[:8], refused,
+                )
         # Feeds the manual engagement tracker + the assist tab's "already posted" state.
         post.posted_to_instagram_at = fired_at
         # Staging variant served its purpose — pull it off Flickr (sweep catches stragglers).
