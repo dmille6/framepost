@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchAccountTrend,
   fetchAnalyticsOverview,
+  fetchCollabLift,
+  type CollabLift,
   fetchLeaderboard,
   fetchPlatformSummaries,
   fetchTopPostsV2,
@@ -40,6 +42,13 @@ export default function Analytics() {
     queryKey: ["analytics-leaderboard", dimension, platform, window_],
     queryFn: () => fetchLeaderboard(dimension, platform, window_),
   });
+  // Lift only makes sense at a fixed post age, so fall back to 7d when the page is
+  // showing lifetime numbers.
+  const { data: collab } = useQuery({
+    queryKey: ["collab-lift", window_],
+    queryFn: () => fetchCollabLift(window_ && window_ !== "lifetime" ? window_ : "7d"),
+  });
+
   const { data: trend = [] } = useQuery({
     queryKey: ["analytics-account-trend"],
     queryFn: () => fetchAccountTrend("instagram", 90),
@@ -252,6 +261,7 @@ export default function Analytics() {
 
         {/* ---- Instagram audience ---------------------------------------------- */}
         {trend.length > 0 && <AccountTrendCard points={trend} />}
+        {collab && collab.collab_posts > 0 && <CollabLiftCard data={collab} />}
 
         {overview && (
           <div className="fp-card" style={{ marginBottom: 16 }}>
@@ -630,6 +640,108 @@ function AccountTrendCard({ points }: { points: AccountPoint[] }) {
       {points.length < 7 && (
         <div style={{ fontSize: 11.5, color: "var(--text-fade)", marginTop: 10 }}>
           Collecting baseline — trends get meaningful after a week or two of daily samples.
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function CollabLiftCard({ data }: { data: CollabLift }) {
+  const overall =
+    data.solo_median_quality && data.collab_median_quality
+      ? data.collab_median_quality / data.solo_median_quality
+      : null;
+
+  return (
+    <div className="fp-card" style={{ marginBottom: 16 }}>
+      <CardHeader
+        title="Collaborator lift"
+        subtitle={`${data.collab_posts} co-authored vs ${data.solo_posts} solo post${
+          data.solo_posts === 1 ? "" : "s"
+        } · measured at ${data.window}`}
+      />
+      {/* Say plainly what this is and isn't. Instagram gives us no accept/decline
+          signal, and a number that looks like a measurement invites being read as one. */}
+      <div
+        style={{
+          fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5,
+          background: "var(--bg)", border: "0.5px solid var(--border)",
+          borderRadius: 8, padding: "10px 12px", marginBottom: 14,
+        }}
+      >
+        {data.basis}
+      </div>
+
+      {overall != null && (
+        <div style={{ fontSize: 13, marginBottom: 12 }}>
+          Co-authored posts run{" "}
+          <strong style={{ color: overall >= 1 ? "var(--teal)" : "var(--danger)" }}>
+            {overall.toFixed(2)}&times;
+          </strong>{" "}
+          your solo median.
+        </div>
+      )}
+
+      {data.performers.length === 0 ? (
+        <div style={{ fontSize: 13, color: "var(--text-fade)" }}>
+          No collaborator posts have engagement readings at this age yet.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: "var(--text-fade)", fontSize: 11 }}>
+                <th style={{ padding: "6px 8px" }}>Performer</th>
+                <th style={{ padding: "6px 8px" }}>Posts</th>
+                <th style={{ padding: "6px 8px" }}>Median reach</th>
+                <th style={{ padding: "6px 8px" }}>Lift</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.performers.map((r) => (
+                <tr key={r.handle} style={{ borderTop: "0.5px solid var(--border)" }}>
+                  <td style={{ padding: "8px" }}>
+                    <div>{r.display_name}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-fade)" }}>
+                      @{r.handle}
+                      {r.handle_status === "needs_check" && (
+                        <span style={{ color: "var(--warn, #d98324)" }}> &#9888; handle needs checking</span>
+                      )}
+                    </div>
+                  </td>
+                  <td style={{ padding: "8px" }}>
+                    {r.posts}
+                    {r.provisional && (
+                      <span
+                        style={{ fontSize: 11, color: "var(--text-fade)" }}
+                        title={`Fewer than ${data.min_sample} posts — treat as provisional`}
+                      >
+                        {" "}provisional
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ padding: "8px" }}>
+                    {r.median_reach != null ? r.median_reach.toLocaleString() : "\u2014"}
+                  </td>
+                  <td style={{ padding: "8px", fontWeight: 600 }}>
+                    {r.lift != null ? (
+                      <span style={{ color: r.lift >= 1 ? "var(--teal)" : "var(--text-dim)" }}>
+                        {r.lift.toFixed(2)}&times;
+                      </span>
+                    ) : (
+                      <span
+                        style={{ color: "var(--text-fade)", fontWeight: 400 }}
+                        title="Not enough solo posts to compare against"
+                      >
+                        &#8212;
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

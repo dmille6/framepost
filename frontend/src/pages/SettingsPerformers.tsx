@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   ApiError,
+  clearHandleFlag,
   createPerformer,
   deletePerformer,
   listPerformers,
@@ -170,6 +171,11 @@ function PerformerRow({ performer }: { performer: Performer }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["performers"] }),
   });
 
+  const clearFlag = useMutation({
+    mutationFn: () => clearHandleFlag(performer.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["performers"] }),
+  });
+
   function handleDelete() {
     const msg =
       performer.usage_count > 0
@@ -274,6 +280,28 @@ function PerformerRow({ performer }: { performer: Performer }) {
             {performer.usage_count} post{performer.usage_count === 1 ? "" : "s"}
           </span>
         </div>
+        {performer.handle_status === "needs_check" && (
+          <div
+            style={{
+              display: "flex", alignItems: "center", gap: 8, marginTop: 4,
+              fontSize: 12, color: "var(--warn, #d98324)", flexWrap: "wrap",
+            }}
+          >
+            <span>
+              &#9888; {performer.handle_error ||
+                "Instagram refused this handle on a collaboration invite."}
+            </span>
+            <button
+              className="fp-btn-ghost"
+              onClick={() => clearFlag.mutate()}
+              disabled={clearFlag.isPending}
+              style={{ padding: "2px 8px", fontSize: 11 }}
+              title="Dismiss this warning - the handle is fine, or you have fixed it"
+            >
+              {clearFlag.isPending ? "Clearing" : "Looks fine"}
+            </button>
+          </div>
+        )}
       </div>
       <div style={{ display: "flex", gap: 6 }}>
         <button

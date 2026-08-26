@@ -478,3 +478,17 @@ def top_posts_v2(
             "flickr_url": s.post.flickr_url,
         })
     return out
+
+
+@router.get("/collab-lift")
+def collab_lift(
+    window: str | None = Query("7d", pattern="^(24h|48h|7d)$"),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """How much better Instagram posts do when a performer is credited as collaborator.
+
+    Instagram exposes no accept/decline signal on this API surface, so this measures the
+    consequence rather than the invite: see analytics_core.collab_lift.
+    """
+    return ac.collab_lift(db, window=window)

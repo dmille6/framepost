@@ -12,11 +12,12 @@ from __future__ import annotations
 import re as _re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from models import Performer, Post, PostPerformer, Venue
+from models import Performer, Post, PostCollaborator, PostPerformer, Venue
 
 
 def _hashtag_safe(handle: str | None) -> str:
@@ -338,3 +339,46 @@ def autotag_from_handles(db: Session, post_id: str, handles: list[str]) -> list[
         position += 1
         out.append({"handle": h, "performer": performer.display_name, "created": created})
     return out
+
+
+def record_collab_outcome(
+    db: Session, *, post_id: str, sent: list[str], rejected: list[str]
+) -> None:
+    """Persist what Instagram did with each collaborator handle, and flag the duds.
+
+    A refused handle means the account is private, renamed, or deleted. Left invisible
+    it silently costs every future collab on that performer's photos, so the performer
+    row carries the bad news up to Settings → Performers.
+    """
+    by_handle = {
+        (p.instagram_handle or "").lower(): p
+        for p in db.execute(select(Performer).where(Performer.instagram_handle.isnot(None)))
+        .scalars()
+    }
+    # Naive UTC, matching every other stored timestamp in this codebase.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    for handle, status in [(h, "sent") for h in sent] + [(h, "rejected") for h in rejected]:
+        perf = by_handle.get(handle.lower())
+        existing = db.get(PostCollaborator, {"post_id": post_id, "handle": handle})
+        if existing:
+            existing.status = status
+            existing.performer_id = perf.id if perf else existing.performer_id
+        else:
+            db.add(PostCollaborator(
+                post_id=post_id, handle=handle,
+                performer_id=perf.id if perf else None, status=status,
+            ))
+        if not perf:
+            continue
+        perf.handle_checked_at = now
+        if status == "rejected":
+            perf.handle_status = "needs_check"
+            perf.handle_error = (
+                "Instagram refused this handle on a collaboration invite — the account "
+                "may be private, renamed, or deleted."
+            )
+        else:
+            # A handle that works again clears its own flag; no manual cleanup needed.
+            perf.handle_status = "ok"
+            perf.handle_error = None

@@ -73,6 +73,8 @@ class PerformerOut(BaseModel):
     id: str
     display_name: str
     instagram_handle: str | None
+    handle_status: str
+    handle_error: str | None
     usage_count: int
     created_at: datetime
     updated_at: datetime
@@ -83,6 +85,8 @@ def _to_out(p: Performer, usage_count: int = 0) -> PerformerOut:
         id=p.id,
         display_name=p.display_name,
         instagram_handle=p.instagram_handle,
+        handle_status=p.handle_status or "ok",
+        handle_error=p.handle_error,
         usage_count=usage_count,
         created_at=p.created_at,
         updated_at=p.updated_at,
@@ -273,3 +277,23 @@ def set_post_performers(
         .order_by(PostPerformer.position)
     ).scalars().all()
     return [_to_out(p, usage_count=0) for p in rows]
+
+
+@router.post("/{performer_id}/clear-handle-flag", response_model=PerformerOut)
+def clear_handle_flag(
+    performer_id: str,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Dismiss a 'handle needs checking' warning after fixing (or confirming) the handle.
+
+    The flag also clears itself the next time Instagram accepts the handle on a real
+    post, so this is for the case where you've checked and it was a false alarm.
+    """
+    p = db.get(Performer, performer_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Performer not found")
+    p.handle_status = "ok"
+    p.handle_error = None
+    db.commit()
+    return _to_out(p)

@@ -29,7 +29,10 @@ from typing import Any, Iterable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from models import AccountStat, EngagementSnapshot, PlatformCredential, Post, PostPlatform
+from models import (
+    AccountStat, EngagementSnapshot, Performer, PlatformCredential, Post,
+    PostCollaborator, PostPlatform,
+)
 
 PLATFORMS = ("flickr", "bluesky", "pixelfed", "instagram", "pinterest")
 
@@ -190,3 +193,103 @@ def followers_near(db: Session, platform: str, when: datetime) -> int | None:
         return None
     target = when.date()
     return min(rows, key=lambda r: abs((r.stat_date - target).days)).followers
+
+
+# --- collaborator lift -------------------------------------------------------------
+#
+# Instagram does not tell us whether a collaboration invite was accepted: the
+# `collaborators` edge exists only on the Facebook-Login API surface, and this install
+# uses Instagram Login (see services/platforms/instagram.py). So acceptance is not a
+# recorded fact anywhere in this codebase.
+#
+# What we can measure is the consequence. An accepted collab publishes the photo to the
+# performer's followers too, which shows up as materially higher reach and saves; a
+# declined or ignored invite leaves the post performing exactly like a solo post.
+# Median lift over several posts is therefore a usable proxy for "does this performer
+# actually accept" — and it is the thing you actually care about either way, since an
+# accepted collab that reaches nobody is worth no more than a declined one.
+#
+# It is a proxy, not a measurement. Callers must present it as such.
+
+@dataclass
+class CollabLift:
+    performer_id: str | None
+    display_name: str
+    handle: str
+    posts: int
+    median_quality: float
+    median_reach: float | None
+    lift: float | None          # ratio vs solo-post baseline; None when baseline is thin
+    handle_status: str
+    provisional: bool           # too few posts to lean on
+
+
+def collab_lift(db: Session, *, window: str | None = "7d") -> dict[str, Any]:
+    """Rank tagged performers by how much better your posts do when they are credited.
+
+    Compares each performer's collab posts against the median SOLO post at the same
+    age, so a performer who only appears in your strongest shots doesn't automatically
+    look like a distribution win.
+    """
+    samples = {s.post.id: s for s in collect_samples(db, platform="instagram", window=window)}
+
+    sent = list(db.execute(
+        select(PostCollaborator).where(PostCollaborator.status == "sent")
+    ).scalars())
+    collab_post_ids = {c.post_id for c in sent}
+
+    solo = [s for s in samples.values() if s.post.id not in collab_post_ids]
+    baseline = median([s.quality for s in solo]) if len(solo) >= MIN_SAMPLE else None
+
+    names = {
+        p.id: p for p in db.execute(select(Performer)).scalars()
+    }
+
+    grouped: dict[str, list[Any]] = {}
+    meta: dict[str, PostCollaborator] = {}
+    for c in sent:
+        smp = samples.get(c.post_id)
+        if not smp:
+            continue  # no engagement reading yet at this age
+        key = c.performer_id or f"handle:{c.handle.lower()}"
+        grouped.setdefault(key, []).append(smp)
+        meta.setdefault(key, c)
+
+    rows: list[CollabLift] = []
+    for key, smps in grouped.items():
+        c = meta[key]
+        perf = names.get(c.performer_id) if c.performer_id else None
+        reaches = [s.reach for s in smps if s.reach]
+        med_q = median([s.quality for s in smps])
+        rows.append(CollabLift(
+            performer_id=c.performer_id,
+            display_name=(perf.display_name if perf else c.handle),
+            handle=c.handle,
+            posts=len(smps),
+            median_quality=round(med_q, 1),
+            median_reach=round(median(reaches), 1) if reaches else None,
+            lift=round(med_q / baseline, 2) if baseline else None,
+            handle_status=(perf.handle_status if perf else "ok"),
+            provisional=len(smps) < MIN_SAMPLE,
+        ))
+
+    rows.sort(key=lambda r: (r.lift if r.lift is not None else -1, r.posts), reverse=True)
+
+    collab_smps = [s for pid, s in samples.items() if pid in collab_post_ids]
+    return {
+        "window": window,
+        "basis": (
+            "Instagram does not report whether a collaboration invite was accepted, so "
+            "this ranks performers by how your posts actually performed when they were "
+            "credited — an accepted collab shows up as extra reach, a declined one "
+            "looks like a normal post."
+        ),
+        "solo_posts": len(solo),
+        "solo_median_quality": round(baseline, 1) if baseline else None,
+        "collab_posts": len(collab_smps),
+        "collab_median_quality": (
+            round(median([s.quality for s in collab_smps]), 1) if collab_smps else None
+        ),
+        "min_sample": MIN_SAMPLE,
+        "performers": [r.__dict__ for r in rows],
+    }

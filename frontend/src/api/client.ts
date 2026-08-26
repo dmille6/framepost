@@ -1231,6 +1231,9 @@ export type Performer = {
   id: string;
   display_name: string;
   instagram_handle: string | null;
+  /** "ok" | "needs_check" — set when Instagram refuses the handle on a collab invite. */
+  handle_status: string;
+  handle_error: string | null;
   usage_count: number;
   created_at: string;
   updated_at: string;
@@ -1255,6 +1258,9 @@ export const updatePerformer = (
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+
+export const clearHandleFlag = (id: string) =>
+  apiFetch<Performer>(`/api/performers/${id}/clear-handle-flag`, { method: "POST" });
 
 export const deletePerformer = (id: string) =>
   apiFetch<{ ok: boolean }>(`/api/performers/${id}`, { method: "DELETE" });
@@ -1316,3 +1322,32 @@ export const deleteReel = (id: string) =>
   apiFetch<{ ok: boolean }>(`/api/reels/${id}`, { method: "DELETE" });
 
 export const reelDownloadUrl = (id: string) => `/api/reels/${id}/mp4`;
+
+// --- Collaborator lift -----------------------------------------------------
+
+export type CollabLiftRow = {
+  performer_id: string | null;
+  display_name: string;
+  handle: string;
+  posts: number;
+  median_quality: number;
+  median_reach: number | null;
+  /** Ratio vs the solo-post median; null when there aren't enough solo posts. */
+  lift: number | null;
+  handle_status: string;
+  provisional: boolean;
+};
+
+export type CollabLift = {
+  window: string;
+  basis: string;
+  solo_posts: number;
+  solo_median_quality: number | null;
+  collab_posts: number;
+  collab_median_quality: number | null;
+  min_sample: number;
+  performers: CollabLiftRow[];
+};
+
+export const fetchCollabLift = (window: string = "7d") =>
+  apiFetch<CollabLift>(`/api/analytics/collab-lift?window=${encodeURIComponent(window)}`);

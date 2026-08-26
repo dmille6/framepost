@@ -314,8 +314,29 @@ class Performer(Base):
     id = Column(String, primary_key=True)
     display_name = Column(Text, nullable=False, unique=True)
     instagram_handle = Column(Text)  # stored without leading @
+    # "ok" | "needs_check". Meta refusing this handle on a collab invite means it is
+    # private, renamed, or gone — flag it rather than letting it quietly cost every
+    # future collaboration on this performer's photos.
+    handle_status = Column(String, nullable=False, server_default="ok")
+    handle_checked_at = Column(DateTime)
+    handle_error = Column(Text)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
+
+
+class PostCollaborator(Base):
+    """Which handles were sent as IG collaborators on a post, and whether Meta took them.
+
+    No "accepted" column on purpose: collaborator state is exposed only on the
+    Facebook-Login API surface, and this install uses Instagram Login. Acceptance is
+    inferred from engagement lift (analytics_core.collab_lift), not recorded as fact.
+    """
+    __tablename__ = "post_collaborators"
+    post_id = Column(String, ForeignKey("posts.id", ondelete="CASCADE"), primary_key=True)
+    handle = Column(Text, primary_key=True)
+    performer_id = Column(String, ForeignKey("performers.id", ondelete="SET NULL"))
+    status = Column(String, nullable=False, server_default="sent")  # sent | rejected
+    created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
 
 class PostPerformer(Base):

@@ -593,6 +593,9 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 db, post_id=post.id, event_type="instagram_collab", actor="worker",
                 details={"invited": sent, "rejected": refused},
             )
+            performers_svc.record_collab_outcome(
+                db, post_id=post.id, sent=sent, rejected=refused,
+            )
             if refused:
                 log.warning(
                     "post %s: IG collab handles refused (private/invalid): %s",
