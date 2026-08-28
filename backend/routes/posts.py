@@ -221,6 +221,43 @@ def list_drafts(
     return [PostOut.from_post(r) for r in rows]
 
 
+@router.get("/recent-shows", response_model=list[str])
+def recent_shows(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Distinct non-empty show values across all posts, most-recent first. Feeds the
+    type-ahead suggestion datalist in MetadataEditor and BulkEditDialog."""
+    rows = db.execute(
+        select(Post.show, func.max(Post.created_at).label("recent"))
+        .where(Post.show.is_not(None))
+        .where(Post.show != "")
+        .group_by(Post.show)
+        .order_by(func.max(Post.created_at).desc())
+        .limit(limit)
+    ).all()
+    return [r[0] for r in rows]
+
+
+@router.get("/recent-cities", response_model=list[str])
+def recent_cities(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Distinct non-empty city values, most-recent first."""
+    rows = db.execute(
+        select(Post.city, func.max(Post.created_at).label("recent"))
+        .where(Post.city.is_not(None))
+        .where(Post.city != "")
+        .group_by(Post.city)
+        .order_by(func.max(Post.created_at).desc())
+        .limit(limit)
+    ).all()
+    return [r[0] for r in rows]
+
+
 @router.get("/{post_id}", response_model=PostOut)
 def get_post(
     post_id: str,
@@ -358,43 +395,6 @@ def get_preview(
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
     )
-
-
-@router.get("/recent-shows", response_model=list[str])
-def recent_shows(
-    limit: int = Query(50, ge=1, le=200),
-    db: Session = Depends(get_session),
-    _user: User = Depends(current_user),
-):
-    """Distinct non-empty show values across all posts, most-recent first. Feeds the
-    type-ahead suggestion datalist in MetadataEditor and BulkEditDialog."""
-    rows = db.execute(
-        select(Post.show, func.max(Post.created_at).label("recent"))
-        .where(Post.show.is_not(None))
-        .where(Post.show != "")
-        .group_by(Post.show)
-        .order_by(func.max(Post.created_at).desc())
-        .limit(limit)
-    ).all()
-    return [r[0] for r in rows]
-
-
-@router.get("/recent-cities", response_model=list[str])
-def recent_cities(
-    limit: int = Query(50, ge=1, le=200),
-    db: Session = Depends(get_session),
-    _user: User = Depends(current_user),
-):
-    """Distinct non-empty city values, most-recent first."""
-    rows = db.execute(
-        select(Post.city, func.max(Post.created_at).label("recent"))
-        .where(Post.city.is_not(None))
-        .where(Post.city != "")
-        .group_by(Post.city)
-        .order_by(func.max(Post.created_at).desc())
-        .limit(limit)
-    ).all()
-    return [r[0] for r in rows]
 
 
 class FaceCenter(BaseModel):
