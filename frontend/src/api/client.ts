@@ -1351,3 +1351,46 @@ export type CollabLift = {
 
 export const fetchCollabLift = (window: string = "7d") =>
   apiFetch<CollabLift>(`/api/analytics/collab-lift?window=${encodeURIComponent(window)}`);
+
+// --- Find & replace --------------------------------------------------------
+
+export type FindReplaceMatch = {
+  post_id: string;
+  title: string | null;
+  status: string;
+  scheduled_at: string | null;
+  occurrences: number;
+  before: string;
+  after: string;
+};
+
+export type FindReplacePreview = {
+  field: string;
+  find: string;
+  replace: string;
+  case_sensitive: boolean;
+  post_count: number;
+  occurrence_count: number;
+  /** Published posts that match but are deliberately left alone — they're already live. */
+  published_skipped: number;
+  matches: FindReplaceMatch[];
+};
+
+export type FindReplaceBody = {
+  find: string;
+  replace: string;
+  field: string;
+  case_sensitive: boolean;
+};
+
+export const findReplacePreview = (body: FindReplaceBody) =>
+  apiFetch<FindReplacePreview>("/api/posts/find-replace/preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const findReplaceApply = (body: FindReplaceBody & { post_ids: string[] }) =>
+  apiFetch<{ changed: number; occurrence_count: number; skipped: string[] }>(
+    "/api/posts/find-replace/apply",
+    { method: "POST", body: JSON.stringify(body) },
+  );

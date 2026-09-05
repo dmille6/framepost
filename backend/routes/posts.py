@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
-from services import events, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
+from services import events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -219,6 +219,51 @@ def list_drafts(
         .all()
     )
     return [PostOut.from_post(r) for r in rows]
+
+
+class FindReplaceIn(BaseModel):
+    find: str = Field(..., min_length=1, max_length=500)
+    replace: str = Field("", max_length=500)
+    field: str = Field("description", pattern="^(description|title|tags)$")
+    case_sensitive: bool = False
+
+
+class FindReplaceApplyIn(FindReplaceIn):
+    post_ids: list[str] = Field(..., min_length=1, max_length=1000)
+
+
+@router.post("/find-replace/preview")
+def find_replace_preview(
+    body: FindReplaceIn,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Dry run: which unpublished posts contain `find`, and what they'd become."""
+    try:
+        return find_replace.scan(
+            db, find=body.find, replace=body.replace, field=body.field,
+            case_sensitive=body.case_sensitive,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/find-replace/apply")
+def find_replace_apply(
+    body: FindReplaceApplyIn,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Apply the replacement to the explicitly named posts."""
+    try:
+        result = find_replace.apply(
+            db, find=body.find, replace=body.replace, post_ids=body.post_ids,
+            field=body.field, case_sensitive=body.case_sensitive,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.commit()
+    return result
 
 
 @router.get("/recent-shows", response_model=list[str])

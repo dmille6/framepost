@@ -20,6 +20,7 @@ import {
 import type { EditorChanges } from "../components/MetadataEditor";
 
 import BulkEditDialog from "../components/BulkEditDialog";
+import FindReplaceDialog from "../components/FindReplaceDialog";
 import DraftCard from "../components/DraftCard";
 import EmptyState from "../components/EmptyState";
 import MetadataEditor from "../components/MetadataEditor";
@@ -120,6 +121,7 @@ export default function DraftQueue() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [smartFillOpen, setSmartFillOpen] = useState(false);
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
+  const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<"newest" | "oldest" | "captured" | "largest" | "ready">("newest");
   const [filterReady, setFilterReady] = useState(false);
@@ -136,6 +138,7 @@ export default function DraftQueue() {
       list = list.filter((p) =>
         (p.title || "").toLowerCase().includes(q) ||
         (p.original_filename || "").toLowerCase().includes(q) ||
+        (p.description || "").toLowerCase().includes(q) ||
         (p.tags || "").toLowerCase().includes(q) ||
         (p.camera_model || "").toLowerCase().includes(q) ||
         (p.lens || "").toLowerCase().includes(q),
@@ -384,9 +387,19 @@ export default function DraftQueue() {
                     >
                       Select multiple
                     </button>
+                    {/* Search here only filters the loaded drafts; find & replace runs
+                        server-side and also reaches scheduled posts. */}
+                    <button
+                      className="fp-btn-ghost"
+                      onClick={() => setFindReplaceOpen(true)}
+                      title="Fix a typo across many drafts and scheduled posts at once"
+                      style={{ padding: "6px 12px", fontSize: 13 }}
+                    >
+                      Find &amp; replace
+                    </button>
                     <input
                       className="fp-input"
-                      placeholder="Search title / filename / tag / camera"
+                      placeholder="Search title / description / filename / tag / camera"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
                       style={{ flex: 1, minWidth: 260, padding: "6px 12px", fontSize: 13 }}
@@ -596,6 +609,10 @@ export default function DraftQueue() {
             void qc.invalidateQueries({ queryKey: ["schedule"] });
           }}
         />
+      )}
+
+      {findReplaceOpen && (
+        <FindReplaceDialog onClose={() => setFindReplaceOpen(false)} />
       )}
 
       {bulkEditOpen && (
