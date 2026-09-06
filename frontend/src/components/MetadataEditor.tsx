@@ -1,7 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
 
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import {
   aiSuggestForPost,
@@ -13,7 +12,7 @@ import {
   getPostGroups,
   getPostPerformers,
   getPostProfiles,
-  igPreviewUrl,
+  fetchAppConfig,
   listAlbums,
   listConnectedPlatforms,
   listGroups,
@@ -22,9 +21,11 @@ import {
   thumbnailUrl,
   type Performer,
   type Post,
+  type PostUpdate,
   type Venue,
 } from "../api/client";
 import AISuggestPanel from "./AISuggestPanel";
+import IgCropStudio, { type CropRect } from "./IgCropStudio";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
 import Lightbox from "./Lightbox";
 import MultiSelectChips from "./MultiSelectChips";
@@ -51,7 +52,43 @@ export type EditorChanges = {
   alt_text: string | null;
   ig_fit: "crop" | "pad" | "pad_blur" | null;
   ig_crop_offset: number | null;
+  ig_crop_x: number | null;
+  ig_crop_y: number | null;
+  ig_crop_w: number | null;
+  ig_crop_h: number | null;
+  ig_crop_ratio: string | null;
 };
+
+
+/**
+ * Editor state -> PostUpdate body.
+ *
+ * Both callers used to enumerate these by hand, and twice a newly added field reached
+ * the editor but never the API (target_platforms, then the crop rect). One builder
+ * means adding a field here is enough.
+ */
+export function editorChangesToPatch(changes: EditorChanges): PostUpdate {
+  return {
+    title: changes.title,
+    description: changes.description,
+    tags: changes.tags,
+    privacy: changes.privacy,
+    safety_level: changes.safety_level,
+    content_type: changes.content_type,
+    venue_id: changes.venue_id,
+    show: changes.show,
+    city: changes.city,
+    alt_text: changes.alt_text,
+    target_platforms: changes.target_platforms,
+    ig_fit: changes.ig_fit,
+    ig_crop_offset: changes.ig_crop_offset,
+    ig_crop_x: changes.ig_crop_x,
+    ig_crop_y: changes.ig_crop_y,
+    ig_crop_w: changes.ig_crop_w,
+    ig_crop_h: changes.ig_crop_h,
+    ig_crop_ratio: changes.ig_crop_ratio,
+  };
+}
 
 type Props = {
   post: Post;
@@ -95,8 +132,17 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [venue, setVenue] = useState<Venue | null>(null);
   // IG auto-transform: fit mode + crop-window nudge. Offset null = face-anchored auto.
   const [igFit, setIgFit] = useState<"crop" | "pad" | "pad_blur">(post.ig_fit ?? "crop");
-  const [igOffset, setIgOffset] = useState<number | null>(post.ig_crop_offset);
-  const [igSlider, setIgSlider] = useState<number>(post.ig_crop_offset ?? 0.5);
+  const [igOffset] = useState<number | null>(post.ig_crop_offset);
+  // A rect wins over the legacy offset; null means face-anchored auto.
+  const [igRect, setIgRect] = useState<CropRect | null>(
+    post.ig_crop_x != null && post.ig_crop_y != null &&
+    post.ig_crop_w != null && post.ig_crop_h != null
+      ? { x: post.ig_crop_x, y: post.ig_crop_y, w: post.ig_crop_w, h: post.ig_crop_h }
+      : null,
+  );
+  // The learned floor decides the target ratio; the studio mirrors the worker's rule.
+  const { data: appCfg } = useQuery({ queryKey: ["config"], queryFn: fetchAppConfig });
+  const igRatioKey = appCfg?.["ig_min_ratio_support"] ?? "4:5";
 
   // Venue lookup — fetch the full venue list once, then resolve by ID. List is small
   // (typically <50 venues per user) so client-side resolution is fine.
@@ -218,7 +264,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     performers.map((p) => p.id).join(",") !== postPerformers.map((p) => p.id).join(",") ||
     !setsEqual(targetSet, expectedTargetSet) ||
     igFit !== (post.ig_fit ?? "crop") ||
-    igOffset !== post.ig_crop_offset;
+    (igRect?.x ?? null) !== (post.ig_crop_x ?? null) ||
+    (igRect?.y ?? null) !== (post.ig_crop_y ?? null) ||
+    (igRect?.w ?? null) !== (post.ig_crop_w ?? null) ||
+    (igRect?.h ?? null) !== (post.ig_crop_h ?? null);
 
   function handleSave() {
     // If user's selection matches what defaults would produce, send null to mean "use defaults".
@@ -243,6 +292,12 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       alt_text: altText.trim() || null,
       ig_fit: igFit === "crop" ? null : igFit,
       ig_crop_offset: igOffset,
+      // All four together or all four null — rect_for() ignores a partial rect.
+      ig_crop_x: igRect?.x ?? null,
+      ig_crop_y: igRect?.y ?? null,
+      ig_crop_w: igRect?.w ?? null,
+      ig_crop_h: igRect?.h ?? null,
+      ig_crop_ratio: igRect ? igRatioKey : null,
     });
   }
 
@@ -565,102 +620,26 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         </Field>
       )}
 
-      {igNeedsTransform && targetSet.has("instagram") && (
+      {targetSet.has("instagram") && (
         <Field
-          label="Instagram fit"
-          hint="This photo is taller than Instagram's feed limit — choose how the auto-post squeezes it in."
+          label="Instagram crop"
+          hint={
+            igNeedsTransform
+              ? "This photo is outside Instagram's feed range — drag to choose what survives the crop. Flickr still gets the full frame."
+              : "Instagram accepts this photo as-is. Crop tighter here if you want to; Flickr still gets the full frame."
+          }
         >
-          <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-            <img
-              key={`${igFit}-${igFit === "crop" ? igOffset ?? "auto" : "na"}`}
-              src={igPreviewUrl(post.id, igFit, igFit === "crop" ? igOffset : null)}
-              alt="Instagram preview"
-              style={{
-                width: 140,
-                borderRadius: 8,
-                border: "0.5px solid var(--border-strong)",
-                background: "var(--surface)",
-                flexShrink: 0,
-              }}
-            />
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {(
-                  [
-                    ["crop", "Smart crop"],
-                    ["pad", "Pad black"],
-                    ["pad_blur", "Pad blur"],
-                  ] as const
-                ).map(([value, label]) => {
-                  const active = igFit === value;
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setIgFit(value)}
-                      style={{
-                        padding: "6px 12px",
-                        border: `0.5px solid ${active ? "rgba(93,202,165,0.3)" : "var(--border-strong)"}`,
-                        background: active ? "var(--teal-tint)" : "transparent",
-                        color: active ? "var(--text)" : "var(--text-dim)",
-                        borderRadius: 999,
-                        fontSize: 12,
-                        fontWeight: active ? 500 : 400,
-                        cursor: "pointer",
-                        transition: "background 120ms ease, border-color 120ms ease",
-                      }}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-              {igFit === "crop" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={Math.round(igSlider * 100)}
-                    onChange={(e) => setIgSlider(Number(e.target.value) / 100)}
-                    onPointerUp={() => setIgOffset(igSlider)}
-                    onKeyUp={() => setIgOffset(igSlider)}
-                    style={{ accentColor: "var(--teal)", width: "100%" }}
-                    aria-label="Crop window position (top to bottom)"
-                  />
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      fontSize: 11,
-                      color: "var(--text-dim)",
-                    }}
-                  >
-                    <span>Top</span>
-                    <span>
-                      {igOffset === null ? (
-                        "Auto — face detect"
-                      ) : (
-                        <>
-                          {Math.round(igOffset * 100)}%{" "}
-                          <a
-                            onClick={() => {
-                              setIgOffset(null);
-                              setIgSlider(0.5);
-                            }}
-                            style={{ cursor: "pointer", color: "var(--teal)" }}
-                          >
-                            reset to auto
-                          </a>
-                        </>
-                      )}
-                    </span>
-                    <span>Bottom</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+          <IgCropStudio
+            postId={post.id}
+            width={post.width}
+            height={post.height}
+            ratioKey={igRatioKey}
+            fit={igFit}
+            rect={igRect}
+            offset={igOffset}
+            onFitChange={setIgFit}
+            onRectChange={setIgRect}
+          />
         </Field>
       )}
 

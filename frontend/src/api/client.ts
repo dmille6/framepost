@@ -122,6 +122,11 @@ export type Post = {
   // IG auto-transform (0015): fit mode + crop-window nudge. null = crop / face-auto.
   ig_fit: "crop" | "pad" | "pad_blur" | null;
   ig_crop_offset: number | null;
+  ig_crop_x: number | null;
+  ig_crop_y: number | null;
+  ig_crop_w: number | null;
+  ig_crop_h: number | null;
+  ig_crop_ratio: string | null;
   created_at: string;
 };
 
@@ -222,6 +227,11 @@ export type PostUpdate = Partial<{
   alt_text: string | null;
   ig_fit: "crop" | "pad" | "pad_blur" | null;
   ig_crop_offset: number | null;
+  ig_crop_x: number | null;
+  ig_crop_y: number | null;
+  ig_crop_w: number | null;
+  ig_crop_h: number | null;
+  ig_crop_ratio: string | null;
 }>;
 
 export const updatePost = (id: string, body: PostUpdate) =>

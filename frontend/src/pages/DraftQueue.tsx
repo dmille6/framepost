@@ -8,7 +8,6 @@ import {
   listHistory,
   listScheduled,
   type Post,
-  type PostUpdate,
   schedulePost,
   setPostAlbums,
   setPostGroups,
@@ -23,7 +22,7 @@ import BulkEditDialog from "../components/BulkEditDialog";
 import FindReplaceDialog from "../components/FindReplaceDialog";
 import DraftCard from "../components/DraftCard";
 import EmptyState from "../components/EmptyState";
-import MetadataEditor from "../components/MetadataEditor";
+import MetadataEditor, { editorChangesToPatch } from "../components/MetadataEditor";
 import PageHeader from "../components/PageHeader";
 import ScheduleDialog from "../components/ScheduleDialog";
 import { SkeletonGrid } from "../components/Skeleton";
@@ -182,23 +181,7 @@ export default function DraftQueue() {
 
   const updateMutation = useMutation({
     mutationFn: async ({ id, changes }: { id: string; changes: EditorChanges }) => {
-      const body: PostUpdate = {
-        title: changes.title,
-        description: changes.description,
-        tags: changes.tags,
-        privacy: changes.privacy,
-        safety_level: changes.safety_level,
-        content_type: changes.content_type,
-        venue_id: changes.venue_id,
-        show: changes.show,
-        city: changes.city,
-        alt_text: changes.alt_text,
-        // target_platforms was silently dropped here since the checkboxes shipped —
-        // the editor state never reached the API. Fixed alongside the IG fit fields.
-        target_platforms: changes.target_platforms,
-        ig_fit: changes.ig_fit,
-        ig_crop_offset: changes.ig_crop_offset,
-      };
+      const body = editorChangesToPatch(changes);
       const saved = await updatePost(id, body);
       await setPostAlbums(id, changes.album_ids);
       await setPostGroups(id, changes.group_ids);

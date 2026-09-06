@@ -5,7 +5,6 @@ import {
   getPost,
   postNow,
   type Post,
-  type PostUpdate,
   type ScheduledItem,
   setPostAlbums,
   setPostGroups,
@@ -15,7 +14,7 @@ import {
 } from "../api/client";
 import { absoluteTime } from "../lib/time";
 import InstagramPanel from "./InstagramPanel";
-import MetadataEditor, { type EditorChanges } from "./MetadataEditor";
+import MetadataEditor, { editorChangesToPatch, type EditorChanges } from "./MetadataEditor";
 import RedditPanel from "./RedditPanel";
 import ReelTab from "./ReelTab";
 import { SkeletonRows } from "./Skeleton";
@@ -52,23 +51,7 @@ export default function ScheduledItemModal({
 
   const saveMutation = useMutation({
     mutationFn: async (changes: EditorChanges) => {
-      const body: PostUpdate = {
-        title: changes.title,
-        description: changes.description,
-        tags: changes.tags,
-        privacy: changes.privacy,
-        safety_level: changes.safety_level,
-        content_type: changes.content_type,
-        venue_id: changes.venue_id,
-        show: changes.show,
-        city: changes.city,
-        alt_text: changes.alt_text,
-        // target_platforms was silently dropped here since the checkboxes shipped —
-        // the editor state never reached the API. Fixed alongside the IG fit fields.
-        target_platforms: changes.target_platforms,
-        ig_fit: changes.ig_fit,
-        ig_crop_offset: changes.ig_crop_offset,
-      };
+      const body = editorChangesToPatch(changes);
       const saved = await updatePost(item.id, body);
       await setPostAlbums(item.id, changes.album_ids);
       await setPostGroups(item.id, changes.group_ids);
