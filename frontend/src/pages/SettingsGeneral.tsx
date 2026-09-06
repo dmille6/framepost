@@ -19,6 +19,7 @@ type FormState = {
   default_privacy: string;
   default_safety_level: string;
   default_content_type: string;
+  default_include_exif: string;
   max_groups_default: string;
   warn_groups_threshold: string;
   schedule_fuzz_minutes: string;
@@ -34,6 +35,7 @@ const FIELDS: (keyof FormState)[] = [
   "default_privacy",
   "default_safety_level",
   "default_content_type",
+  "default_include_exif",
   "max_groups_default",
   "warn_groups_threshold",
   "schedule_fuzz_minutes",
@@ -144,7 +146,7 @@ export default function SettingsGeneral() {
       </div>
 
       <div style={{ fontSize: 13, color: "var(--text)", marginTop: 8 }}>Default for new posts</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12 }}>
         <ConfigField label="Privacy">
           <select className="fp-select" value={form.default_privacy} onChange={(e) => set("default_privacy", e.target.value)}>
             <option value="private">Private</option>
@@ -164,6 +166,12 @@ export default function SettingsGeneral() {
             <option value="photo">Photo</option>
             <option value="screenshot">Screenshot</option>
             <option value="other">Other</option>
+          </select>
+        </ConfigField>
+        <ConfigField label="Camera info">
+          <select className="fp-select" value={form.default_include_exif} onChange={(e) => set("default_include_exif", e.target.value)}>
+            <option value="true">On</option>
+            <option value="false">Off</option>
           </select>
         </ConfigField>
       </div>
@@ -244,6 +252,7 @@ function toForm(c: AppConfigMap): FormState {
     default_privacy: c.default_privacy ?? "public",
     default_safety_level: c.default_safety_level ?? "safe",
     default_content_type: c.default_content_type ?? "photo",
+    default_include_exif: c.default_include_exif ?? "true",
     max_groups_default: c.max_groups_default ?? "5",
     warn_groups_threshold: c.warn_groups_threshold ?? "8",
     schedule_fuzz_minutes: c.schedule_fuzz_minutes ?? "5",

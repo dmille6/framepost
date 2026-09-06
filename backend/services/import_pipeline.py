@@ -76,6 +76,16 @@ def _ext_for(filename: str | None, fmt: str) -> str:
     return {"JPEG": "jpg", "MPO": "jpg", "PNG": "png"}.get(fmt, "bin")
 
 
+def _include_exif_default(db: Session) -> int:
+    """Settings -> General -> 'Camera info'. Defaults ON: every photo already carries
+    the shot data, and it's the detail this audience asks for in comments. Mirrors the
+    default_privacy read below — same app_config family, same fallback-if-unset shape."""
+    row = db.execute(
+        select(AppConfig).where(AppConfig.key == "default_include_exif")
+    ).scalar_one_or_none()
+    return 1 if (row.value if row and row.value else "true").lower() == "true" else 0
+
+
 def import_image(
     src_path: Path,
     *,
@@ -160,6 +170,7 @@ def import_image(
         gps_lng=exif_fields["gps_lng"],
         exif_raw=exif_fields["exif_raw"],
         iptc_raw=iptc_fields["iptc_raw"],
+        include_exif=_include_exif_default(db),
         created_at=now,
         updated_at=now,
     )

@@ -97,3 +97,20 @@ def test_shot_info_stands_alone_when_there_is_no_description():
 def test_opting_in_with_no_exif_leaves_the_description_alone():
     post = _post(description="On stage.", include_exif=1)
     assert caption_text.description_with_shot_info(post) == "On stage."
+
+
+# --- the "on by default" setting -----------------------------------------------------
+
+def test_camera_info_is_on_for_new_posts_when_unset(db):
+    from services.import_pipeline import _include_exif_default
+
+    assert _include_exif_default(db) == 1
+
+
+def test_camera_info_default_can_be_switched_off(db):
+    from models import AppConfig
+    from services.import_pipeline import _include_exif_default
+
+    db.add(AppConfig(key="default_include_exif", value="false"))
+    db.commit()
+    assert _include_exif_default(db) == 0
