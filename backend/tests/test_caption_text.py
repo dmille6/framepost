@@ -99,6 +99,27 @@ def test_opting_in_with_no_exif_leaves_the_description_alone():
     assert caption_text.description_with_shot_info(post) == "On stage."
 
 
+def test_camera_name_is_the_name_a_photographer_would_write():
+    """Shown in the editor's EXIF table as well as the caption, so the same body can't be
+    named two different ways an inch apart on screen."""
+    assert caption_text.format_camera_name(
+        _post(camera_make="SONY", camera_model="ILCE-7RM4")) == "Sony \u03b17R IV"
+    assert caption_text.format_camera_name(
+        _post(camera_make="Canon", camera_model="EOS R5")) == "Canon EOS R5"
+    assert caption_text.format_camera_name(
+        _post(camera_make="LEICA CAMERA AG", camera_model="LEICA Q3 43")) == "LEICA Q3 43"
+
+
+def test_camera_name_is_empty_when_unknown():
+    assert caption_text.format_camera_name(_post()) == ""
+
+
+def test_camera_name_matches_the_body_the_shot_line_uses():
+    post = _post(camera_make="SONY", camera_model="ILCE-7RM3", iso=800)
+    assert caption_text.format_shot_info(post).startswith(
+        caption_text.format_camera_name(post))
+
+
 # --- which platforms carry the line --------------------------------------------------
 
 def _shot_post():

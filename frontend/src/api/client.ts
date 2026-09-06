@@ -131,6 +131,8 @@ export type Post = {
   // shot_info is read-only: the server formats the exact line include_exif appends.
   include_exif: boolean;
   shot_info: string | null;
+  // Server-formatted camera body ("Sony α7R IV" rather than the raw "SONY ILCE-7RM4").
+  camera_name: string;
   created_at: string;
 };
 
@@ -506,6 +508,7 @@ export type HistoryPost = {
   captured_at: string | null;
   camera_make: string | null;
   camera_model: string | null;
+  camera_name: string;
   lens: string | null;
   iso: number | null;
   shutter_speed: string | null;

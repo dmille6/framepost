@@ -379,7 +379,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           ["Dimensions", post.width && post.height ? `${post.width} × ${post.height}` : "—"],
           ["File size", post.file_size_bytes ? `${(post.file_size_bytes / 1024 / 1024).toFixed(2)} MB` : "—"],
           ["Captured", captured],
-          ["Camera", [post.camera_make, post.camera_model].filter(Boolean).join(" ") || "—"],
+          ["Camera", post.camera_name || "—"],
           ["Lens", post.lens ?? "—"],
           ["Exposure", [
             post.focal_length ? `${post.focal_length}mm` : null,
@@ -721,7 +721,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           caption={post.title || post.original_filename || undefined}
           meta={[
             post.width && post.height ? `${post.width} × ${post.height}` : null,
-            [post.camera_make, post.camera_model].filter(Boolean).join(" ") || null,
+            post.camera_name || null,
             post.lens,
           ].filter(Boolean).join(" · ") || undefined}
           onClose={() => setLightboxOpen(false)}

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from database import get_session
 from models import PlatformCredential, Post, PostComment, PostEvent, PostPlatform, User
 from routes.auth import current_user
 from routes.posts import PostOut
+from services import caption_text
 
 router = APIRouter()
 
@@ -44,6 +45,11 @@ class HistoryPost(BaseModel):
     retry_count: int
     posted_to_instagram_at: datetime | None = None
     reddit_posted_at: datetime | None = None
+
+    @computed_field
+    @property
+    def camera_name(self) -> str:
+        return caption_text.format_camera_name(self)
 
     class Config:
         from_attributes = True

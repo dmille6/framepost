@@ -234,7 +234,7 @@ function DetailModal({ post, onClose }: { post: HistoryPost; onClose: () => void
               </div>
             </div>
             <div style={{ fontSize: 12, color: "var(--text-dim)", display: "grid", gap: 2 }}>
-              <div>Camera: {[post.camera_make, post.camera_model].filter(Boolean).join(" ") || "—"}</div>
+              <div>Camera: {post.camera_name || "—"}</div>
               <div>Lens: {post.lens || "—"}</div>
               <div>
                 Exposure: {[

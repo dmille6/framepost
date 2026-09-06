@@ -78,7 +78,10 @@ def _pretty_model(model: str | None) -> str:
     return name
 
 
-def _body_name(post) -> str:
+def format_camera_name(post) -> str:
+    """Camera body as a photographer would write it — "Sony α7R IV", not "SONY ILCE-7RM4".
+    Shared by the caption line and the EXIF readout in the editor so the same body isn't
+    named two different ways an inch apart on screen."""
     make, model = _pretty_make(post.camera_make), _pretty_model(post.camera_model)
     if not model:
         return make
@@ -91,7 +94,7 @@ def _body_name(post) -> str:
 def format_shot_info(post) -> str:
     """One-line camera/lens/exposure summary. Empty when nothing is known."""
     parts: list[str] = []
-    body = _body_name(post)
+    body = format_camera_name(post)
     if body:
         parts.append(body)
     lens = (post.lens or "").strip()

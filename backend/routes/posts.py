@@ -100,6 +100,11 @@ class PostOut(BaseModel):
     def shot_info(self) -> str:
         return caption_text.format_shot_info(self)
 
+    @computed_field
+    @property
+    def camera_name(self) -> str:
+        return caption_text.format_camera_name(self)
+
     class Config:
         from_attributes = True
 
