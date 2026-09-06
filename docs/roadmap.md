@@ -96,8 +96,14 @@ across five images yields one engagement number and no per-image attribution —
 exactly the thing the analytics were built for. Worth deciding up front whether a set is
 one row or many in `engagement_snapshots`.
 
-**The studio needs a filmstrip** — step through the images in a set and crop each. An
-extension of the existing component, not a rewrite.
+**The filmstrip is built** (`Drafts -> Select multiple -> Crop for IG`). It steps through
+a selection one frame at a time, crops each to a single shared ratio, and flags photos
+too wide to reach that ratio — the ones Instagram would re-crop to match the first frame.
+Because sets are not a persisted concept yet it binds to the current multi-selection;
+when they exist it binds to a set instead, and the component does not change.
+
+It is also useful on its own: cropping a show's shots consistently is worth doing whether
+or not they ever travel together.
 
 ### Sequencing
 

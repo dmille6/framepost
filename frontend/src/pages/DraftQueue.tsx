@@ -20,6 +20,7 @@ import type { EditorChanges } from "../components/MetadataEditor";
 
 import BulkEditDialog from "../components/BulkEditDialog";
 import FindReplaceDialog from "../components/FindReplaceDialog";
+import IgCropFilmstrip from "../components/IgCropFilmstrip";
 import DraftCard from "../components/DraftCard";
 import EmptyState from "../components/EmptyState";
 import MetadataEditor, { editorChangesToPatch } from "../components/MetadataEditor";
@@ -120,6 +121,7 @@ export default function DraftQueue() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [smartFillOpen, setSmartFillOpen] = useState(false);
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
+  const [filmstripOpen, setFilmstripOpen] = useState(false);
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<"newest" | "oldest" | "captured" | "largest" | "ready">("newest");
@@ -465,6 +467,15 @@ export default function DraftQueue() {
                         Bulk Edit ({checkedIds.size})
                       </button>
                       <button
+                        className="fp-btn-ghost"
+                        disabled={checkedIds.size === 0}
+                        onClick={() => setFilmstripOpen(true)}
+                        title="Crop the selection to one Instagram ratio, one frame at a time"
+                        style={{ padding: "6px 14px", fontSize: 13 }}
+                      >
+                        Crop for IG ({checkedIds.size})
+                      </button>
+                      <button
                         className="fp-btn"
                         disabled={checkedIds.size === 0}
                         onClick={() => setSmartFillOpen(true)}
@@ -578,6 +589,13 @@ export default function DraftQueue() {
           onSubmit={async (iso) => {
             await scheduleMutation.mutateAsync({ id: scheduling.id, iso });
           }}
+        />
+      )}
+
+      {filmstripOpen && (
+        <IgCropFilmstrip
+          posts={drafts.filter((d) => checkedIds.has(d.id))}
+          onClose={() => setFilmstripOpen(false)}
         />
       )}
 
