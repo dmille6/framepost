@@ -58,18 +58,62 @@ What the probe established that the docs don't say:
   a rejected image succeeded on the first retry when sent alone. Needs pacing and retry
   between children, or it will present as "half my photos are broken".
 
-**The hard part is not the API.** FramePost assumes one post = one photo — the scatter
-scheduler, the calendar, `post_platforms`, and analytics all rest on it. Carousels need
-a grouping concept: which photos travel together, in what order, and what the other four
-platforms do with a group, since none of them have an equivalent. The likely answer is
-that a group posts as a carousel on Instagram and as separate posts elsewhere, but that
-is a decision to make deliberately rather than discover halfway through.
+### Why it is worth more now than it looked
 
-Scope this before building. Rough guess once scoped: **1–2 weeks**.
+Reassessed after the crop studio shipped, September 2026.
+
+The obvious blocker — "every image is cropped to the first image's aspect ratio" — was
+never the real one, and it was already solved before the studio. `ensure_staged()`
+renders each image to exactly the target ratio, so a carousel built from staged variants
+is uniform by construction and Meta's rule is a no-op.
+
+What the studio actually removed is the **curation** blocker. With a single photo, an
+auto-crop that lands slightly wrong is a shrug. In a set of five, one badly cropped frame
+spoils the carousel, and you are composing a sequence rather than cropping a picture.
+That was impractical with one slider per image and no way to see the set as a set.
+
+The stronger argument is strategic. The scatter scheduler exists because posting twenty
+shots from one show at once is bad. A carousel is also several shots from one show at
+once — except the platform sanctions it, counts it as **one** post against the rate
+limit, and audiences expect it. Not in tension with the scatter; a second answer to the
+same problem. Some frames scatter across months, a curated handful travel together.
+
+### What it still costs
+
+**The data model.** One post = one photo runs through the scheduler, the calendar,
+`post_platforms`, and analytics. Carousels need a grouping concept: which photos travel
+together, in what order, and what the other four platforms do with a group, since none
+of them have an equivalent. The likely answer is a carousel on Instagram and separate
+posts elsewhere — a decision to make deliberately rather than discover halfway through.
+
+**Staging multiplies.** `PostPlatform.staging_remote_id` holds one hidden Flickr photo
+per post-platform. A carousel needs one per child, plus one cleanup each, so that column
+becomes a collection or a small table and the orphan sweep has more to reconcile.
+
+**Analytics get blunter, and this is the real loss.** The performer leaderboard
+attributes engagement to the performers on a post. A carousel with three performers
+across five images yields one engagement number and no per-image attribution — degrading
+exactly the thing the analytics were built for. Worth deciding up front whether a set is
+one row or many in `engagement_snapshots`.
+
+**The studio needs a filmstrip** — step through the images in a set and crop each. An
+extension of the existing component, not a rewrite.
+
+### Sequencing
+
+Worth building, and worth more than it looked before the studio. But pre-flight
+validation and the CI gate still come first: carousels add a new failure surface to a
+system that currently cannot tell you when a scheduled post is going to fail.
+
+Rough guess once scoped: **1–2 weeks**.
 
 ---
 
-## Instagram crop studio
+## Instagram crop studio — SHIPPED
+
+Built in two slices: migration `0019` plus rect support in `render_variant` (commit
+`3790fbe`), then the drag-and-zoom canvas (`5fdf51a`). Kept here for the reasoning
+behind the design, and because the filmstrip extension for carousels builds on it.
 
 **Design approved from a working prototype, September 2026.** Interactive mockup:
 <https://claude.ai/code/artifact/3912b6ad-bfb0-4ccf-a070-1379fd9d84d2> — drag, zoom,
@@ -108,11 +152,17 @@ That is the argument for making the choice visible rather than automatic.
 - **Available on every photo**, not only out-of-ratio ones. Cropping tighter is useful on
   a square Instagram would accept untouched.
 
-### Known gaps in the prototype
+### What shipped, and what did not
 
-Pad and blur modes are visual approximations rather than the real renderer, and the face
-marker is drawn from the stored offset rather than live detection. Both come from the
-server in the real implementation.
+Pad and blur render server-side in the real component, so they are the true output
+rather than the prototype's approximations. The face marker did **not** ship: the canvas
+shows the crop window and thirds guides, but no live face indicator. Cheap to add later
+from the existing `/face-center` endpoint if it turns out to be missed.
+
+One thing the build surfaced worth remembering: both editor callers assembled the PATCH
+body by hand, and a field had already been lost that way once before
+(`target_platforms`). The crop rect made it twice. `editorChangesToPatch()` now builds
+it in one place.
 
 **Effort: 3–5 days** — canvas interaction, the migration, rect support in
 `render_variant`, and the parity tests.
