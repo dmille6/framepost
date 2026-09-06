@@ -466,15 +466,24 @@ def _pick_days_tiered(
     horizon_days = sorted(horizon_days)
     counts = dict(day_counts)
     picks: list[date_type] = []
+    already_picked: set[date_type] = set()
     for tier in range(max_per_day):
         if len(picks) >= needed:
             break
-        eligible = [d for d in horizon_days if counts.get(d, 0) == tier]
+        # `counts` is mutated as each tier fills, so a day picked in tier 0 now holds
+        # one post and would qualify for tier 1 on the very next pass — handing the
+        # same day two photos from one batch while other days stay empty. Excluding
+        # what this batch already picked keeps a run spreading rather than doubling up.
+        eligible = [
+            d for d in horizon_days
+            if counts.get(d, 0) == tier and d not in already_picked
+        ]
         if not eligible:
             continue
         chosen = _stratified(eligible, needed - len(picks))
         for d in chosen:
             counts[d] = counts.get(d, 0) + 1
+        already_picked.update(chosen)
         picks.extend(chosen)
     picked = set(picks)
     spares = [

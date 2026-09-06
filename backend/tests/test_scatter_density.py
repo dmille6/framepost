@@ -40,13 +40,20 @@ def test_second_pass_starts_only_when_calendar_is_full():
 
 
 def test_mixed_tiers_fill_empties_first_then_spill():
-    # Only 5 empty days left; ask for 8 → 5 from tier 0, 3 from tier 1.
-    counts = {d: 1 for d in HORIZON[5:]}
-    picks, _ = _pick_days_tiered(HORIZON, counts, needed=8, max_per_day=2)
-    assert len(picks) == 8
-    tier0 = [d for d in picks if counts.get(d, 0) == 0]
-    tier1 = [d for d in picks if counts.get(d, 0) == 1]
-    assert len(tier0) == 5 and len(tier1) == 3
+    """Only 5 empty days left; ask for 8 → 5 from tier 0, 3 from tier 1.
+
+    Repeated, because the picker is random: a single trial passed roughly seven times
+    in eight while `counts` mutation let a day filled by tier 0 qualify for tier 1 on
+    the next pass, taking two photos from one batch while other days sat empty.
+    """
+    for _ in range(60):
+        counts = {d: 1 for d in HORIZON[5:]}
+        picks, _ = _pick_days_tiered(HORIZON, counts, needed=8, max_per_day=2)
+        assert len(picks) == 8
+        assert len(set(picks)) == 8, "a day was given two photos from the same batch"
+        tier0 = [d for d in picks if counts.get(d, 0) == 0]
+        tier1 = [d for d in picks if counts.get(d, 0) == 1]
+        assert len(tier0) == 5 and len(tier1) == 3
 
 
 def test_respects_ceiling_and_reports_shortfall():
@@ -54,3 +61,15 @@ def test_respects_ceiling_and_reports_shortfall():
     picks, spares = _pick_days_tiered(HORIZON, counts, needed=10, max_per_day=2)
     assert picks == []      # nothing schedulable
     assert spares == []     # and no fallback days either
+
+
+def test_no_day_doubles_up_while_the_horizon_still_has_empty_days():
+    """The rule as the photographer stated it: nothing gets a second photo until every
+    day in the year has a first one."""
+    for _ in range(40):
+        counts = {d: 1 for d in HORIZON[50:]}   # 50 empty days remain
+        picks, _ = _pick_days_tiered(HORIZON, counts, needed=50, max_per_day=2)
+        assert len(picks) == 50
+        assert len(set(picks)) == 50
+        # Every pick landed on a day that was empty — none doubled up.
+        assert all(counts.get(d, 0) == 0 for d in picks)
