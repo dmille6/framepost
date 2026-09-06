@@ -137,19 +137,51 @@ def auto_offset(src: Path, *, crop_frac: float, vertical: bool) -> float:
     return min(1.0, max(0.0, offset))
 
 
+Rect = tuple[float, float, float, float]
+
+
+def fit_rect_to_ratio(rect: Rect, src_w: int, src_h: int, target_ratio: float) -> Rect:
+    """Largest target_ratio window that fits inside `rect`, sharing its centre.
+
+    A stored rect carries the ratio it was authored against. If the runtime probe later
+    moves the floor (4:5 <-> 3:4) the old rect no longer matches the new target, so
+    rather than distorting the photo we keep the photographer's centre of interest and
+    re-fit the window around it. When the rect already matches, this returns it unchanged.
+    """
+    x, y, w, h = rect
+    # Work in pixels: a normalized rect is not square, so ratios don't survive naively.
+    pw, ph = w * src_w, h * src_h
+    if ph <= 0 or pw <= 0:
+        return (0.0, 0.0, 1.0, 1.0)
+    if pw / ph > target_ratio:          # too wide for the target — pull the sides in
+        new_pw, new_ph = ph * target_ratio, ph
+    else:                               # too tall — pull top and bottom in
+        new_pw, new_ph = pw, pw / target_ratio
+    cx, cy = (x + w / 2) * src_w, (y + h / 2) * src_h
+    left = min(max(0.0, cx - new_pw / 2), max(0.0, src_w - new_pw))
+    top = min(max(0.0, cy - new_ph / 2), max(0.0, src_h - new_ph))
+    return (left / src_w, top / src_h, new_pw / src_w, new_ph / src_h)
+
+
 def render_variant(
     src: Path,
     *,
     target_ratio: float,
     fit: str = "crop",
     offset: float | None = None,
+    rect: Rect | None = None,
     out_width: int = OUT_WIDTH,
     quality: int = JPEG_QUALITY,
 ) -> bytes:
     """Render src to a JPEG at exactly target_ratio (w/h).
 
-    fit="crop": slide a target_ratio window across the long axis. offset 0..1 positions
-    it (0=top/left, 1=bottom/right); None = face-anchored auto.
+    fit="crop" picks its window by the first of these that is given:
+      rect    an explicit normalized (x, y, w, h) in 0..1 source coordinates — the crop
+              studio's output, and the only form able to express a TIGHTER window than
+              maximum area.
+      offset  legacy single-axis position, 0=top/left .. 1=bottom/right, always at
+              maximum area.
+      neither face-anchored auto.
     fit="pad": letterbox on black. fit="pad_blur": letterbox on a blurred, darkened
     cover-fill of the photo itself (what most social tools do — reads less like bars).
     """
@@ -166,7 +198,16 @@ def render_variant(
         w, h = img.width, img.height
         ratio = w / h
 
-        if fit == "crop":
+        if fit == "crop" and rect is not None:
+            # Honour the requested window, but never distort: the output ratio is fixed,
+            # so re-fit the target ratio inside the rect rather than stretching it.
+            fx, fy, fw, fh = fit_rect_to_ratio(rect, w, h, target_ratio)
+            left = int(round(fx * w))
+            top = int(round(fy * h))
+            right = min(w, left + max(1, int(round(fw * w))))
+            bottom = min(h, top + max(1, int(round(fh * h))))
+            out = img.crop((left, top, right, bottom)).resize((out_w, out_h), Image.LANCZOS)
+        elif fit == "crop":
             if ratio < target_ratio:  # too tall — crop vertically
                 crop_h = int(round(w / target_ratio))
                 crop_frac = crop_h / h
@@ -202,16 +243,39 @@ def render_variant(
     return buf.getvalue()
 
 
+def rect_for(post: Post) -> Rect | None:
+    """The stored crop window for a post, or None to fall back to offset/auto.
+
+    Every component must be present; a half-written rect is treated as absent rather
+    than guessed at.
+    """
+    vals = (post.ig_crop_x, post.ig_crop_y, post.ig_crop_w, post.ig_crop_h)
+    if any(v is None for v in vals):
+        return None
+    x, y, w, h = (float(v) for v in vals)
+    if w <= 0 or h <= 0:
+        return None
+    # Clamp into range rather than reject: a rect nudged slightly out of bounds by
+    # floating-point drift in the browser should still render.
+    x = min(max(0.0, x), 1.0)
+    y = min(max(0.0, y), 1.0)
+    return (x, y, min(w, 1.0 - x), min(h, 1.0 - y))
+
+
 def render_preview(db: Session, post: Post, *, fit: str, offset: float | None,
-                   width: int = 540) -> tuple[bytes, str]:
+                   rect: Rect | None = None, width: int = 540) -> tuple[bytes, str]:
     """Small inline preview for the editor UI. Returns (jpeg_bytes, ratio_key) so the
     frontend can label what the live post will use."""
     floor, ratio_key, _tested = supported_floor(db)
     src = _source_path(post, prefer_preview=True)
     ratio = (post.width / post.height) if post.width and post.height else None
     target = MAX_ASPECT if (ratio and ratio > MAX_ASPECT + EPS) else floor
+    # An explicit rect wins (the studio previewing unsaved state); otherwise fall
+    # back to whatever is stored on the post.
     data = render_variant(
-        src, target_ratio=target, fit=fit, offset=offset, out_width=width, quality=82,
+        src, target_ratio=target, fit=fit, offset=offset,
+        rect=rect if rect is not None else rect_for(post),
+        out_width=width, quality=82,
     )
     return data, ratio_key
 
@@ -263,7 +327,8 @@ def ensure_staged(
 
     src = _source_path(post)
     data = render_variant(
-        src, target_ratio=RATIOS[ratio_key], fit=fit, offset=offset
+        src, target_ratio=RATIOS[ratio_key], fit=fit, offset=offset,
+        rect=rect_for(post),
     )
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(data)

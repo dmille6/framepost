@@ -87,6 +87,11 @@ class PostOut(BaseModel):
     alt_text: str | None = None
     ig_fit: str | None = None
     ig_crop_offset: float | None = None
+    ig_crop_x: float | None = None
+    ig_crop_y: float | None = None
+    ig_crop_w: float | None = None
+    ig_crop_h: float | None = None
+    ig_crop_ratio: str | None = None
     created_at: datetime
 
     class Config:
@@ -138,6 +143,13 @@ class PostUpdate(BaseModel):
     # IG auto-transform (0015): fit mode + crop-window nudge from the editor slider.
     ig_fit: str | None = Field(default=None, pattern="^(crop|pad|pad_blur)$")
     ig_crop_offset: float | None = Field(default=None, ge=0.0, le=1.0)
+    # The crop studio writes these four together plus the ratio they were authored
+    # against; a partially-written rect is ignored by rect_for() rather than guessed at.
+    ig_crop_x: float | None = Field(default=None, ge=0.0, le=1.0)
+    ig_crop_y: float | None = Field(default=None, ge=0.0, le=1.0)
+    ig_crop_w: float | None = Field(default=None, gt=0.0, le=1.0)
+    ig_crop_h: float | None = Field(default=None, gt=0.0, le=1.0)
+    ig_crop_ratio: str | None = Field(default=None, pattern="^(3:4|4:5|1:1)$")
 
 
 @router.post(
@@ -494,6 +506,10 @@ def get_ig_crop_preview(
     post_id: str,
     fit: str = Query("crop", regex="^(crop|pad|pad_blur)$"),
     offset: float | None = Query(None, ge=0.0, le=1.0),
+    rx: float | None = Query(None, ge=0.0, le=1.0),
+    ry: float | None = Query(None, ge=0.0, le=1.0),
+    rw: float | None = Query(None, gt=0.0, le=1.0),
+    rh: float | None = Query(None, gt=0.0, le=1.0),
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
 ):
@@ -505,7 +521,12 @@ def get_ig_crop_preview(
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
     try:
-        data, ratio_key = ig_variant.render_preview(db, post, fit=fit, offset=offset)
+        rect = None
+        if None not in (rx, ry, rw, rh):
+            rect = (rx, ry, rw, rh)
+        data, ratio_key = ig_variant.render_preview(
+            db, post, fit=fit, offset=offset, rect=rect
+        )
     except FileNotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
     except Exception as e:

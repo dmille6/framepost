@@ -74,6 +74,15 @@ class Post(Base):
     # ig_fit: crop | pad | pad_blur, null = crop. ig_crop_offset: 0..1 window position
     # along the cropped axis, null = face-anchored auto.
     ig_fit = Column(String)
+    # Normalized crop window in 0..1 source coordinates, with the target ratio it was
+    # authored against — the runtime probe can move the floor between 4:5 and 3:4, and a
+    # bare rect would silently change meaning if it did. Takes precedence over
+    # ig_crop_offset, which remains as the legacy single-axis fallback.
+    ig_crop_x = Column(Float)
+    ig_crop_y = Column(Float)
+    ig_crop_w = Column(Float)
+    ig_crop_h = Column(Float)
+    ig_crop_ratio = Column(String)
     ig_crop_offset = Column(Float)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
