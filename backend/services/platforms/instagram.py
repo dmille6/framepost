@@ -242,6 +242,10 @@ def _refresh(db: Session, row: PlatformCredential) -> None:
         _raise_api_error(r, "Token refresh")
     body = r.json()
     row.access_token = encrypt_token(body["access_token"])
+    # A freshly stored token means the channel is authorised again — drop any
+    # "needs reconnecting" flag so the health banner clears immediately rather
+    # than waiting for the next scheduled post to prove it.
+    row.auth_status, row.auth_error, row.auth_flagged_at = "ok", None, None
     expires_in = int(body.get("expires_in") or TOKEN_LIFETIME.total_seconds())
     row.token_expires = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
     db.commit()

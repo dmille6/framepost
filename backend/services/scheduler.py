@@ -19,7 +19,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import alt_text as alt_text_svc, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
+from services import alt_text as alt_text_svc, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -621,6 +621,8 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
     pp.error_message = None
     pp.next_retry_at = None
     cred.last_success_at = fired_at
+    # A channel that just published is demonstrably authorised again.
+    cred.auth_status, cred.auth_error, cred.auth_flagged_at = "ok", None, None
     cred.last_error = None
 
     events.log_event(
@@ -719,9 +721,10 @@ def _record_platform_failure(
     """Persist a fanout failure to post_platforms + activity timeline. Decides whether the
     failure is retryable (transient + retries left) or permanent (4xx-class or attempts
     exhausted). Caller has already rolled back the failed transaction."""
-    permanent = getattr(err, "permanent", False)
-    log.warning("post %s: %s fanout failed (%s): %s",
-                post.id[:8], cred.platform, "permanent" if permanent else "transient", err)
+    failure = publish_errors.classify(cred.platform, err)
+    permanent = not failure.retryable
+    log.warning("post %s: %s fanout failed [%s]: %s",
+                post.id[:8], cred.platform, failure.category.value, err)
     try:
         refreshed_cred = db.get(PlatformCredential, cred.id)
         pp = db.get(PostPlatform, (post.id, cred.id))
@@ -732,12 +735,21 @@ def _record_platform_failure(
         pp.error_message = str(err)[:1000]
         max_attempts = retry.max_attempts(db)
         pp.status = "failed" if permanent or pp.retry_count >= max_attempts else "pending"
+        pp.error_message = f"{failure.user_message} ({str(err)[:400]})"[:1000]
         if pp.status == "pending":
             pp.next_retry_at = retry.next_retry_at(db, pp.retry_count)
         else:
             pp.next_retry_at = None
         if refreshed_cred:
             refreshed_cred.last_error = str(err)[:500]
+            if failure.requires_reauth:
+                # No number of retries fixes a revoked grant or a missing scope. Park
+                # the channel so the health banner can ask for a reconnect instead of
+                # this failing quietly every night.
+                refreshed_cred.auth_status = "reauth_required"
+                refreshed_cred.auth_error = failure.user_message
+                refreshed_cred.auth_flagged_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                log.error("%s needs reconnecting: %s", cred.platform, failure.user_message)
         events.log_event(
             db,
             post_id=post.id,
@@ -747,6 +759,8 @@ def _record_platform_failure(
                 "attempt": pp.retry_count,
                 "max_attempts": max_attempts,
                 "permanent": permanent,
+                "category": failure.category.value,
+                "user_message": failure.user_message,
                 "error": str(err)[:500],
             },
         )

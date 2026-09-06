@@ -6,11 +6,11 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, func
 
 from config import settings
 from database import SessionLocal
-from models import AppConfig, PlatformCredential
+from models import AppConfig, PlatformCredential, Post
 
 VERSION = "0.1.0"
 HEARTBEAT_TTL_SECONDS = 120  # brief: "last heartbeat within 2 minutes"
@@ -28,7 +28,25 @@ def _platform_warnings(db) -> list[dict[str, str]]:
     creds = db.execute(
         select(PlatformCredential).where(PlatformCredential.access_token.is_not(None))
     ).scalars().all()
+    pending = db.execute(
+        select(func.count()).select_from(Post).where(
+            Post.status == "pending", Post.scheduled_at.is_not(None)
+        )
+    ).scalar_one()
+
     for cred in creds:
+        if cred.auth_status == "reauth_required":
+            # The blast radius is what makes this actionable. "Flickr error" gets
+            # ignored for a fortnight; "231 scheduled posts affected" does not.
+            impact = (f" {pending} scheduled post{'s' if pending != 1 else ''} affected."
+                      if pending and cred.default_target else "")
+            out.append({
+                "platform": cred.platform,
+                "severity": "error",
+                "message": (f"{cred.auth_error or cred.platform.capitalize() + ' needs reconnecting.'}"
+                            f"{impact} Reconnect in Settings → Platforms."),
+            })
+            continue
         expires = cred.token_expires
         if expires is not None:
             if expires.tzinfo is None:

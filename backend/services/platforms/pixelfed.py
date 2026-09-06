@@ -194,6 +194,10 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
     account = r.json()
 
     row.access_token = encrypt_token(access_token)
+    # A freshly stored token means the channel is authorised again — drop any
+    # "needs reconnecting" flag so the health banner clears immediately rather
+    # than waiting for the next scheduled post to prove it.
+    row.auth_status, row.auth_error, row.auth_flagged_at = "ok", None, None
     row.account_name = account.get("acct") or account.get("username") or ""
     row.last_success_at = datetime.now(timezone.utc)
     row.last_error = None

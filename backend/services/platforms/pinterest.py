@@ -163,6 +163,10 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
     username = account.get("username") or ""
 
     row.access_token = encrypt_token(access_token)
+    # A freshly stored token means the channel is authorised again — drop any
+    # "needs reconnecting" flag so the health banner clears immediately rather
+    # than waiting for the next scheduled post to prove it.
+    row.auth_status, row.auth_error, row.auth_flagged_at = "ok", None, None
     row.refresh_token = encrypt_token(refresh_token) if refresh_token else None
     if expires_in:
         row.token_expires = (
@@ -261,6 +265,10 @@ def _refresh_if_needed(db: Session, row: PlatformCredential) -> str:
     body = r.json()
     access_token = body["access_token"]
     row.access_token = encrypt_token(access_token)
+    # A freshly stored token means the channel is authorised again — drop any
+    # "needs reconnecting" flag so the health banner clears immediately rather
+    # than waiting for the next scheduled post to prove it.
+    row.auth_status, row.auth_error, row.auth_flagged_at = "ok", None, None
     if body.get("refresh_token"):
         row.refresh_token = encrypt_token(body["refresh_token"])
     if body.get("expires_in"):

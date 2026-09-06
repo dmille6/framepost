@@ -248,6 +248,12 @@ class PlatformCredential(Base):
     default_target = Column(Integer, nullable=False, server_default="1")
     last_success_at = Column(DateTime)
     last_error = Column(Text)
+    # "ok" | "reauth_required". A REAUTH-class failure (revoked token, missing scope)
+    # parks the channel here instead of retrying forever — only the user reconnecting
+    # can fix it. Cleared on the next successful publish.
+    auth_status = Column(String, nullable=False, server_default="ok")
+    auth_error = Column(Text)
+    auth_flagged_at = Column(DateTime)
     key_version = Column(Integer, nullable=False, server_default="1")
     connected_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 

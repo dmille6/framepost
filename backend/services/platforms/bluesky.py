@@ -173,6 +173,10 @@ def _load_session(db: Session) -> tuple[PlatformCredential, _Session]:
 
 def _save_session(db: Session, row: PlatformCredential, session: _Session) -> None:
     row.access_token = encrypt_token(session.access_jwt)
+    # A freshly stored token means the channel is authorised again — drop any
+    # "needs reconnecting" flag so the health banner clears immediately rather
+    # than waiting for the next scheduled post to prove it.
+    row.auth_status, row.auth_error, row.auth_flagged_at = "ok", None, None
     row.refresh_token = encrypt_token(session.refresh_jwt)
     row.last_success_at = datetime.now(timezone.utc)
     db.commit()

@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from models import AppConfig, Post, PostPlatform
 from services import faces, storage
 from services.platforms import flickr
+from services import channel_health, publish_errors
 
 log = logging.getLogger("framepost.ig_variant")
 
@@ -315,8 +316,16 @@ def _delete_photo(db: Session, photo_id: str) -> None:
     try:
         flickr.rest_call(db, "flickr.photos.delete", photo_id=photo_id)
     except flickr.FlickrError as e:
-        log.warning("couldn't delete staging photo %s (%s) — daily sweep will retry",
-                    photo_id, e)
+        failure = publish_errors.classify("flickr", e)
+        if failure.requires_reauth:
+            # This is the case that ran silently for weeks: the stored Flickr token
+            # predates the delete scope, so the sweep retried nightly and could never
+            # succeed. Flag the channel so it asks for a reconnect instead.
+            channel_health.flag_reauth(db, "flickr", failure.user_message)
+            log.error("staging photo %s can't be deleted: %s", photo_id, failure.user_message)
+        else:
+            log.warning("couldn't delete staging photo %s (%s) — daily sweep will retry",
+                        photo_id, e)
 
 
 def cleanup_staged(db: Session, pp: PostPlatform | None) -> None:
