@@ -124,7 +124,8 @@ backend/      FastAPI app, SQLAlchemy models, Alembic migrations,
               alt_text, comments, platforms/*), pytest suite in tests/
 frontend/     React app — pages, components, API client
 nginx/        Multi-stage Dockerfile that builds the frontend and serves it
-docs/         Architecture, setup, Instagram integration, restore runbooks
+docs/         Architecture, setup, Instagram integration, restore runbooks,
+              roadmap
 brief.md      The original project brief that this codebase implements
 ```
 
@@ -153,6 +154,13 @@ engagement. The pytest suite (74 tests) guards the scheduling, caption,
 tag-normalisation, image-geometry, collaborator fail-soft, and find & replace
 logic, plus a route-inventory check that fails if a literal path is ever
 declared behind the `/{post_id}` catch-all again.
+
+## Roadmap
+
+Deferred work — what's next, what's blocked and why, and what was consciously put
+down — lives in [docs/roadmap.md](docs/roadmap.md). It carries the findings behind
+each item (for example, what Meta's API will and won't do for carousels and
+collaborators) so nothing has to be rediscovered.
 
 ## Privacy
 
