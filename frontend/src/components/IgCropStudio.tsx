@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 
-import { igPreviewUrl, previewUrl } from "../api/client";
+import { fetchFaceCenter, igPreviewUrl, previewUrl } from "../api/client";
 
 export type IgFit = "crop" | "pad" | "pad_blur";
 export type CropRect = { x: number; y: number; w: number; h: number };
@@ -151,6 +152,17 @@ export default function IgCropStudio({
     setZoom(zoom * (e.deltaY < 0 ? 1.08 : 0.92));
   };
 
+  // Where the auto-crop anchors. Detection runs server-side on the source image, so
+  // this is the same point the worker would centre on — showing it explains why "auto"
+  // put the window where it did, and warns when a manual crop has cut the face out.
+  const { data: face } = useQuery({
+    queryKey: ["face-center", postId],
+    queryFn: () => fetchFaceCenter(postId),
+    enabled: fit === "crop",
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+
   // Displayed image size so `active` exactly fills the window.
   const dispW = stage.w / active.w;
   const dispH = stage.h / active.h;
@@ -159,6 +171,24 @@ export default function IgCropStudio({
 
   const isAuto = rect === null;
   const kept = Math.round(active.w * active.h * 100);
+
+  // Source coords -> stage pixels, using the same transform as the image itself.
+  const faceMarker = useMemo(() => {
+    if (fit !== "crop" || !face?.detected || face.x == null || face.y == null) return null;
+    const rawLeft = offX + face.x * dispW;
+    const rawTop = offY + face.y * dispH;
+    const inside =
+      rawLeft >= 0 && rawTop >= 0 && rawLeft <= stage.w && rawTop <= stage.h;
+    // When the face sits outside the window, pin the marker to the nearest edge rather
+    // than hiding it. Losing the face is precisely the moment you want to be told, and
+    // an edge-pinned marker also shows which way to drag to get it back.
+    const pad = 15;
+    return {
+      left: Math.min(Math.max(pad, rawLeft), stage.w - pad),
+      top: Math.min(Math.max(pad, rawTop), stage.h - pad),
+      inside,
+    };
+  }, [fit, face, offX, offY, dispW, dispH, stage.w, stage.h]);
 
   return (
     <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -210,6 +240,29 @@ export default function IgCropStudio({
                     top: `${p}%`, height: 1, background: "rgba(255,255,255,.45)" }} />
                 ))}
               </>
+            )}
+            {faceMarker && (
+              <div
+                aria-hidden="true"
+                title={
+                  faceMarker.inside
+                    ? "Detected face — what the auto crop anchors on"
+                    : "The detected face is outside this crop — drag toward this edge"
+                }
+                style={{
+                  position: "absolute",
+                  left: faceMarker.left,
+                  top: faceMarker.top,
+                  width: 30,
+                  height: 30,
+                  marginLeft: -15,
+                  marginTop: -15,
+                  borderRadius: "50%",
+                  border: `1.5px solid ${faceMarker.inside ? "rgba(93,202,165,0.95)" : "var(--danger)"}`,
+                  boxShadow: "0 0 0 1px rgba(0,0,0,0.45)",
+                  pointerEvents: "none",
+                }}
+              />
             )}
           </div>
         ) : (
@@ -299,6 +352,12 @@ export default function IgCropStudio({
                 </button>
               )}
             </div>
+
+            {faceMarker && !faceMarker.inside && (
+              <div style={{ fontSize: 11, color: "var(--danger)", lineHeight: 1.5 }}>
+                The detected face falls outside this crop.
+              </div>
+            )}
 
             <div style={{ fontSize: 10.5, color: "var(--text-fade)", lineHeight: 1.5 }}>
               Drag the photo to reposition · scroll to zoom.<br />

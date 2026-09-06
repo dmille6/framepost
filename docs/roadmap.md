@@ -155,9 +155,12 @@ That is the argument for making the choice visible rather than automatic.
 ### What shipped, and what did not
 
 Pad and blur render server-side in the real component, so they are the true output
-rather than the prototype's approximations. The face marker did **not** ship: the canvas
-shows the crop window and thirds guides, but no live face indicator. Cheap to add later
-from the existing `/face-center` endpoint if it turns out to be missed.
+rather than the prototype's approximations.
+
+The face marker shipped after the fact, and does more than the prototype's: when the
+detected face falls outside the chosen crop it pins to the nearest edge in the danger
+colour and says so, instead of silently disappearing. Losing the face is exactly the
+moment worth flagging, and the pinned marker doubles as a direction to drag.
 
 One thing the build surfaced worth remembering: both editor callers assembled the PATCH
 body by hand, and a field had already been lost that way once before
