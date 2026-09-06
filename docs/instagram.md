@@ -83,6 +83,32 @@ variant (see the diagram in [architecture.md](architecture.md)):
   strays. Note: deleting on Flickr requires the OAuth grant to include
   **delete** perms.
 
+## Collaborators
+
+Performers tagged on a post are sent as co-authors in the same `/media`
+container call, taken from their stored Instagram handles in tag order and
+capped at Meta's limit of **3**.
+
+Meta validates every handle and rejects the **entire container** if any one of
+them is private, renamed, or deleted — so a single stale handle in the roster
+would otherwise cost the whole post. `_create_container` reads the refused
+handles out of `error_user_msg`, drops them, and retries, down to zero
+collaborators if it has to. The photo always ships; only the credit is lost.
+
+Rejected handles are written to `post_collaborators` and flip the performer's
+`handle_status` to `needs_check`, which surfaces in Settings → Performers with
+a one-click dismiss. A handle that works again clears its own flag.
+
+**What the API will not tell you:** whether an invite was *accepted*. The
+`collaborators` read edge is documented as "Available for Instagram API with
+Facebook Login only", and this install uses Instagram Login — both
+`?fields=collaborators` and `/{media}/collaborators` return schema errors
+against the live account. Acceptance is therefore inferred from engagement
+lift (`analytics_core.collab_lift`) rather than recorded as fact.
+
+Turn the whole feature off with `instagram_collabs=false` in Settings →
+Platforms.
+
 ## Engagement sync
 
 The daily sync stores like/comment **counts** per post

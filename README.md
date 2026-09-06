@@ -23,6 +23,12 @@ network perimeter.
   machine-tagged Flickr photo for Meta's URL ingest and deleted after publish.
   A per-post nudge slider in the editor overrides the crop window. The
   pipeline probes empirically whether Meta accepts 3:4 and remembers.
+- **Automatic Instagram collaborators** — performers tagged on a post (from
+  Lightroom `@keywords`) are sent as co-authors, up to Meta's limit of 3. An
+  accepted invite puts the photo on the performer's profile and in their
+  followers' feeds. If Meta refuses a handle the post still ships: the
+  offending handle is dropped, the retry goes out without it, and the
+  performer is flagged in Settings as needing a handle check.
 - **Show/batch workflow** — drafts group into per-show batches derived from
   the Lightroom export filename pattern; one chip click selects the whole
   show for Bulk Edit (shared venue / show / city / performers / targets) and
@@ -30,8 +36,10 @@ network perimeter.
 - **Smart Fill scheduling** — sequential cadence, or **stratified random
   scatter** across the next 12 months: one horizon segment per photo, a
   random day inside each, at posting hours **learned from the account's own
-  engagement history** (with a fixed fallback until there's data). Schedule
-  fuzz keeps timestamps human-looking.
+  engagement history** (with a fixed fallback until there's data). Density is
+  tiered — every day in the horizon gets one post before any day gets a
+  second — so a 50-photo show never clumps. Schedule fuzz keeps timestamps
+  human-looking.
 - **Copy-paste assist** for Reddit (title + 2048-px image + subreddit
   shortcuts). The old Instagram assist remains as a fallback when the IG
   connection is absent.
@@ -43,9 +51,20 @@ network perimeter.
   mode).
 - **Performer & venue tagging** — lightweight entities with IG handles;
   captions auto-insert `@mentions` and sanitized `#hashtags` per platform.
+- **Cross-platform analytics** that compare posts at equal **age** (24h / 48h
+  / 7d windows) rather than lifetime totals — with a 12-month scatter, lifetime
+  numbers just rank by how long a photo has been up. Per-platform quality
+  scoring weights the actions that cost the viewer something (saves, shares,
+  follows) above likes, plus leaderboards by performer / venue / show / city,
+  an Instagram account trend, and collaborator lift.
+- **Find & replace** across drafts *and* scheduled posts — fix a typo copied
+  into twenty descriptions without flattening them, with a preview of every
+  hit before anything is written. Published posts are reported but never
+  edited; they are already live elsewhere.
 - **Title templates**, **tag profiles**, **drag-to-schedule** calendar,
-  **bulk edit**, **ready-to-schedule checklist**, health banner with
-  platform-token expiry warnings, daily orphan scanner reconciling disk ↔ DB.
+  **bulk edit**, scheduled **list view**, **ready-to-schedule checklist**,
+  health banner with platform-token expiry warnings, daily orphan scanner
+  reconciling disk ↔ DB.
 
 ## Architecture
 
@@ -84,7 +103,7 @@ Instagram pipeline in detail.
 ## Stack
 
 - **Backend**: Python 3.12 + FastAPI + SQLAlchemy 2.0 + Alembic (schema at
-  migration `0015`)
+  migration `0017`)
 - **Database**: SQLite (WAL mode) on the OS disk
 - **Scheduler**: APScheduler in a sidecar worker process (MemoryJobStore —
   the DB is the source of truth)
@@ -129,9 +148,11 @@ documented step-by-step in [docs/instagram.md](docs/instagram.md).
 ## Status
 
 Production single-user deployment since early 2026. All five platforms post
-fully automatically; the scheduler learns posting hours from realized
-engagement; the pytest suite guards the scheduling, caption, and image-
-geometry logic.
+fully automatically and the scheduler learns posting hours from realized
+engagement. The pytest suite (74 tests) guards the scheduling, caption,
+tag-normalisation, image-geometry, collaborator fail-soft, and find & replace
+logic, plus a route-inventory check that fails if a literal path is ever
+declared behind the `/{post_id}` catch-all again.
 
 ## Privacy
 

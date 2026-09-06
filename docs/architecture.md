@@ -115,6 +115,27 @@ Daily sync (`services/comments.py`) writes three tables the UI reads:
   powers analytics, the learned scheduler hours, and the Activity stream's
   synthesized Instagram `▲ +N likes · +M comments` delta items
 
+## Analytics
+
+Everything reads the append-only `engagement_snapshots` series, so every
+platform is first-class. Three ideas shape the module:
+
+1. **Windows, not lifetime.** Posts scatter across 12 months, so a January
+   post has had six more months to accumulate than a July one. Ranking on
+   lifetime totals just ranks by age. A named window picks the snapshot
+   nearest `posted_at + window`, comparing posts at the same age.
+2. **Rates, not just counts.** "500 views" means little; "saves per 1k
+   reached" says whether the photo made someone act. Rates are computed only
+   where the platform reports the denominator.
+3. **Medians with sample sizes.** One viral frame would otherwise crown a
+   performer forever. Rankings use medians and carry their `n` so the UI can
+   flag thin evidence as provisional.
+
+`collab_lift` compares co-authored Instagram posts against the median *solo*
+post at the same age. Since Meta exposes no accept/decline signal on this API
+surface, lift is the observable consequence of an accepted invite — it is
+presented as a proxy, never as a measurement.
+
 ## Safety nets
 
 - **Duplicates**: SHA-256 at import (layer 1) + Flickr machine-tag cache
