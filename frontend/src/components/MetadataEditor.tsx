@@ -57,6 +57,7 @@ export type EditorChanges = {
   ig_crop_w: number | null;
   ig_crop_h: number | null;
   ig_crop_ratio: string | null;
+  include_exif: boolean;
 };
 
 
@@ -87,6 +88,7 @@ export function editorChangesToPatch(changes: EditorChanges): PostUpdate {
     ig_crop_w: changes.ig_crop_w,
     ig_crop_h: changes.ig_crop_h,
     ig_crop_ratio: changes.ig_crop_ratio,
+    include_exif: changes.include_exif,
   };
 }
 
@@ -129,6 +131,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [show, setShow] = useState(post.show ?? "");
   const [city, setCity] = useState(post.city ?? "");
   const [altText, setAltText] = useState(post.alt_text ?? "");
+  const [includeExif, setIncludeExif] = useState(post.include_exif ?? false);
   const [venue, setVenue] = useState<Venue | null>(null);
   // IG auto-transform: fit mode + crop-window nudge. Offset null = face-anchored auto.
   const [igFit, setIgFit] = useState<"crop" | "pad" | "pad_blur">(post.ig_fit ?? "crop");
@@ -219,6 +222,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     setShow(post.show ?? "");
     setCity(post.city ?? "");
     setAltText(post.alt_text ?? "");
+    setIncludeExif(post.include_exif ?? false);
   }, [post.id]);
 
   useEffect(() => { setAlbumIds(new Set(postAlbums)); }, [post.id, postAlbums.join(",")]);
@@ -257,6 +261,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     (show || "") !== (post.show ?? "") ||
     (city || "") !== (post.city ?? "") ||
     (altText || "") !== (post.alt_text ?? "") ||
+    includeExif !== (post.include_exif ?? false) ||
     (venue?.id ?? null) !== (post.venue_id ?? null) ||
     !setsEqual(albumIds, new Set(postAlbums)) ||
     !setsEqual(groupIds, new Set(postGroups)) ||
@@ -290,6 +295,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       show: show.trim() || null,
       city: city.trim() || null,
       alt_text: altText.trim() || null,
+      include_exif: includeExif,
       ig_fit: igFit === "crop" ? null : igFit,
       ig_crop_offset: igOffset,
       // All four together or all four null — rect_for() ignores a partial rect.
@@ -462,6 +468,42 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         hintTitle={title}
         hintTags={tags}
       />
+
+      {/* Camera/shot info, opt in per post. The line is formatted server-side
+          (PostOut.shot_info) so this previews exactly what gets published. */}
+      {post.shot_info && (
+        <label
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            fontSize: 12,
+            color: "var(--text-dim)",
+            cursor: "pointer",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={includeExif}
+            onChange={(e) => setIncludeExif(e.target.checked)}
+            style={{ accentColor: "var(--teal)", marginTop: 2 }}
+          />
+          <span style={{ display: "grid", gap: 2 }}>
+            <span>Include camera info</span>
+            <span
+              style={{
+                fontSize: 11,
+                color: includeExif ? "var(--text)" : "var(--text-fade)",
+              }}
+            >
+              {post.shot_info}
+            </span>
+            <span style={{ fontSize: 11, color: "var(--text-fade)" }}>
+              Added to the end of the description, ahead of the hashtags.
+            </span>
+          </span>
+        </label>
+      )}
 
       <PerformersField selected={performers} onChange={setPerformers} />
 

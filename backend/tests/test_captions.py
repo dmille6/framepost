@@ -41,6 +41,40 @@ def test_caption_drops_title_when_description_opens_with_it(db):
     assert caption.startswith("The No Ring Circus")
 
 
+def test_caption_drops_title_when_the_description_paraphrases_it(db):
+    """The live failure. The AI tagger reworded the title into the description's opening
+    sentence, so the old exact-prefix test passed it through and the Instagram caption
+    went out saying the same thing twice."""
+    post = _post(
+        title='Hellin Heels - @_hellinheels_ - performing at "Teaser Fest" at Hotel Peter Paul New Orleans / Jan 2026',
+        description='Hellin Heels - @_hellinheels_ - on stage during "Teaser Fest" at Hotel Peter Paul, New Orleans. Jan 2026.',
+    )
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert caption.count("Hellin Heels") == 1
+    assert caption.startswith("Hellin Heels - @_hellinheels_ - on stage during")
+
+
+def test_caption_appends_shot_info_only_when_the_post_opts_in(db):
+    fields = dict(camera_make="SONY", camera_model="ILCE-1", lens="FE 24-70mm F2.8 GM",
+                  focal_length=70.0, aperture=2.8, shutter_speed="1/250", iso=3200)
+    off = _post(title="Juju", description="Fire poi at the AllWays Lounge.", tags="fire", **fields)
+    db.add(off)
+    db.commit()
+    assert "Sony" not in _build_caption_for("pixelfed", off, db)
+
+    on = _post(title="Juju", description="Fire poi at the AllWays Lounge.", tags="fire",
+               include_exif=1, **fields)
+    db.add(on)
+    db.commit()
+    caption = _build_caption_for("pixelfed", on, db)
+    shot = "Sony \u03b11 \u00b7 FE 24-70mm F2.8 GM \u00b7 70mm \u00b7 f/2.8 \u00b7 1/250s \u00b7 ISO 3200"
+    assert shot in caption
+    # Ahead of the hashtag block, behind the description — that's what "before the tags" means.
+    assert caption.index("Fire poi") < caption.index(shot) < caption.index("#fire")
+
+
 def test_caption_keeps_title_when_description_differs(db):
     post = _post(title="Juju", description="Fire poi at the AllWays Lounge.")
     db.add(post)

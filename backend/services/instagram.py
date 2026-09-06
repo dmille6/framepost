@@ -12,6 +12,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from services import caption_text
+
 # IG hard-caps captions at 2200 chars and hashtags at 30 per post. We cap below that to
 # leave headroom for a signature and to keep tag lists tight (most engagement studies show
 # diminishing returns past ~15-20 tags anyway).
@@ -47,6 +49,10 @@ def build_caption(
     title = (title or "").strip()
     description = (description or "").strip()
     signature = (signature or "").strip()
+    # Same rule the worker applies: drop a title the description already restates,
+    # otherwise the pasted caption opens by saying the same thing twice.
+    if title and caption_text.title_is_redundant(title, description):
+        title = ""
 
     parts: list[str] = []
     if title:

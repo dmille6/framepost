@@ -19,7 +19,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import alt_text as alt_text_svc, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
+from services import alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -150,7 +150,7 @@ def _flickr_post(db, post: Post, fired_at: datetime) -> None:
             db=db,
             image_path=derivative,
             title=post.title,
-            description=post.description,
+            description=caption_text.description_with_shot_info(post),
             tags=flickr_tags,
             privacy=post.privacy or "private",
             safety_level=post.safety_level or "safe",
@@ -343,9 +343,13 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     title = (post.title or "").strip()
     description = (post.description or "").strip()
     # Users often open the description with the title line (Lightroom IPTC does this
-    # too) — stacking both produced captions that start with the same line twice.
-    if title and description.lower().startswith(title.lower()):
+    # too), and the AI tagger habitually rewrites the title as the description's first
+    # sentence — stacking both produced captions that say the same thing twice.
+    if title and caption_text.title_is_redundant(title, description):
         title = ""
+    # Opt-in camera/lens/exposure line. Appended to the description so it lands after
+    # the caption text and ahead of the hashtag block.
+    description = caption_text.description_with_shot_info(post)
     tag_str = (post.tags or "").strip()
     # Pull the IG signature row — convenient since the user already configured it for IG.
     sig_row = db.execute(
@@ -511,7 +515,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
             db=db,
             src=src,
             title=post.title,
-            description=post.description,
+            description=caption_text.description_with_shot_info(post),
             tags=merged_tags or None,
             link=post.flickr_url,
             alt_text=alt,

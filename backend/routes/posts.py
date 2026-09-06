@@ -9,14 +9,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
-from services import events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
+from services import caption_text, events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -92,7 +92,13 @@ class PostOut(BaseModel):
     ig_crop_w: float | None = None
     ig_crop_h: float | None = None
     ig_crop_ratio: str | None = None
+    include_exif: bool = False
     created_at: datetime
+
+    @computed_field
+    @property
+    def shot_info(self) -> str:
+        return caption_text.format_shot_info(self)
 
     class Config:
         from_attributes = True
@@ -150,6 +156,7 @@ class PostUpdate(BaseModel):
     ig_crop_w: float | None = Field(default=None, gt=0.0, le=1.0)
     ig_crop_h: float | None = Field(default=None, gt=0.0, le=1.0)
     ig_crop_ratio: str | None = Field(default=None, pattern="^(3:4|4:5|1:1)$")
+    include_exif: bool | None = None
 
 
 @router.post(
@@ -610,7 +617,9 @@ def get_instagram_format(
                     seen_hash_keys.add(token_key)
 
     base_caption = instagram.build_caption(
-        title=post.title, description=post.description, signature=signature
+        title=post.title,
+        description=caption_text.description_with_shot_info(post),
+        signature=signature,
     )
     if perf_mention:
         # Caption is title \n\n description \n\n signature; we insert mentions before

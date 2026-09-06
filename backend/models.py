@@ -70,6 +70,8 @@ class Post(Base):
     show = Column(Text)
     city = Column(Text)
     alt_text = Column(Text)
+    # Opt in to appending the camera/lens/exposure line to the description (0020).
+    include_exif = Column(Integer, nullable=False, server_default="0")
     # Instagram auto-transform (0015): how to fit out-of-range aspect ratios.
     # ig_fit: crop | pad | pad_blur, null = crop. ig_crop_offset: 0..1 window position
     # along the cropped axis, null = face-anchored auto.

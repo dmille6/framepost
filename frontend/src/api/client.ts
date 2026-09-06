@@ -127,6 +127,10 @@ export type Post = {
   ig_crop_w: number | null;
   ig_crop_h: number | null;
   ig_crop_ratio: string | null;
+  // Opt in to appending the camera/lens/exposure line to the description (0020).
+  // shot_info is read-only: the server formats the exact line include_exif appends.
+  include_exif: boolean;
+  shot_info: string | null;
   created_at: string;
 };
 
@@ -232,6 +236,7 @@ export type PostUpdate = Partial<{
   ig_crop_w: number | null;
   ig_crop_h: number | null;
   ig_crop_ratio: string | null;
+  include_exif: boolean;
 }>;
 
 export const updatePost = (id: string, body: PostUpdate) =>
