@@ -69,6 +69,56 @@ Scope this before building. Rough guess once scoped: **1–2 weeks**.
 
 ---
 
+## Instagram crop studio
+
+**Design approved from a working prototype, September 2026.** Interactive mockup:
+<https://claude.ai/code/artifact/3912b6ad-bfb0-4ccf-a070-1379fd9d84d2> — drag, zoom,
+switch ratio and fit, with a live readout of the exact state to be persisted.
+
+### Why
+
+Flickr receives the full frame; only Instagram needs a variant. `render_variant()`
+already handles all three fit modes and the face-anchored default, and `/ig-preview`
+already renders precisely what the worker will apply. The gap is not the transform —
+it's that `ig_crop_offset` is a single 0–1 float along the long axis.
+
+That float is *mathematically complete* for a maximum-area crop: a portrait squeezed to
+4:5 can only move vertically. What it cannot express is a **tighter** window — no way to
+crop in on a performer or cut an exit sign out of the frame. Adding scale is what creates
+a second degree of freedom, and only then does two-axis positioning mean anything.
+
+On a 2:3 stage portrait at 4:5, roughly 20% of the frame is discarded before any zoom.
+That is the argument for making the choice visible rather than automatic.
+
+### Decided
+
+- **Direct manipulation.** Drag to position, scroll/pinch or slider to zoom, rule-of-thirds
+  guides, the detected face marked as a hint, and a reset-to-auto control. Fit stays a
+  three-way toggle (`crop` / `pad` / `pad_blur`).
+- **Schema.** `ig_crop_offset` (float) becomes `ig_crop_rect` — a normalized
+  `{x, y, w, h}` in 0–1 source coordinates — stored **alongside the ratio it was authored
+  against**. The target ratio is learned at runtime by the 3:4 probe, so a bare rect would
+  silently change meaning if Meta's floor moved. Existing offsets migrate by deriving the
+  equivalent maximum-area rect.
+- **The server stays the source of truth.** The browser sends a rect; `render_variant`
+  crops exactly that rect. The canvas only ever previews. `/ig-preview` remains the
+  verification path, rendered on release rather than every drag frame — which also avoids
+  a round-trip per mouse move. Tests must pin client/server agreement, because a preview
+  that lies is worse than no preview.
+- **Available on every photo**, not only out-of-ratio ones. Cropping tighter is useful on
+  a square Instagram would accept untouched.
+
+### Known gaps in the prototype
+
+Pad and blur modes are visual approximations rather than the real renderer, and the face
+marker is drawn from the stored offset rather than live detection. Both come from the
+server in the real implementation.
+
+**Effort: 3–5 days** — canvas interaction, the migration, rect support in
+`render_variant`, and the parity tests.
+
+---
+
 ## Reliability
 
 Adopted from Postiz and Mixpost — see the adoption report for the full comparison.
