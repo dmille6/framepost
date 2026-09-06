@@ -307,7 +307,6 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     });
   }
 
-  const mp = post.width && post.height ? ((post.width * post.height) / 1_000_000).toFixed(1) : null;
   const captured = post.captured_at ? new Date(post.captured_at).toLocaleString() : "—";
   // IG feed range is 4:5 … 1.91:1 (the worker probes whether Meta quietly allows 3:4).
   // Anything outside gets the auto-transform, so surface the fit controls.
@@ -378,7 +377,6 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         rows={[
           ["Filename", post.original_filename ?? "—"],
           ["Dimensions", post.width && post.height ? `${post.width} × ${post.height}` : "—"],
-          ["Megapixels", mp ? `${mp} MP` : "—"],
           ["File size", post.file_size_bytes ? `${(post.file_size_bytes / 1024 / 1024).toFixed(2)} MB` : "—"],
           ["Captured", captured],
           ["Camera", [post.camera_make, post.camera_model].filter(Boolean).join(" ") || "—"],
@@ -723,7 +721,6 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           caption={post.title || post.original_filename || undefined}
           meta={[
             post.width && post.height ? `${post.width} × ${post.height}` : null,
-            mp ? `${mp} MP` : null,
             [post.camera_make, post.camera_model].filter(Boolean).join(" ") || null,
             post.lens,
           ].filter(Boolean).join(" · ") || undefined}

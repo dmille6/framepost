@@ -29,7 +29,6 @@ export default function DraftCard({
   title,
 }: Props) {
   const [hover, setHover] = useState(false);
-  const mp = post.width && post.height ? ((post.width * post.height) / 1_000_000).toFixed(1) : null;
   const captured = post.captured_at ? new Date(post.captured_at).toLocaleDateString() : null;
 
   function handleDelete(e: MouseEvent) {
@@ -163,7 +162,6 @@ export default function DraftCard({
         </div>
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2 }}>
           {[
-            mp ? `${mp} MP` : null,
             post.width && post.height ? `${post.width}×${post.height}` : null,
             captured,
           ]
