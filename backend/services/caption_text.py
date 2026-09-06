@@ -109,6 +109,29 @@ def format_shot_info(post) -> str:
     return " · ".join(parts)
 
 
+# Platforms that should NOT carry the shot-info line, and why:
+#   bluesky — hard 300-character budget. The line costs ~65 of it, which measured out
+#             to 4-6 hashtags dropped off the end of every post in the queue.
+#   flickr  — renders full EXIF in its own panel already, so the line says it twice.
+# Everywhere else EXIF is invisible to the viewer, which is the whole point of the flag.
+# Excluding by name rather than allow-listing: a platform added later almost certainly
+# wants the line, and should have to opt out for a stated reason like these two.
+SHOT_INFO_EXCLUDED = frozenset({"bluesky", "flickr"})
+
+
+def wants_shot_info(platform: str) -> bool:
+    return platform not in SHOT_INFO_EXCLUDED
+
+
+def description_for(platform: str, post) -> str:
+    """The description as `platform` should receive it — the single place that decides
+    whether the shot-info line is included. Every caller goes through here so the
+    policy can't drift between the worker, the field passthroughs and the IG panel."""
+    if not wants_shot_info(platform):
+        return (post.description or "").strip()
+    return description_with_shot_info(post)
+
+
 def description_with_shot_info(post) -> str:
     """post.description, plus the shot-info line when the post opts in.
 

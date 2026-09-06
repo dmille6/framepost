@@ -99,6 +99,38 @@ def test_opting_in_with_no_exif_leaves_the_description_alone():
     assert caption_text.description_with_shot_info(post) == "On stage."
 
 
+# --- which platforms carry the line --------------------------------------------------
+
+def _shot_post():
+    return _post(description="On stage.", include_exif=1,
+                 camera_make="SONY", camera_model="ILCE-1")
+
+
+def test_bluesky_and_flickr_are_left_out():
+    """Bluesky's 300-char budget is worth more as hashtags, and Flickr already shows
+    EXIF in its own panel."""
+    post = _shot_post()
+    assert caption_text.description_for("bluesky", post) == "On stage."
+    assert caption_text.description_for("flickr", post) == "On stage."
+
+
+def test_platforms_that_show_no_exif_get_the_line():
+    post = _shot_post()
+    for platform in ("instagram", "pixelfed", "mastodon", "pinterest"):
+        assert caption_text.description_for(platform, post) == "On stage.\n\nSony \u03b11", platform
+
+
+def test_an_unknown_platform_gets_the_line():
+    """New platforms opt out by name for a stated reason, rather than being forgotten."""
+    assert caption_text.description_for("threads", _shot_post()).endswith("Sony \u03b11")
+
+
+def test_opting_the_post_out_still_wins_everywhere():
+    post = _post(description="On stage.", camera_make="SONY", camera_model="ILCE-1")
+    for platform in ("instagram", "bluesky", "flickr", "pinterest"):
+        assert caption_text.description_for(platform, post) == "On stage.", platform
+
+
 # --- the "on by default" setting -----------------------------------------------------
 
 def test_camera_info_is_on_for_new_posts_when_unset(db):

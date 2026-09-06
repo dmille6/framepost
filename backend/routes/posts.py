@@ -618,7 +618,7 @@ def get_instagram_format(
 
     base_caption = instagram.build_caption(
         title=post.title,
-        description=caption_text.description_with_shot_info(post),
+        description=caption_text.description_for("instagram", post),
         signature=signature,
     )
     if perf_mention:

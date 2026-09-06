@@ -75,6 +75,28 @@ def test_caption_appends_shot_info_only_when_the_post_opts_in(db):
     assert caption.index("Fire poi") < caption.index(shot) < caption.index("#fire")
 
 
+def test_bluesky_spends_its_budget_on_hashtags_not_camera_info(db):
+    """Bluesky fits hashtags greedily into 300 chars. The shot line costs ~65 of them,
+    which measured out to 4-6 hashtags dropped from every post in the queue."""
+    post = _post(
+        title="Miss Angie Z - High Society Burlesque - June 2026",
+        description="Miss Angie Z on stage at the Allways Lounge, New Orleans. June 2026.",
+        tags=" ".join(f"tag{n}" for n in range(20)),
+        include_exif=1,
+        camera_make="SONY", camera_model="ILCE-7RM3", lens="FE 24mm F1.4 GM",
+        focal_length=24.0, aperture=2.8, shutter_speed="1/60", iso=3200,
+    )
+    db.add(post)
+    db.commit()
+
+    bluesky = _build_caption_for("bluesky", post, db)
+    assert "Sony" not in bluesky
+    assert len(bluesky) <= 300
+
+    # Same post on Instagram, which has no budget pressure, keeps the line.
+    assert "Sony \u03b17R III" in _build_caption_for("instagram", post, db)
+
+
 def test_caption_keeps_title_when_description_differs(db):
     post = _post(title="Juju", description="Fire poi at the AllWays Lounge.")
     db.add(post)

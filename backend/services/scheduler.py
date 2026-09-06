@@ -150,7 +150,7 @@ def _flickr_post(db, post: Post, fired_at: datetime) -> None:
             db=db,
             image_path=derivative,
             title=post.title,
-            description=caption_text.description_with_shot_info(post),
+            description=caption_text.description_for("flickr", post),
             tags=flickr_tags,
             privacy=post.privacy or "private",
             safety_level=post.safety_level or "safe",
@@ -347,9 +347,9 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     # sentence — stacking both produced captions that say the same thing twice.
     if title and caption_text.title_is_redundant(title, description):
         title = ""
-    # Opt-in camera/lens/exposure line. Appended to the description so it lands after
-    # the caption text and ahead of the hashtag block.
-    description = caption_text.description_with_shot_info(post)
+    # Opt-in camera/lens/exposure line, where the platform wants it. Appended to the
+    # description so it lands after the caption text and ahead of the hashtag block.
+    description = caption_text.description_for(platform, post)
     tag_str = (post.tags or "").strip()
     # Pull the IG signature row — convenient since the user already configured it for IG.
     sig_row = db.execute(
@@ -515,7 +515,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
             db=db,
             src=src,
             title=post.title,
-            description=caption_text.description_with_shot_info(post),
+            description=caption_text.description_for("pinterest", post),
             tags=merged_tags or None,
             link=post.flickr_url,
             alt_text=alt,
