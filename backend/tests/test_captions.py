@@ -209,6 +209,59 @@ def test_export_pipeline_markers_never_take_a_slot(db):
     assert "#exported" in _build_caption_for("pixelfed", post, db)
 
 
+def test_a_slot_is_reserved_for_a_subject_tag(db):
+    """The High Society run came out as performer + venue + venue + show + city, with
+    nothing saying what the picture shows. Proper nouns are maximally specific and often
+    have no audience at all — nobody searches #allways."""
+    post = _post(title="Miss Angie Z", description="High Society at the AllWays.",
+                 tags="angiez, allways, allwayslounge, highsociety, neworleans, "
+                      "burlesque, burlyq, cabaret")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert caption.count("#") == 5
+    assert "#burlesque" in caption
+    # Paid for out of the weakest of the five, not the strongest.
+    assert "#angiez" in caption
+    assert "#neworleans" not in caption
+
+
+def test_the_reserve_is_a_no_op_when_a_subject_tag_already_made_it(db):
+    """It holds one slot, it doesn't add a second."""
+    post = _post(title="Freakshow", description="Sideshow act.",
+                 tags="circus, circussideshow, freakshowpeepshow, nola, republicnola, "
+                      "sideshow, fireperformer")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert caption.count("#") == 5
+    assert "#circus " in caption and "#circussideshow" in caption
+    assert "#republicnola" in caption      # venue kept its slot
+
+
+def test_the_reserve_stays_out_of_the_way_with_no_subject_tag_to_promote(db):
+    post = _post(title="Venue", description="Room shot.",
+                 tags="allways, allwayslounge, highsociety, neworleans, frenchquarter, "
+                      "joytheater")
+    db.add(post)
+    db.commit()
+    assert _build_caption_for("instagram", post, db).count("#") == 5
+
+
+def test_month_keywords_are_junk_like_years(db):
+    """Lightroom writes a month alongside the year, and the No Ring Circus set was
+    spending one of five slots on "#jan"."""
+    post = _post(title="No Ring Circus", description="House of Blues.",
+                 tags="jan, 2026, circus, circusarts, circusperformer, sideshow, "
+                      "acrobatics, aerialist")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert "#jan" not in caption
+    assert "#2026" not in caption
+    assert caption.count("#") == 5
+
+
 def test_caption_keeps_title_when_description_differs(db):
     post = _post(title="Juju", description="Fire poi at the AllWays Lounge.")
     db.add(post)

@@ -357,6 +357,14 @@ _NOT_DISCOVERY = {
     "exported", "postframe",               # export-pipeline markers, not subjects
 }
 
+# Dates again, in words. Lightroom writes a month keyword alongside the year, so the
+# No Ring Circus set was spending a slot on "#jan".
+_MONTHS = frozenset({
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept", "oct",
+    "nov", "dec", "january", "february", "march", "april", "june", "july", "august",
+    "september", "october", "november", "december",
+})
+
 # A second tier, not an exclusion. These describe the picture honestly, but each is a
 # bare medium noun sitting on tens of millions of unrelated posts, so a five-slot block
 # spends them badly. The Freakshow set was the tell: #dance and #fire took two slots
@@ -382,9 +390,56 @@ _GENERIC = {
 def _worth_a_slot(tag: str) -> bool:
     """Is this tag worth one of a handful of hashtag slots?"""
     key = tag.lstrip("#").lower()
-    if key.isdigit():                      # bare years — no search intent
+    if key.isdigit() or key in _MONTHS:    # bare dates — no search intent
         return False
     return key not in _NOT_DISCOVERY and not _CAMERA_BODY.match(key)
+
+
+# The disciplines this account actually shoots. Ranking by specificity alone wasn't
+# enough: proper nouns are maximally specific and often have no audience at all, so the
+# High Society run came out as #angiez #allways #allwayslounge #highsociety #neworleans
+# — performer, venue, venue, show, city, and not one word describing what the picture
+# shows. Nobody searches #allways. One slot is therefore held for a subject tag.
+#
+# An incomplete list degrades gracefully: the reserve only fires when NOTHING here made
+# the cut, so an unrecognised niche just leaves the previous behaviour in place. Adding
+# a discipline here is the only maintenance this needs.
+_SUBJECT = frozenset({
+    "burlesque", "burlyq", "burlesqueperformer", "burlesquedancer", "burlesqueshow",
+    "burlesquefest", "burlesquefestival", "burlesquelife", "burlesqueshowgirl",
+    "burlesqueart", "nolaburlesque", "neworleansburlesque", "showgirl", "showgirls",
+    "boylesque", "neoburlesque", "classicburlesque", "striptease", "pinup",
+    "circus", "circusarts", "circusperformer", "circusperformance", "circussideshow",
+    "circuslife", "sideshow", "sideshowperformer", "freakshow", "contortion",
+    "contortionist", "juggling", "juggler", "stiltwalker",
+    "aerial", "aerialarts", "aerialsilks", "aerialist", "aerialperformer",
+    "aerialhoop", "aerialacrobatics", "lyra", "trapeze", "silks",
+    "drag", "dragperformer", "dragartist", "dragshow", "dragqueen", "dragking",
+    "noladrag", "neworleansdrag",
+    "fireperformer", "firedancer", "firespinning", "firebreathing", "firebreather",
+    "fireeating", "firepoi", "firefan", "fireplay",
+    "cabaret", "cabaretperformer", "cabaretdancer", "vaudeville", "varietyshow",
+    "varietyarts",
+    "acrobatics", "acrobat", "tumbling", "hooping", "hulahoop", "bellydance", "gogo",
+    "livemusic", "livemusicphotography", "concertphotography", "jazz", "brassband",
+    "secondline",
+})
+
+
+def _reserve_subject_slot(ordered: list[str], cap: int) -> list[str]:
+    """Guarantee one of the slots describes what the picture shows.
+
+    #allwayslounge reaches people who already know the venue; #burlesque reaches the
+    ones who don't, and discovery is the whole point of a five-tag block. Costs the
+    weakest of the five — the last, by the ranking above — and only when the post had a
+    subject tag to promote in the first place."""
+    head = ordered[:cap]
+    if any(tag.lstrip("#").lower() in _SUBJECT for tag in head):
+        return ordered
+    for i, tag in enumerate(ordered[cap:], start=cap):
+        if tag.lstrip("#").lower() in _SUBJECT:
+            return head[:cap - 1] + [tag] + ordered[cap - 1:i] + ordered[i + 1:]
+    return ordered
 
 
 def _slot_rank(tag: str) -> int:
@@ -533,6 +588,7 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
         # order. Performer handles are never generic, so a bare #dance now correctly
         # falls behind a credited performer.
         ordered.sort(key=_slot_rank)
+        ordered = _reserve_subject_slot(ordered, cap)
     for token in ordered:
         _add(token)
     if hashtags:
