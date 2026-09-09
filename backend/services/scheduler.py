@@ -426,6 +426,47 @@ _SUBJECT = frozenset({
 })
 
 
+# Six characters, at most two per stem. The Worship Burlesque set spent all five slots
+# on #burlesque #burlesquedancer #burlesquefest #burlesquelife #burlesqueperformer —
+# every rule above satisfied, all five specific, and four of them buying an audience the
+# first one already reached, while the venue, the city and the performer went untagged.
+#
+# A prefix is a blunt instrument and it knows it: it groups burlesque* and circus* and
+# neworleans*, but not #hob with #hobnola, and not #drag with #dragshow. It catches the
+# clusters that actually recur in this library and leaves the rest alone.
+_STEM_LEN = 6
+_MAX_PER_STEM = 2
+
+# Where the scene uses a different word for the same thing, a prefix can't help: #burlyq
+# and #burlylife ARE #burlesque, and the Worship set spent four of five slots proving it.
+# Keyed by prefix, so burlyq/burlylife/burlygirl all fold in. Add a family here when one
+# turns up; nothing breaks if it's missing, the tags just stop counting as related.
+_STEM_ALIASES = {"burly": "burles"}
+
+
+def _stem(key: str) -> str:
+    for prefix, canonical in _STEM_ALIASES.items():
+        if key.startswith(prefix):
+            return canonical
+    return key[:_STEM_LEN]
+
+
+def _spread_stems(ordered: list[str], limit: int = _MAX_PER_STEM) -> list[str]:
+    """Push near-duplicates to the back rather than dropping them, so a post tagged
+    entirely in one family still fills its five."""
+    kept: list[str] = []
+    overflow: list[str] = []
+    counts: dict[str, int] = {}
+    for tag in ordered:
+        stem = _stem(tag.lstrip("#").lower())
+        if counts.get(stem, 0) < limit:
+            counts[stem] = counts.get(stem, 0) + 1
+            kept.append(tag)
+        else:
+            overflow.append(tag)
+    return kept + overflow
+
+
 def _reserve_subject_slot(ordered: list[str], cap: int) -> list[str]:
     """Guarantee one of the slots describes what the picture shows.
 
@@ -588,6 +629,8 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
         # order. Performer handles are never generic, so a bare #dance now correctly
         # falls behind a credited performer.
         ordered.sort(key=_slot_rank)
+        # Before the reserve, so a promoted subject tag can't be spread away again.
+        ordered = _spread_stems(ordered)
         ordered = _reserve_subject_slot(ordered, cap)
     for token in ordered:
         _add(token)

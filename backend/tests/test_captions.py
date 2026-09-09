@@ -1,3 +1,4 @@
+import re
 """Caption-building regressions: title echo, hashtag legality."""
 import uuid
 
@@ -260,6 +261,54 @@ def test_month_keywords_are_junk_like_years(db):
     assert "#jan" not in caption
     assert "#2026" not in caption
     assert caption.count("#") == 5
+
+
+def test_near_duplicate_tags_dont_monopolise_the_five(db):
+    """Worship Burlesque spent every slot on one word — five tags reaching one audience,
+    with the venue, city and performer left untagged."""
+    post = _post(title="Hellin Heels", description="Worship Burlesque.",
+                 tags="burlesque, burlesquedancer, burlesquefest, burlesquelife, "
+                      "burlesqueperformer, hiholoungenola, marigny, hellinheels")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert caption.count("#") == 5
+    assert len([t for t in re.findall(r"#(\w+)", caption) if t.startswith("burles")]) == 2
+    assert "#hiholoungenola" in caption          # venue got a slot back
+    assert "#hellinheels" in caption             # so did the performer
+
+
+def test_stem_spread_backfills_rather_than_starving_the_block(db):
+    """A post tagged entirely in one family still gets five."""
+    post = _post(title="Hellin Heels", description="Worship Burlesque.",
+                 tags="burlesque, burlesquedancer, burlesquefest, burlesquelife, "
+                      "burlesqueperformer, burlesqueshow, burlesqueart")
+    db.add(post)
+    db.commit()
+    assert _build_caption_for("instagram", post, db).count("#") == 5
+
+
+def test_stem_spread_leaves_the_long_block_alone(db):
+    post = _post(title="Hellin Heels", description="Worship Burlesque.",
+                 tags="burlesque, burlesquedancer, burlesquefest, burlesquelife, "
+                      "burlesqueperformer, burlesqueshow, burlesqueart")
+    db.add(post)
+    db.commit()
+    assert _build_caption_for("pixelfed", post, db).count("#") == 7
+
+
+def test_scene_synonyms_count_as_the_same_stem(db):
+    """#burlyq and #burlylife are #burlesque by another name, which no prefix can see."""
+    post = _post(title="Hellin Heels", description="Worship Burlesque.",
+                 tags="burlesque, burlesquedancer, burlylife, burlyq, cabaret, "
+                      "stvicenthotel, livemusic")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    tags = re.findall(r"#(\w+)", caption)
+    assert len(tags) == 5
+    assert len([t for t in tags if t.startswith(("burles", "burly"))]) == 2
+    assert "#stvicenthotel" in caption          # the venue got a slot
 
 
 def test_caption_keeps_title_when_description_differs(db):
