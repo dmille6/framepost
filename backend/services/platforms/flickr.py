@@ -406,23 +406,45 @@ def get_display_image_url(
     NOTE: never hand Meta an `_o` Original URL — their fetcher rejects that URI class
     outright ("The media URI doesn't meet our requirements", verified 2026-08-17)
     while accepting normal derivative URLs of the very same photo. Original stays the
-    last-resort fallback only.
+    last-resort fallback only. The same rejection applies to any rendition whose pixels
+    match the Original exactly (verified 2026-09-09 on a 1536x2048 upload, where "Large
+    2048" failed and "Large 1600" succeeded), so those are skipped too.
 
     preference: override the derivative ladder — staging variants are ≤1440px, so
     "Large 2048" is their exact native pixels while the default's "Large 1600" would
     downscale to 1200.
     """
     root = rest_call(db, "flickr.photos.getSizes", photo_id=photo_id)
-    sizes = {
-        el.get("label"): el.get("source")
-        for el in root.findall("sizes/size")
-        if el.get("label") and el.get("source")
-    }
+    sizes: dict[str, tuple[str, int, int]] = {}
+    for el in root.findall("sizes/size"):
+        label, source = el.get("label"), el.get("source")
+        if not label or not source:
+            continue
+        try:
+            sizes[label] = (source, int(el.get("width") or 0), int(el.get("height") or 0))
+        except ValueError:
+            sizes[label] = (source, 0, 0)
+
+    # Meta refuses the Original URI class, and it refuses any *other* rendition that is
+    # really the original in disguise. When the upload is already <= a ladder rung, Flickr
+    # serves that rung at the original's exact pixels — "Large 2048" for a 1536x2048 upload
+    # was rejected identically to "_o" (verified 2026-09-09) while "Large 1600" of the same
+    # photo published fine. Dimension equality is the tell, so skip on that rather than on
+    # the label.
+    original = sizes.get("Original")
+    orig_dims = (original[1], original[2]) if original and original[1] else None
+
     for label in preference or _DISPLAY_SIZE_PREFERENCE:
-        if sizes.get(label):
-            return sizes[label]
+        entry = sizes.get(label)
+        if not entry:
+            continue
+        if label != "Original" and orig_dims and (entry[1], entry[2]) == orig_dims:
+            log.debug("skipping %s for %s — same pixels as Original, Meta rejects it",
+                      label, photo_id)
+            continue
+        return entry[0]
     if sizes:  # unexpected label set — take whatever Flickr offered rather than fail
-        return next(iter(sizes.values()))
+        return next(iter(sizes.values()))[0]
     raise FlickrError(f"flickr.photos.getSizes returned no sizes for {photo_id}")
 
 
