@@ -150,6 +150,65 @@ def test_subject_tags_outrank_performer_handles_when_capped(db):
     assert "@republicnola" in caption          # but the credit is still there
 
 
+def test_generic_medium_words_lose_their_slot_to_specific_tags(db):
+    """The Freakshow set was the tell: #dance and #fire took two of five slots ahead of
+    #sideshow and #fireperformer purely because Lightroom hands keywords over
+    alphabetised. Bare medium nouns are demoted to filler."""
+    post = _post(title="Freakshow", description="Sideshow act.",
+                 tags="dance, fire, performance, performer, stage, theater, "
+                      "circussideshow, freakshowpeepshow, fireperformer, fireeating, "
+                      "sideshow")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert caption.count("#") == 5
+    for generic in ("#dance", "#fire ", "#performance", "#performer", "#stage",
+                    "#theater"):
+        assert generic not in caption, generic
+    for specific in ("#circussideshow", "#freakshowpeepshow", "#fireperformer",
+                     "#fireeating", "#sideshow"):
+        assert specific in caption, specific
+
+
+def test_generics_still_fill_the_block_when_nothing_specific_exists(db):
+    """Demotion, not exclusion — a post tagged only in generics keeps all five slots."""
+    post = _post(title="Stage", description="On stage.",
+                 tags="dance, fire, performance, performer, stage, theater, costume")
+    db.add(post)
+    db.commit()
+    assert _build_caption_for("instagram", post, db).count("#") == 5
+
+
+def test_niche_subject_words_are_not_treated_as_generic(db):
+    """burlesque/circus/drag/sideshow are single words but they ARE the niche — they
+    must not be swept up with #dance and #stage."""
+    post = _post(title="Bits", description="Variety night.",
+                 tags="stage, performance, theater, costume, audience, spotlight, "
+                      "burlesque, circus, drag, sideshow, cabaret")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    for subject in ("#burlesque", "#circus", "#drag", "#sideshow", "#cabaret"):
+        assert subject in caption, subject
+    assert caption.count("#") == 5
+
+
+def test_export_pipeline_markers_never_take_a_slot(db):
+    """"exported" and "postframe" are written by the export pipeline, not by a human
+    describing the picture."""
+    post = _post(title="Ari", description="Aerial silks.",
+                 tags="exported, postframe, aerialsilks, aerialist, aerialperformer, "
+                      "circusarts, nolacircus")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert "#exported" not in caption
+    assert "#postframe" not in caption
+    assert caption.count("#") == 5
+    # Untouched in the long block, same as the gear tags.
+    assert "#exported" in _build_caption_for("pixelfed", post, db)
+
+
 def test_caption_keeps_title_when_description_differs(db):
     post = _post(title="Juju", description="Fire poi at the AllWays Lounge.")
     db.add(post)

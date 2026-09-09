@@ -354,6 +354,28 @@ _NOT_DISCOVERY = {
     "sony", "sonyalpha", "canon", "nikon", "leica", "laowa", "sigma", "tamron",
     "photography", "photographer", "photo", "photooftheday",
     "darrellmiller", "darrellmillerphotography",
+    "exported", "postframe",               # export-pipeline markers, not subjects
+}
+
+# A second tier, not an exclusion. These describe the picture honestly, but each is a
+# bare medium noun sitting on tens of millions of unrelated posts, so a five-slot block
+# spends them badly. The Freakshow set was the tell: #dance and #fire took two slots
+# ahead of #sideshow, #fireperformer and #fireeating purely because Lightroom hands
+# keywords over alphabetised. Subject words that ARE the niche — burlesque, circus,
+# drag, sideshow, cabaret, acrobatics — deliberately stay out of this set.
+#
+# Demoted rather than dropped: a post tagged only in generics still fills its five.
+_GENERIC = {
+    "performance", "performances", "performer", "performers",
+    "stage", "theater", "theatre", "theatrical",
+    "dance", "dancer", "dancers",
+    "show", "shows", "showtime",
+    "costume", "costumes",
+    "spotlight", "lighting", "audience", "entertainment",
+    "concert", "music", "band", "singer",
+    "fire", "smoke", "night", "nightlife", "nightclub",
+    "model", "portrait", "portraits",
+    "art", "artist", "event", "events", "party",
 }
 
 
@@ -363,6 +385,12 @@ def _worth_a_slot(tag: str) -> bool:
     if key.isdigit():                      # bare years — no search intent
         return False
     return key not in _NOT_DISCOVERY and not _CAMERA_BODY.match(key)
+
+
+def _slot_rank(tag: str) -> int:
+    """0 = specific enough to earn a slot outright, 1 = generic filler. Used as a stable
+    sort key, so tags keep their given order within a tier and hand-ordering still works."""
+    return 1 if tag.lstrip("#").lower() in _GENERIC else 0
 
 
 def _build_caption_for(platform: str, post: Post, db) -> str:
@@ -501,6 +529,10 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     ordered = (post_tags + perf_hashtags) if tight else (perf_hashtags + post_tags)
     if tight:
         ordered = [tok for tok in ordered if _worth_a_slot(tok)]
+        # Stable, so specific tags rise to the front while everything keeps its relative
+        # order. Performer handles are never generic, so a bare #dance now correctly
+        # falls behind a credited performer.
+        ordered.sort(key=_slot_rank)
     for token in ordered:
         _add(token)
     if hashtags:
