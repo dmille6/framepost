@@ -441,7 +441,10 @@ _MAX_PER_STEM = 2
 # and #burlylife ARE #burlesque, and the Worship set spent four of five slots proving it.
 # Keyed by prefix, so burlyq/burlylife/burlygirl all fold in. Add a family here when one
 # turns up; nothing breaks if it's missing, the tags just stop counting as related.
-_STEM_ALIASES = {"burly": "burles"}
+_STEM_ALIASES = {
+    "burly": "burles",     # #burlyq (110 posts), #burlylife (34)
+    "hob": "houseo",       # #hob (18) and #hobnola (17) are #houseofblues (18)
+}
 
 
 def _stem(key: str) -> str:

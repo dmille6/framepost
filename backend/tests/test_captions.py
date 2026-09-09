@@ -311,6 +311,21 @@ def test_scene_synonyms_count_as_the_same_stem(db):
     assert "#stvicenthotel" in caption          # the venue got a slot
 
 
+def test_venue_abbreviations_count_as_the_same_stem(db):
+    """The No Ring Circus set spent three of five slots saying House of Blues three
+    different ways. Six-character stems make #hob, #hobnola and #houseofblues look like
+    three unrelated words."""
+    post = _post(title="No Ring Circus", description="House of Blues.",
+                 tags="hob, hobnola, houseofblues, circus, circusarts, noringcircus, "
+                      "acrobatics, sideshow")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    tags = re.findall(r"#(\w+)", caption)
+    assert len(tags) == 5
+    assert len([t for t in tags if t.startswith(("hob", "houseo"))]) == 2
+
+
 def test_caption_keeps_title_when_description_differs(db):
     post = _post(title="Juju", description="Fire poi at the AllWays Lounge.")
     db.add(post)
