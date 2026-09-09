@@ -140,3 +140,28 @@ def test_channel_that_receives_no_new_posts_reports_no_impact(db):
 def test_summary_is_ok_when_nothing_is_broken(db):
     _cred(db)
     assert channel_health.summary(db)["ok"] is True
+
+
+def test_meta_image_fetch_failure_is_retryable_not_terminal():
+    """The real 2026-09-09 incident: Meta failed to fetch a Flickr derivative uploaded
+    26 seconds earlier, the classifier called it BAD_CONTENT, and the post never retried
+    — Flickr/Bluesky/Pixelfed published while Instagram silently didn't. The identical
+    URL succeeded minutes later, so this class must go back on the retry queue."""
+    real = (
+        "Only photo or video can be accepted as media type. "
+        "(code 9004, subcode 2207052) Media download has failed. The media URI doesn't "
+        "meet our requirements.: The media could not be fetched from this URI: "
+        "https://live.staticflickr.com/65535/55518039561_78bd1b345e_h.jpg"
+    )
+    f = classify("instagram", Exception(real))
+    assert f.category is FailureCategory.RETRY
+    assert f.retryable is True
+    assert not f.requires_reauth
+
+
+def test_genuine_content_rejections_stay_terminal():
+    for msg in ("The submitted image has an aspect ratio that is not supported",
+                "caption is too long", "unsupported format", "invalid image"):
+        f = classify("instagram", Exception(msg))
+        assert f.category is FailureCategory.BAD_CONTENT, msg
+        assert f.retryable is False, msg

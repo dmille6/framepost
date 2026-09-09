@@ -87,7 +87,15 @@ _RULES: dict[str, list[tuple[str, FailureCategory, str]]] = {
          r"|code.?:?\s*(10|200)\b",
          FailureCategory.REAUTH,
          "Instagram needs reconnecting — a required permission is missing."),
-        (r"aspect ratio|caption.*too long|media download|couldn't fetch|unsupported format"
+        # Meta's fetcher racing CDN propagation of a just-uploaded Flickr derivative.
+        # Verified 2026-09-09: the identical URL that failed here returned 200 to Meta
+        # minutes later, so this is transient despite Meta setting is_transient=false
+        # and despite the 400. Must stay ABOVE the BAD_CONTENT rule — first match wins.
+        (r"media download has failed|media could not be fetched|couldn't fetch"
+         r"|only photo or video can be accepted|2207052",
+         FailureCategory.RETRY,
+         "Instagram couldn't fetch the image yet; it will retry shortly."),
+        (r"aspect ratio|caption.*too long|unsupported format"
          r"|invalid image|2207",
          FailureCategory.BAD_CONTENT,
          "Instagram rejected this post's image or caption."),
