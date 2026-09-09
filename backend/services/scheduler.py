@@ -6,6 +6,7 @@ through the retry policy in services/retry.py.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import signal
 import sys
@@ -337,6 +338,33 @@ def fire_due_posts() -> None:
         db.close()
 
 
+# Instagram limits posts to 5 hashtags (Dec 2025) and says targeted ones outperform
+# many generic ones. Everything else keeps the historical 30.
+HASHTAG_CAP = {"instagram": 5}
+DEFAULT_HASHTAG_CAP = 30
+
+# Tags that describe the shoot rather than the picture. Harmless in a 30-tag block,
+# actively wasteful in a 5-tag one: Lightroom keywords arrive alphabetised, so "2022",
+# "a7r4" and "a7riv" would take three of the five slots before any subject tag. Nobody
+# searches Instagram for a camera body, and #sony/#sonyalpha reach photographers rather
+# than the performers, venues and bookers this account exists to reach. Only applied
+# where a cap is in force — the longer blocks keep them for archival continuity.
+_CAMERA_BODY = re.compile(r"^(a\d[a-z0-9]*|ilce[-\w]*|eos[a-z0-9]*|z\d[a-z0-9]*)$")
+_NOT_DISCOVERY = {
+    "sony", "sonyalpha", "canon", "nikon", "leica", "laowa", "sigma", "tamron",
+    "photography", "photographer", "photo", "photooftheday",
+    "darrellmiller", "darrellmillerphotography",
+}
+
+
+def _worth_a_slot(tag: str) -> bool:
+    """Is this tag worth one of a handful of hashtag slots?"""
+    key = tag.lstrip("#").lower()
+    if key.isdigit():                      # bare years — no search intent
+        return False
+    return key not in _NOT_DISCOVERY and not _CAMERA_BODY.match(key)
+
+
 def _build_caption_for(platform: str, post: Post, db) -> str:
     """Compose the caption text passed to non-Flickr platforms. Bluesky has a 300-char cap so we
     keep it tight; Pixelfed/Mastodon allow longer text so we include the full description."""
@@ -440,24 +468,41 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
     if perf_mention:
         parts.append(perf_mention)
     body = "\n\n".join(parts)
-    # Hashtag block at the bottom, IG-style (works on Pixelfed too). Performer hashtags
-    # blend in alongside post tags; we de-dupe so #roxielarouge doesn't appear twice if
-    # the user also typed it as a manual tag.
+    # Hashtag block at the bottom, IG-style (works on Pixelfed too). We de-dupe so
+    # #roxielarouge doesn't appear twice if the user also typed it as a manual tag.
+    #
+    # Instagram capped posts at 5 hashtags in Dec 2025 and now treats them as topic
+    # labels rather than a reach lever ("using fewer (up to 5) more targeted hashtags
+    # ... can improve your content's performance" — Instagram, Dec 2025). Pixelfed and
+    # Mastodon made no such change, so they keep the old ceiling.
+    #
+    # Order flips when a cap this tight applies: the post's own tags go first and
+    # performer hashtags fill what's left. At 30 slots the order was irrelevant; at 5 a
+    # three-collaborator post would spend every slot on handles, and performers are
+    # already credited by the @mention and the collaborator invite. The curated subject
+    # tags are the ones doing discovery work, so they win the slots.
+    cap = HASHTAG_CAP.get(platform, DEFAULT_HASHTAG_CAP)
     hashtags: list[str] = []
     seen: set[str] = set()
-    for raw_tag in perf_hashtags:
-        key = raw_tag.lstrip("#").lower()
-        if key and key not in seen:
+
+    def _add(token: str) -> None:
+        key = token.lstrip("#").lower()
+        if key and key not in seen and len(hashtags) < cap:
             seen.add(key)
-            hashtags.append(raw_tag)  # preserves CamelCase fallback for readability
-    if tag_str:
-        for raw in tag_str.split():
-            cleaned = "".join(ch for ch in raw.lower() if ch.isalnum() or ch == "_")
-            if cleaned and cleaned not in seen:
-                seen.add(cleaned)
-                hashtags.append(f"#{cleaned}")
-            if len(hashtags) >= 30:
-                break
+            hashtags.append(token)
+
+    tight = cap < DEFAULT_HASHTAG_CAP
+    post_tags = [
+        f"#{c}" for c in (
+            "".join(ch for ch in raw.lower() if ch.isalnum() or ch == "_")
+            for raw in (tag_str.split() if tag_str else [])
+        ) if c
+    ]
+    ordered = (post_tags + perf_hashtags) if tight else (perf_hashtags + post_tags)
+    if tight:
+        ordered = [tok for tok in ordered if _worth_a_slot(tok)]
+    for token in ordered:
+        _add(token)
     if hashtags:
         body = f"{body}\n\n{' '.join(hashtags)}".strip()
     return body

@@ -97,6 +97,59 @@ def test_bluesky_spends_its_budget_on_hashtags_not_camera_info(db):
     assert "Sony \u03b17R III" in _build_caption_for("instagram", post, db)
 
 
+def test_instagram_takes_five_hashtags_and_the_rest_keep_thirty(db):
+    """Instagram capped posts at 5 hashtags in Dec 2025; Pixelfed made no such change."""
+    post = _post(title="Juju", description="Fire poi at the AllWays Lounge.",
+                 tags=" ".join(f"tag{n}" for n in range(20)))
+    db.add(post)
+    db.commit()
+    assert _build_caption_for("instagram", post, db).count("#") == 5
+    assert _build_caption_for("pixelfed", post, db).count("#") == 20
+
+
+def test_the_five_slots_skip_gear_and_year_tags(db):
+    """Lightroom keywords arrive alphabetised, so a naive cap took "2022", "a7r4" and
+    "a7riv" before any subject tag — three of five slots on things nobody searches."""
+    post = _post(title="Hellin Heels",
+                 description="Burlesque performer on stage.",
+                 tags="2022, a7r4, a7riv, sony, sonyalpha, darrellmillerphotography, "
+                      "burlesque, showgirl, nolaburlesque, cabaret, burlesqueperformer")
+    db.add(post)
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    for junk in ("#2022", "#a7r4", "#a7riv", "#sony", "#sonyalpha",
+                 "#darrellmillerphotography"):
+        assert junk not in caption, junk
+    assert "#burlesque" in caption
+    assert caption.count("#") == 5
+    # Pixelfed keeps them — the filter only applies where a cap is in force.
+    assert "#a7r4" in _build_caption_for("pixelfed", post, db)
+
+
+def test_subject_tags_outrank_performer_handles_when_capped(db):
+    """A three-collaborator post would otherwise spend every slot on handles, which the
+    @mention and the collaborator invite already cover."""
+    import uuid
+    from models import Performer, PostPerformer
+
+    post = _post(title="Freakshow", description="Sideshow act on stage.",
+                 tags="circussideshow, sideshowperformer, circusarts, "
+                      "neworleanscircus, circusphotography")
+    db.add(post)
+    db.flush()
+    for i, h in enumerate(("misstigerlily_", "republicnola", "freakshownola")):
+        perf = Performer(id=uuid.uuid4().hex, display_name=h, instagram_handle=h)
+        db.add(perf)
+        db.flush()
+        db.add(PostPerformer(post_id=post.id, performer_id=perf.id, position=i))
+    db.commit()
+    caption = _build_caption_for("instagram", post, db)
+    assert caption.count("#") == 5
+    assert "#circussideshow" in caption
+    assert "#republicnola" not in caption      # handle didn't displace a subject tag
+    assert "@republicnola" in caption          # but the credit is still there
+
+
 def test_caption_keeps_title_when_description_differs(db):
     post = _post(title="Juju", description="Fire poi at the AllWays Lounge.")
     db.add(post)

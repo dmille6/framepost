@@ -18,7 +18,7 @@ from services import caption_text
 # leave headroom for a signature and to keep tag lists tight (most engagement studies show
 # diminishing returns past ~15-20 tags anyway).
 MAX_CAPTION_CHARS = 2200
-MAX_HASHTAGS = 30
+MAX_HASHTAGS = 5
 
 # IG-supported aspect ratios. We expose the two that matter for photographers:
 # - square: still the safe default, works everywhere.
@@ -80,7 +80,7 @@ def build_hashtags(tags: str | None) -> list[str]:
     while preserving first-seen order. Multi-word phrasing is handled by the user upstream
     (Flickr's "blackandwhite" convention works directly).
 
-    Cap at MAX_HASHTAGS to stay under IG's 30-tag ceiling.
+    Cap at MAX_HASHTAGS — Instagram limited posts to 5 hashtags in Dec 2025.
     """
     if not tags:
         return []
