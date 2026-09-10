@@ -286,6 +286,28 @@ def patch_config(
             cleaned[k] = _EDITABLE[k](v)
         except ValueError as e:
             errors[k] = str(e)
+    # Cross-field: these two are separate inputs but they describe one policy. More
+    # attempts than the schedule can time means the surplus attempts never happen, and
+    # before the cap in retry.max_attempts they left posts pending forever instead of
+    # failing. Validated against the stored value when only one of the pair is sent.
+    if "retry_max_attempts" in cleaned or "retry_backoff_minutes" in cleaned:
+        attempts_raw = cleaned.get("retry_max_attempts") or _get(db, "retry_max_attempts") or "5"
+        backoff_raw = (
+            cleaned.get("retry_backoff_minutes")
+            or _get(db, "retry_backoff_minutes")
+            or "1,5,15,60,240"
+        )
+        steps = len([p for p in backoff_raw.split(",") if p.strip()])
+        try:
+            attempts = int(attempts_raw)
+        except ValueError:
+            attempts = 5
+        if attempts > steps:
+            errors["retry_max_attempts"] = (
+                f"{attempts} attempts needs {attempts} backoff steps; "
+                f"the schedule has {steps}. Add steps or lower the attempts."
+            )
+
     if errors:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, {"validation": errors})
 

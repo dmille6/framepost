@@ -235,14 +235,17 @@ def _record_failure(db, post: Post, err: Exception, fired_at: datetime) -> None:
         details={"attempt": post.retry_count, "permanent": permanent, "error": msg},
     )
 
-    if permanent or post.retry_count >= retry.max_attempts(db):
+    # A retry with no scheduled time is not a retry. Treat "nothing left to schedule"
+    # as exhaustion rather than leaving the row pending and unreachable.
+    nxt = None if permanent else retry.next_retry_at(db, post.retry_count)
+    if permanent or post.retry_count >= retry.max_attempts(db) or nxt is None:
         post.status = "failed"
         post.next_retry_at = None
         post.updated_at = fired_at
         log.error("post %s permanently failed after %d attempts: %s",
                   post.id[:8], post.retry_count, msg)
     else:
-        post.next_retry_at = retry.next_retry_at(db, post.retry_count)
+        post.next_retry_at = nxt
         post.updated_at = fired_at
         log.warning("post %s failed (attempt %d/%s), retry at %s: %s",
                     post.id[:8], post.retry_count, retry.max_attempts(db),
@@ -917,12 +920,12 @@ def _record_platform_failure(
         pp.retry_count = (pp.retry_count or 0) + 1
         pp.error_message = str(err)[:1000]
         max_attempts = retry.max_attempts(db)
-        pp.status = "failed" if permanent or pp.retry_count >= max_attempts else "pending"
+        # Same invariant as the Flickr path: a retry we can't schedule is exhaustion.
+        nxt = None if permanent else retry.next_retry_at(db, pp.retry_count)
+        exhausted = permanent or pp.retry_count >= max_attempts or nxt is None
+        pp.status = "failed" if exhausted else "pending"
         pp.error_message = f"{failure.user_message} ({str(err)[:400]})"[:1000]
-        if pp.status == "pending":
-            pp.next_retry_at = retry.next_retry_at(db, pp.retry_count)
-        else:
-            pp.next_retry_at = None
+        pp.next_retry_at = None if exhausted else nxt
         if refreshed_cred:
             refreshed_cred.last_error = str(err)[:500]
             if failure.requires_reauth:

@@ -20,11 +20,24 @@ def _read(db: Session, key: str) -> str | None:
 
 
 def max_attempts(db: Session) -> int:
+    """Effective attempt budget — never more attempts than the schedule can time.
+
+    The two knobs are separate fields in Settings and were validated separately, so
+    max_attempts could outrun the backoff schedule. The extra attempts didn't fail
+    loudly; next_retry_at() returned None for them while the count was still under the
+    max, which left the row 'pending' with no retry timer. The scanner only picks up
+    rows with a timer, so the post sat there indefinitely: on Flickr, missing from
+    Instagram, and never marked failed for the health banner to notice.
+
+    Capping here means the count always reaches the max while a retry is still
+    schedulable, so exhaustion is reported instead of vanishing.
+    """
     raw = _read(db, "retry_max_attempts")
     try:
-        return int(raw) if raw else DEFAULT_MAX_ATTEMPTS
+        configured = int(raw) if raw else DEFAULT_MAX_ATTEMPTS
     except ValueError:
-        return DEFAULT_MAX_ATTEMPTS
+        configured = DEFAULT_MAX_ATTEMPTS
+    return max(1, min(configured, len(backoff_schedule(db))))
 
 
 def backoff_schedule(db: Session) -> tuple[int, ...]:
