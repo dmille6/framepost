@@ -6,6 +6,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, Response
@@ -92,6 +93,8 @@ class PostOut(BaseModel):
     ig_crop_w: float | None = None
     ig_crop_h: float | None = None
     ig_crop_ratio: str | None = None
+    ig_focal_x: float | None = None
+    ig_focal_y: float | None = None
     include_exif: bool = False
     created_at: datetime
 
@@ -161,6 +164,10 @@ class PostUpdate(BaseModel):
     ig_crop_w: float | None = Field(default=None, gt=0.0, le=1.0)
     ig_crop_h: float | None = Field(default=None, gt=0.0, le=1.0)
     ig_crop_ratio: str | None = Field(default=None, pattern="^(3:4|4:5|1:1)$")
+    # Photographer-set crop anchor (0022). Send both, or send both as null to hand the
+    # anchor back to face detection.
+    ig_focal_x: float | None = Field(default=None, ge=0.0, le=1.0)
+    ig_focal_y: float | None = Field(default=None, ge=0.0, le=1.0)
     include_exif: bool | None = None
 
 
@@ -466,23 +473,45 @@ def get_preview(
     )
 
 
-class FaceCenter(BaseModel):
-    """Normalized 0..1 face-center coordinates in the post's original image space."""
-    x: float | None
-    y: float | None
-    detected: bool
+class AutoWindow(BaseModel):
+    """Normalized 0..1 crop window."""
+    x: float
+    y: float
+    w: float
+    h: float
 
 
-@router.get("/{post_id}/face-center", response_model=FaceCenter)
-def get_face_center(
+class CropAnchor(BaseModel):
+    """What the Instagram auto-crop will anchor on, in 0..1 source coordinates.
+
+    `source` says where the point came from, which is what the UI actually needs to
+    label it: the photographer's own focal point, a detected face, or the centre
+    fallback when there's nothing to go on.
+    """
+    anchor_x: float
+    anchor_y: float
+    source: Literal["focal", "face", "center"]
+    focal_x: float | None
+    focal_y: float | None
+    auto: AutoWindow
+
+
+@router.get("/{post_id}/crop-anchor", response_model=CropAnchor)
+def get_crop_anchor(
     post_id: str,
+    ignore_focal: bool = Query(False),
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
 ):
-    """Run face detection on the post's source image and return the normalized center of
-    the largest detected face. Used by the Reel CropModal to seed a sensible initial
-    crop position. Returns detected=false when no face is found — frontend falls back
-    to image center.
+    """The point the Instagram auto-crop anchors on, plus the window it would cut.
+
+    A photographer-set focal point wins outright and skips detection — it's both wasted
+    work and a worse answer than the one they already gave. Otherwise this runs face
+    detection and falls back to the centre.
+
+    Returning the window as well as the point keeps the crop math in one place: the
+    editor draws the box the worker will actually cut instead of approximating it, so
+    moving the anchor moves the preview.
 
     Uses the preview (1600-px) if available — fast enough that the user doesn't see a
     spinner on the modal open, and accurate enough for "pick a starting position."
@@ -491,26 +520,46 @@ def get_face_center(
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
 
-    # Prefer the preview (smaller, fast Haar pass) and only fall back to original if
-    # the preview hasn't been generated yet.
-    src: Path | None = None
-    preview = storage.preview_path(post_id)
-    if preview.exists():
-        src = preview
-    elif post.original_path and Path(post.original_path).exists():
-        src = Path(post.original_path)
-    if src is None:
-        return FaceCenter(x=None, y=None, detected=False)
+    # ignore_focal is how the crop editor asks "what would this be if I hadn't set a
+    # point?" — it owns the unsaved focal point itself, and needs the detection answer
+    # to offer "reset to detected face" without a save round-trip first.
+    focal = None if ignore_focal else ig_variant.focal_for(post)
+    anchor = focal
+    source = "focal"
 
-    try:
-        result = faces.detect_face_center(src)
-    except Exception:
-        log.exception("face detect failed for %s", post_id)
-        return FaceCenter(x=None, y=None, detected=False)
+    if anchor is None:
+        # Prefer the preview (smaller, fast Haar pass) and only fall back to original if
+        # the preview hasn't been generated yet.
+        img: Path | None = None
+        preview = storage.preview_path(post_id)
+        if preview.exists():
+            img = preview
+        elif post.original_path and Path(post.original_path).exists():
+            img = Path(post.original_path)
 
-    if result is None:
-        return FaceCenter(x=None, y=None, detected=False)
-    return FaceCenter(x=result[0], y=result[1], detected=True)
+        detected = None
+        if img is not None:
+            try:
+                detected = faces.detect_face_center(img)
+            except Exception:
+                log.exception("face detect failed for %s", post_id)
+        anchor = detected or (0.5, 0.5)
+        source = "face" if detected else "center"
+
+    floor, _ratio_key, _tested = ig_variant.supported_floor(db)
+    ratio = (post.width / post.height) if post.width and post.height else None
+    target = ig_variant.MAX_ASPECT if (ratio and ratio > ig_variant.MAX_ASPECT) else floor
+    ax, ay, aw, ah = ig_variant.auto_window(
+        post.width or 0, post.height or 0, target_ratio=target, anchor=anchor
+    )
+    return CropAnchor(
+        anchor_x=anchor[0],
+        anchor_y=anchor[1],
+        source=source,
+        focal_x=focal[0] if focal else None,
+        focal_y=focal[1] if focal else None,
+        auto=AutoWindow(x=ax, y=ay, w=aw, h=ah),
+    )
 
 
 @router.get("/{post_id}/ig-preview")

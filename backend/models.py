@@ -86,6 +86,12 @@ class Post(Base):
     ig_crop_h = Column(Float)
     ig_crop_ratio = Column(String)
     ig_crop_offset = Column(Float)
+    # Photographer-set anchor in 0..1 source coordinates (0022). Replaces the detected
+    # face when auto positions the window — "what this photograph is about" is not
+    # always "where the face is", and on a fire fan or a back-turned drop it isn't.
+    # Null = detect a face, fall back to centre.
+    ig_focal_x = Column(Float)
+    ig_focal_y = Column(Float)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 

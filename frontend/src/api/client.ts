@@ -127,6 +127,9 @@ export type Post = {
   ig_crop_w: number | null;
   ig_crop_h: number | null;
   ig_crop_ratio: string | null;
+  // Photographer-set crop anchor (0022); null = fall back to face detection.
+  ig_focal_x: number | null;
+  ig_focal_y: number | null;
   // Opt in to appending the camera/lens/exposure line to the description (0020).
   // shot_info is read-only: the server formats the exact line include_exif appends.
   include_exif: boolean;
@@ -238,6 +241,8 @@ export type PostUpdate = Partial<{
   ig_crop_w: number | null;
   ig_crop_h: number | null;
   ig_crop_ratio: string | null;
+  ig_focal_x: number | null;
+  ig_focal_y: number | null;
   include_exif: boolean;
 }>;
 
@@ -272,14 +277,24 @@ export type InstagramFormat = {
   sizes: string[];
 };
 
-export type FaceCenter = {
-  x: number | null;
-  y: number | null;
-  detected: boolean;
+/** What the Instagram auto-crop will anchor on, and the window it would cut.
+ *  `source` is what the UI labels: the photographer's own point, a detected face, or
+ *  the centre fallback when there was nothing to go on. */
+export type CropAnchor = {
+  anchor_x: number;
+  anchor_y: number;
+  source: "focal" | "face" | "center";
+  focal_x: number | null;
+  focal_y: number | null;
+  auto: { x: number; y: number; w: number; h: number };
 };
 
-export const fetchFaceCenter = (postId: string) =>
-  apiFetch<FaceCenter>(`/api/posts/${postId}/face-center`);
+/** ignoreFocal asks what auto would do with no focal point stored — the crop editor
+ *  holds the unsaved point itself and needs the detection answer underneath it. */
+export const fetchCropAnchor = (postId: string, ignoreFocal = false) =>
+  apiFetch<CropAnchor>(
+    `/api/posts/${postId}/crop-anchor${ignoreFocal ? "?ignore_focal=true" : ""}`,
+  );
 
 export const fetchInstagramFormat = (
   postId: string,

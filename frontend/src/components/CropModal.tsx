@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Cropper, { type Area } from "react-easy-crop";
 
-import { fetchFaceCenter, previewUrl, type ReelCrop } from "../api/client";
+import { fetchCropAnchor, previewUrl, type ReelCrop } from "../api/client";
 
 const ASPECT = 9 / 16;
 const PREVIEW_LONG_EDGE = 1600;
@@ -122,12 +122,13 @@ export default function CropModal({
   const [endZoom, setEndZoom] = useState(1);
   const [endPixel, setEndPixel] = useState<Area | null>(null);
 
-  // Face-detection hint for the initial Start position when there's no saved crop yet.
+  // Where to open the Start position when there's no saved crop yet — the same anchor
+  // the Instagram crop uses, so a focal point set over there seeds the Reel too.
   // (End defaults to the same place — you drag from there to where the camera should
   // land.)
-  const faceQuery = useQuery({
-    queryKey: ["face-center", postId],
-    queryFn: () => fetchFaceCenter(postId),
+  const anchorQuery = useQuery({
+    queryKey: ["crop-anchor", postId],
+    queryFn: () => fetchCropAnchor(postId),
     enabled: !initialCrop,
     staleTime: 60_000,
   });
@@ -136,14 +137,14 @@ export default function CropModal({
     if (initialCrop) {
       return originalCropToPreviewArea(initialCrop, postWidth, postHeight);
     }
-    if (!faceQuery.data) return undefined;
+    if (!anchorQuery.data) return undefined;
     return previewAreaCenteredOn(
-      faceQuery.data.detected ? faceQuery.data.x : undefined,
-      faceQuery.data.detected ? faceQuery.data.y : undefined,
+      anchorQuery.data.anchor_x,
+      anchorQuery.data.anchor_y,
       postWidth,
       postHeight,
     );
-  }, [initialCrop, faceQuery.data, postWidth, postHeight]);
+  }, [initialCrop, anchorQuery.data, postWidth, postHeight]);
 
   const endInitialArea = useMemo(() => {
     if (initialCropEnd) {

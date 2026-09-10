@@ -3,17 +3,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   fetchAppConfig,
-  fetchFaceCenter,
+  fetchCropAnchor,
   thumbnailUrl,
   updatePost,
   type Post,
 } from "../api/client";
-import IgCropStudio, { type CropRect, type IgFit } from "./IgCropStudio";
+import IgCropStudio, { type CropRect, type FocalPoint, type IgFit } from "./IgCropStudio";
 
 const MAX_ASPECT = 1.91;
 const RATIOS: Record<string, number> = { "3:4": 3 / 4, "4:5": 4 / 5 };
 
-type Entry = { fit: IgFit; rect: CropRect | null };
+type Entry = { fit: IgFit; rect: CropRect | null; focal: FocalPoint | null };
 
 /**
  * Crop a whole selection to one Instagram ratio, one frame at a time.
@@ -43,6 +43,10 @@ export default function IgCropFilmstrip({
             p.ig_crop_x != null && p.ig_crop_y != null &&
             p.ig_crop_w != null && p.ig_crop_h != null
               ? { x: p.ig_crop_x, y: p.ig_crop_y, w: p.ig_crop_w, h: p.ig_crop_h }
+              : null,
+          focal:
+            p.ig_focal_x != null && p.ig_focal_y != null
+              ? { x: p.ig_focal_x, y: p.ig_focal_y }
               : null,
         },
       ]),
@@ -98,6 +102,8 @@ export default function IgCropFilmstrip({
           ig_crop_w: e.rect?.w ?? null,
           ig_crop_h: e.rect?.h ?? null,
           ig_crop_ratio: e.rect ? ratioKey : null,
+          ig_focal_x: e.focal?.x ?? null,
+          ig_focal_y: e.focal?.y ?? null,
         });
       }
     },
@@ -194,11 +200,15 @@ export default function IgCropFilmstrip({
                 fit={edits[current.id]?.fit ?? "crop"}
                 rect={edits[current.id]?.rect ?? null}
                 offset={current.ig_crop_offset}
+                focal={edits[current.id]?.focal ?? null}
                 onFitChange={(f) =>
                   setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], fit: f } }))
                 }
                 onRectChange={(r) =>
                   setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], rect: r } }))
+                }
+                onFocalChange={(f) =>
+                  setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], focal: f } }))
                 }
               />
             </>
@@ -256,7 +266,7 @@ export default function IgCropFilmstrip({
   );
 }
 
-/** One thumbnail in the strip, flagged if the auto crop would lose the face. */
+/** One thumbnail in the strip, flagged when auto has nothing to anchor on. */
 function FilmFrame({
   post, active, manual, onClick,
 }: {
@@ -265,9 +275,9 @@ function FilmFrame({
   manual: boolean;
   onClick: () => void;
 }) {
-  const { data: face } = useQuery({
-    queryKey: ["face-center", post.id],
-    queryFn: () => fetchFaceCenter(post.id),
+  const { data: anchor } = useQuery({
+    queryKey: ["crop-anchor", post.id],
+    queryFn: () => fetchCropAnchor(post.id),
     staleTime: 5 * 60 * 1000,
     retry: false,
   });
@@ -308,9 +318,11 @@ function FilmFrame({
           }}
         />
       )}
-      {face && !face.detected && (
+      {/* Only the centre fallback is worth flagging: a focal point means the
+          photographer has already answered the question detection was asking. */}
+      {anchor?.source === "center" && (
         <span
-          title="No face detected — auto crop falls back to centre"
+          title="No face detected — auto crop falls back to centre. Drag the marker in the editor to set a focal point."
           style={{
             position: "absolute", left: 3, bottom: 3, fontSize: 9,
             color: "var(--text-fade)", textShadow: "0 1px 2px rgba(0,0,0,.7)",

@@ -25,7 +25,7 @@ import {
   type Venue,
 } from "../api/client";
 import AISuggestPanel from "./AISuggestPanel";
-import IgCropStudio, { type CropRect } from "./IgCropStudio";
+import IgCropStudio, { type CropRect, type FocalPoint } from "./IgCropStudio";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
 import Lightbox from "./Lightbox";
 import MultiSelectChips from "./MultiSelectChips";
@@ -57,6 +57,8 @@ export type EditorChanges = {
   ig_crop_w: number | null;
   ig_crop_h: number | null;
   ig_crop_ratio: string | null;
+  ig_focal_x: number | null;
+  ig_focal_y: number | null;
   include_exif: boolean;
 };
 
@@ -88,6 +90,8 @@ export function editorChangesToPatch(changes: EditorChanges): PostUpdate {
     ig_crop_w: changes.ig_crop_w,
     ig_crop_h: changes.ig_crop_h,
     ig_crop_ratio: changes.ig_crop_ratio,
+    ig_focal_x: changes.ig_focal_x,
+    ig_focal_y: changes.ig_focal_y,
     include_exif: changes.include_exif,
   };
 }
@@ -141,6 +145,12 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     post.ig_crop_x != null && post.ig_crop_y != null &&
     post.ig_crop_w != null && post.ig_crop_h != null
       ? { x: post.ig_crop_x, y: post.ig_crop_y, w: post.ig_crop_w, h: post.ig_crop_h }
+      : null,
+  );
+  // Where auto anchors. null hands it back to face detection.
+  const [igFocal, setIgFocal] = useState<FocalPoint | null>(
+    post.ig_focal_x != null && post.ig_focal_y != null
+      ? { x: post.ig_focal_x, y: post.ig_focal_y }
       : null,
   );
   // The learned floor decides the target ratio; the studio mirrors the worker's rule.
@@ -272,7 +282,9 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     (igRect?.x ?? null) !== (post.ig_crop_x ?? null) ||
     (igRect?.y ?? null) !== (post.ig_crop_y ?? null) ||
     (igRect?.w ?? null) !== (post.ig_crop_w ?? null) ||
-    (igRect?.h ?? null) !== (post.ig_crop_h ?? null);
+    (igRect?.h ?? null) !== (post.ig_crop_h ?? null) ||
+    (igFocal?.x ?? null) !== (post.ig_focal_x ?? null) ||
+    (igFocal?.y ?? null) !== (post.ig_focal_y ?? null);
 
   function handleSave() {
     // If user's selection matches what defaults would produce, send null to mean "use defaults".
@@ -304,6 +316,9 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       ig_crop_w: igRect?.w ?? null,
       ig_crop_h: igRect?.h ?? null,
       ig_crop_ratio: igRect ? igRatioKey : null,
+      // Both or neither — focal_for() ignores a half-written point.
+      ig_focal_x: igFocal?.x ?? null,
+      ig_focal_y: igFocal?.y ?? null,
     });
   }
 
@@ -677,8 +692,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
             fit={igFit}
             rect={igRect}
             offset={igOffset}
+            focal={igFocal}
             onFitChange={setIgFit}
             onRectChange={setIgRect}
+            onFocalChange={setIgFocal}
           />
         </Field>
       )}

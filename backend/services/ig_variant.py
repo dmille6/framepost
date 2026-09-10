@@ -57,6 +57,8 @@ FACE_ANCHOR = 0.38
 
 FITS = ("crop", "pad", "pad_blur")
 
+Rect = tuple[float, float, float, float]
+
 # Meta's fetcher rejects Flickr `_o` Original URLs but takes derivatives of the same
 # photo. Staging uploads are ≤1440px, so "Large 2048" is their exact native pixels.
 STAGING_URL_PREFERENCE = ("Large 2048", "Large 1600", "Large", "Medium 800")
@@ -118,26 +120,78 @@ def _source_path(post: Post, *, prefer_preview: bool = False) -> Path:
     )
 
 
-def auto_offset(src: Path, *, crop_frac: float, vertical: bool) -> float:
-    """Face-anchored default for the crop window position, 0..1 along the cropped axis.
-
-    crop_frac is window_size / image_size on that axis. Places the detected face center
-    at FACE_ANCHOR inside the window; center-crops when no face is found (side profiles,
-    full-body silhouettes — Haar misses those, and center is the least-wrong default).
-    """
-    center = faces.detect_face_center(src)
-    if center is None:
-        return 0.5
-    face_along_axis = center[1] if vertical else center[0]
+def _offset_for_anchor(along_axis: float, crop_frac: float) -> float:
+    """Window position, 0..1, that puts `along_axis` at FACE_ANCHOR inside the window."""
     movable = 1.0 - crop_frac
     if movable <= 0:
         return 0.5
-    # offset*movable = window top; we want face_along_axis = top + FACE_ANCHOR*crop_frac
-    offset = (face_along_axis - FACE_ANCHOR * crop_frac) / movable
-    return min(1.0, max(0.0, offset))
+    # offset*movable = window top; we want along_axis = top + FACE_ANCHOR*crop_frac
+    return min(1.0, max(0.0, (along_axis - FACE_ANCHOR * crop_frac) / movable))
 
 
-Rect = tuple[float, float, float, float]
+def focal_for(post: Post) -> tuple[float, float] | None:
+    """The photographer's anchor for this post, or None to fall back to detection.
+
+    Both coordinates must be present — a half-written point is treated as absent rather
+    than paired with a guess, matching rect_for().
+    """
+    x, y = post.ig_focal_x, post.ig_focal_y
+    if x is None or y is None:
+        return None
+    return (min(max(0.0, float(x)), 1.0), min(max(0.0, float(y)), 1.0))
+
+
+def anchor_for(src: Path, focal: tuple[float, float] | None) -> tuple[float, float]:
+    """Effective anchor point: the photographer's if set, else the detected face, else
+    the centre. Detection is skipped entirely when a focal point exists — it's both
+    wasted work and a worse answer than the one the photographer already gave."""
+    if focal is not None:
+        return focal
+    return faces.detect_face_center(src) or (0.5, 0.5)
+
+
+def auto_offset(
+    src: Path,
+    *,
+    crop_frac: float,
+    vertical: bool,
+    focal: tuple[float, float] | None = None,
+) -> float:
+    """Anchored default for the crop window position, 0..1 along the cropped axis.
+
+    crop_frac is window_size / image_size on that axis. Places the anchor at FACE_ANCHOR
+    inside the window; center-crops when there's nothing to anchor on (side profiles,
+    full-body silhouettes — Haar misses those, and center is the least-wrong default).
+
+    focal is the photographer's own anchor. Face detection answers "where is the face",
+    which is usually but not always "what is this photograph about" — a hand on a fire
+    fan, a back-turned drop, the wrong face in a duo act. When they've told us, use it.
+    """
+    center = focal if focal is not None else faces.detect_face_center(src)
+    if center is None:
+        return 0.5
+    return _offset_for_anchor(center[1] if vertical else center[0], crop_frac)
+
+
+def auto_window(
+    src_w: int, src_h: int, *, target_ratio: float, anchor: tuple[float, float]
+) -> Rect:
+    """The window auto would cut, as a normalized rect — no image decode required.
+
+    Mirrors the auto branch of render_variant so the crop editor can draw the box the
+    worker will actually use. Without it the editor had to approximate with a centre
+    crop, which meant moving the anchor changed the published photo but not the preview.
+    """
+    if not src_w or not src_h:
+        return (0.0, 0.0, 1.0, 1.0)
+    ratio = src_w / src_h
+    if ratio < target_ratio:            # too tall — crop vertically
+        frac = min(1.0, (src_w / target_ratio) / src_h)
+        return (0.0, _offset_for_anchor(anchor[1], frac) * (1.0 - frac), 1.0, frac)
+    if ratio > target_ratio:            # too wide (pano) — crop horizontally
+        frac = min(1.0, (src_h * target_ratio) / src_w)
+        return (_offset_for_anchor(anchor[0], frac) * (1.0 - frac), 0.0, frac, 1.0)
+    return (0.0, 0.0, 1.0, 1.0)
 
 
 def fit_rect_to_ratio(rect: Rect, src_w: int, src_h: int, target_ratio: float) -> Rect:
@@ -170,6 +224,7 @@ def render_variant(
     fit: str = "crop",
     offset: float | None = None,
     rect: Rect | None = None,
+    focal: tuple[float, float] | None = None,
     out_width: int = OUT_WIDTH,
     quality: int = JPEG_QUALITY,
 ) -> bytes:
@@ -181,7 +236,8 @@ def render_variant(
               maximum area.
       offset  legacy single-axis position, 0=top/left .. 1=bottom/right, always at
               maximum area.
-      neither face-anchored auto.
+      neither face-anchored auto, or focal-anchored when the post carries a
+              photographer-set focal point.
     fit="pad": letterbox on black. fit="pad_blur": letterbox on a blurred, darkened
     cover-fill of the photo itself (what most social tools do — reads less like bars).
     """
@@ -212,14 +268,14 @@ def render_variant(
                 crop_h = int(round(w / target_ratio))
                 crop_frac = crop_h / h
                 if offset is None:
-                    offset = auto_offset(src, crop_frac=crop_frac, vertical=True)
+                    offset = auto_offset(src, crop_frac=crop_frac, vertical=True, focal=focal)
                 top = int(round(min(1.0, max(0.0, offset)) * (h - crop_h)))
                 box = (0, top, w, top + crop_h)
             else:  # too wide (pano) — crop horizontally
                 crop_w = int(round(h * target_ratio))
                 crop_frac = crop_w / w
                 if offset is None:
-                    offset = auto_offset(src, crop_frac=crop_frac, vertical=False)
+                    offset = auto_offset(src, crop_frac=crop_frac, vertical=False, focal=focal)
                 left = int(round(min(1.0, max(0.0, offset)) * (w - crop_w)))
                 box = (left, 0, left + crop_w, h)
             out = img.crop(box).resize((out_w, out_h), Image.LANCZOS)
@@ -275,6 +331,7 @@ def render_preview(db: Session, post: Post, *, fit: str, offset: float | None,
     data = render_variant(
         src, target_ratio=target, fit=fit, offset=offset,
         rect=rect if rect is not None else rect_for(post),
+        focal=focal_for(post),
         out_width=width, quality=82,
     )
     return data, ratio_key
@@ -328,7 +385,7 @@ def ensure_staged(
     src = _source_path(post)
     data = render_variant(
         src, target_ratio=RATIOS[ratio_key], fit=fit, offset=offset,
-        rect=rect_for(post),
+        rect=rect_for(post), focal=focal_for(post),
     )
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(data)
