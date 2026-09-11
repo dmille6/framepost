@@ -83,7 +83,10 @@ export default function CarouselDialog({
           These publish as one Instagram post. The first frame is the cover, and Instagram
           crops the rest to match it.
           <br />
-          Flickr still gets every photo separately — only Instagram collapses.
+          Bluesky and Pixelfed take four images each, so a bigger set goes out there as a
+          thread rather than losing frames.
+          <br />
+          Flickr still gets every photo separately.
         </p>
 
         {errors.length > 0 && (

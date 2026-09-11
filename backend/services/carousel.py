@@ -24,9 +24,14 @@ from models import Post, PostPerformer
 from services import ig_variant
 from services.platforms import instagram
 
-# Platforms where a carousel collapses to one post. Flickr never does (one photo per
-# photo). Bluesky and Pixelfed both cap at four images and are phase 3.
-CAROUSEL_PLATFORMS = frozenset({"instagram"})
+# Platforms where a carousel collapses to one post. Flickr never does — one photo per
+# photo is the point of the archive.
+#
+# Bluesky and Pixelfed cap at four images each, so a bigger set is threaded rather than
+# truncated: the caption and hashtags on the root, continuations replying to it. Losing
+# frames silently is worse than an extra post, and three top-level posts carrying the
+# same caption would read as bot output on a chronological feed.
+CAROUSEL_PLATFORMS = frozenset({"instagram", "bluesky", "pixelfed"})
 
 # post_platforms.status for a member's Instagram row. The row exists only to hold that
 # frame's staging id so ensure_staged() works unchanged; it is never published on its

@@ -655,6 +655,30 @@ def _collabs_enabled(db) -> bool:
     return (row.value if row and row.value else "true").lower() == "true"
 
 
+def _source_for(post: Post) -> Path:
+    """The local file to upload for this post.
+
+    Falls back to the cached 1600px preview when the original has been purged — still
+    well above the quality bar for Bluesky and Pixelfed.
+    """
+    src = Path(post.original_path) if post.original_path else None
+    if src and src.exists():
+        return src
+    preview = storage.preview_path(post.id)
+    if preview.exists():
+        return preview
+    raise RuntimeError(f"no source image for {post.id[:8]} (original purged, no preview cached)")
+
+
+def _carousel_frames(db, post: Post) -> list[tuple[Path, str | None]]:
+    """Local file + alt text per frame, in carousel order — for the platforms that
+    upload bytes rather than fetching a URL the way Meta does."""
+    return [
+        (_source_for(m), (m.alt_text or "").strip() or None)
+        for m in carousel_svc.members(db, post.carousel_id)
+    ]
+
+
 def _mark_carousel_member(db, post: Post, cred: PlatformCredential) -> PostPlatform:
     """Park a member's platform row so it reads as handled, not pending."""
     pp = db.get(PostPlatform, (post.id, cred.id))
@@ -764,14 +788,10 @@ def _post_instagram_carousel(
 
 def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: datetime) -> None:
     """Attempt one platform fanout; persist outcome to post_platforms + activity timeline."""
-    src = Path(post.original_path) if post.original_path else None
-    if not src or not src.exists():
-        # Fallback: cached preview (1600px). Still well above quality bar for Bluesky/Pixelfed.
-        preview = storage.preview_path(post.id)
-        if preview.exists():
-            src = preview
-    if src is None:
-        raise RuntimeError("no source image (original purged, no preview cached)")
+    # Also catches an original_path pointing at a file that is no longer there: the old
+    # inline version only fell back when original_path was unset, so a purged file with a
+    # live path slipped through to the uploader as a missing-file crash.
+    src = _source_for(post)
 
     text = _build_caption_for(cred.platform, post, db)
     # Prefer AI-generated alt_text (richer + accessibility-tuned); fall back to title +
@@ -782,10 +802,20 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
     )
 
     if cred.platform == "bluesky":
-        result = bluesky.post_photo(db=db, src=src, text=text, alt_text=alt)
+        if carousel_svc.is_lead(post):
+            result = bluesky.post_thread(
+                db=db, frames=_carousel_frames(db, post), text=text
+            )
+        else:
+            result = bluesky.post_photo(db=db, src=src, text=text, alt_text=alt)
         remote_id, remote_url = result["at_uri"], result["url"]
     elif cred.platform == "pixelfed":
-        result = pixelfed.post_photo(db=db, src=src, text=text, alt_text=alt)
+        if carousel_svc.is_lead(post):
+            result = pixelfed.post_thread(
+                db=db, frames=_carousel_frames(db, post), text=text
+            )
+        else:
+            result = pixelfed.post_photo(db=db, src=src, text=text, alt_text=alt)
         remote_id, remote_url = result["remote_id"], result["url"]
     elif cred.platform == "pinterest":
         # Pinterest has structured title/description/link rather than a blob, so we don't

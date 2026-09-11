@@ -246,6 +246,11 @@ def current_status(db: Session) -> dict[str, Any]:
     }
 
 
+# Mastodon-compatible attachment ceiling, which Pixelfed follows. A carousel bigger than
+# this is threaded rather than truncated.
+MAX_IMAGES = 4
+
+
 def _load_credential(db: Session) -> PlatformCredential:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
@@ -264,31 +269,83 @@ def post_photo(
     visibility: str = "public",
 ) -> dict:
     """Upload media + create status. Returns {remote_id, url}."""
+    return post_photos(db, frames=[(src, alt_text)], text=text, visibility=visibility)
+
+
+def post_thread(
+    db: Session,
+    *,
+    frames: list[tuple[Path, str | None]],
+    text: str,
+    visibility: str = "public",
+) -> dict:
+    """Post frames as one status, or as a reply chain when there are more than
+    MAX_IMAGES.
+
+    The caption and its hashtags go on the root only. Repeating them on every
+    continuation is the thing that reads as bot output, and a reply is already attached
+    to the root, so restating it gains nothing.
+
+    Returns the ROOT's {remote_id, url} — the status engagement accrues to.
+    """
+    if not frames:
+        raise PixelfedError("nothing to post", permanent=True)
+
+    chunks = [frames[i:i + MAX_IMAGES] for i in range(0, len(frames), MAX_IMAGES)]
+    root = post_photos(db, frames=chunks[0], text=text, visibility=visibility)
+    parent_id = root["remote_id"]
+    for chunk in chunks[1:]:
+        parent = post_photos(
+            db, frames=chunk, text="", visibility=visibility, in_reply_to=parent_id,
+        )
+        parent_id = parent["remote_id"]
+    if len(chunks) > 1:
+        log.info("pixelfed: %d frames posted as a thread of %d", len(frames), len(chunks))
+    return root
+
+
+def post_photos(
+    db: Session,
+    *,
+    frames: list[tuple[Path, str | None]],
+    text: str,
+    visibility: str = "public",
+    in_reply_to: str | None = None,
+) -> dict:
+    """One status carrying up to MAX_IMAGES images. Returns {remote_id, url}."""
+    if not 1 <= len(frames) <= MAX_IMAGES:
+        raise PixelfedError(
+            f"a status takes 1..{MAX_IMAGES} images, got {len(frames)}",
+            permanent=True,
+        )
     row = _load_credential(db)
     access_token = decrypt_token(row.access_token)
     instance_url = row.instance_url or ""
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # Step 1: media upload.
-    with open(src, "rb") as f:
-        files = {"file": (src.name, f, "image/jpeg")}
-        data = {"description": (alt_text or "")[:1500]}  # Mastodon caps alt around 1500
-        with _client(instance_url) as c:
-            r = c.post("/api/v1/media", headers=headers, files=files, data=data)
-    if r.status_code >= 400:
-        raise PixelfedError(
-            f"media upload failed (HTTP {r.status_code}): {r.text[:300]}",
-            permanent=(r.status_code in (400, 401, 403, 422)),
-        )
-    media = r.json()
-    media_id = media["id"]
+    # Step 1: media upload, one call per image.
+    media_ids: list[str] = []
+    for s, alt in frames:
+        with open(s, "rb") as f:
+            files = {"file": (s.name, f, "image/jpeg")}
+            data = {"description": (alt or "")[:1500]}  # Mastodon caps alt around 1500
+            with _client(instance_url) as c:
+                r = c.post("/api/v1/media", headers=headers, files=files, data=data)
+        if r.status_code >= 400:
+            raise PixelfedError(
+                f"media upload failed (HTTP {r.status_code}): {r.text[:300]}",
+                permanent=(r.status_code in (400, 401, 403, 422)),
+            )
+        media_ids.append(r.json()["id"])
 
-    # Step 2: status post.
-    payload = {
-        "status": text or "",
-        "media_ids[]": media_id,
-        "visibility": visibility,
-    }
+    # Step 2: status post. media_ids[] repeats once per attachment.
+    payload = [
+        ("status", text or ""),
+        ("visibility", visibility),
+        *[("media_ids[]", mid) for mid in media_ids],
+    ]
+    if in_reply_to:
+        payload.append(("in_reply_to_id", in_reply_to))
     with _client(instance_url) as c:
         r = c.post("/api/v1/statuses", headers=headers, data=payload)
     if r.status_code >= 400:

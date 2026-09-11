@@ -39,6 +39,9 @@ PLATFORM = "bluesky"
 DEFAULT_PDS = "https://bsky.social"
 MAX_BLOB_BYTES = 976_000  # ~1MB Bluesky cap; leave headroom for atproto envelope
 MAX_TEXT_GRAPHEMES = 300
+# atproto's embed.images ceiling. A carousel bigger than this is threaded rather than
+# truncated — losing frames silently is worse than an extra post.
+MAX_IMAGES = 4
 KEY_VERSION = 1
 
 
@@ -339,8 +342,60 @@ def post_photo(
     alt_text: str | None = None,
 ) -> dict:
     """Post a photo to Bluesky. Returns {at_uri, cid, url}."""
+    return post_photos(db, frames=[(src, alt_text)], text=text)
+
+
+def post_thread(db: Session, *, frames: list[tuple[Path, str | None]], text: str) -> dict:
+    """Post frames as one post, or as a thread when there are more than MAX_IMAGES.
+
+    The caption and its hashtags go on the root only. Repeating them on every
+    continuation is the thing that reads as bot output — and in a thread the
+    continuations are already attached to the root, so they gain nothing by restating it.
+
+    Returns the ROOT's {at_uri, cid, url}: that's the post engagement accrues to and the
+    one post_platforms should point at.
+    """
+    if not frames:
+        raise BlueskyError("nothing to post", permanent=True)
+
+    chunks = [frames[i:i + MAX_IMAGES] for i in range(0, len(frames), MAX_IMAGES)]
+    root = post_photos(db, frames=chunks[0], text=text)
+    parent = root
+    for chunk in chunks[1:]:
+        # Image-only continuation: atproto allows an empty text with an embed.
+        parent = post_photos(
+            db, frames=chunk, text="",
+            reply={
+                "root": {"uri": root["at_uri"], "cid": root["cid"]},
+                "parent": {"uri": parent["at_uri"], "cid": parent["cid"]},
+            },
+        )
+    if len(chunks) > 1:
+        log.info("bluesky: %d frames posted as a thread of %d", len(frames), len(chunks))
+    return root
+
+
+def post_photos(
+    db: Session,
+    *,
+    frames: list[tuple[Path, str | None]],
+    text: str,
+    reply: dict | None = None,
+) -> dict:
+    """One post carrying up to MAX_IMAGES images. Returns {at_uri, cid, url}."""
+    if not 1 <= len(frames) <= MAX_IMAGES:
+        raise BlueskyError(
+            f"a Bluesky post takes 1..{MAX_IMAGES} images, got {len(frames)}",
+            permanent=True,
+        )
     row, session = _load_session(db)
-    blob = _upload_blob(db, row, session, src)
+    images = [
+        {
+            "alt": (alt or "")[:1000],  # atproto allows long alt text but be sane
+            "image": _upload_blob(db, row, session, s),
+        }
+        for s, alt in frames
+    ]
 
     body_text = _trim_text(text or "")
     record = {
@@ -349,12 +404,11 @@ def post_photo(
         "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "embed": {
             "$type": "app.bsky.embed.images",
-            "images": [{
-                "alt": (alt_text or "")[:1000],  # atproto allows long alt text but be sane
-                "image": blob,
-            }],
+            "images": images,
         },
     }
+    if reply:
+        record["reply"] = reply
     facets = _detect_facets(body_text)
     if facets:
         record["facets"] = facets
