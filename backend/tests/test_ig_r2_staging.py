@@ -141,3 +141,36 @@ def test_without_r2_the_flickr_path_is_untouched(db, tmp_path, monkeypatch):
         db, post, None, platform_id=cred.id, ratio_key="4:5", fit="crop", offset=None)
     assert ref == "999" and url == "https://flickr/999.jpg"
     assert len(uploaded) == 1
+
+
+def test_a_published_carousel_leaves_nothing_in_the_bucket(db, tmp_path, r2_stub, monkeypatch):
+    """One object per frame is staged. Cleanup ran only on the single-photo path, so a
+    carousel leaked a file per frame on every publish — and because each row kept
+    claiming its ref, the orphan sweep read them as live and skipped them too."""
+    from datetime import datetime
+
+    from services import carousel, scheduler
+
+    posts = []
+    for _ in range(3):
+        posts.append(_post(db, tmp_path))
+    for p in posts:
+        p.flickr_photo_id = "1"
+        p.status = "posted"
+    db.commit()
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+    cred = _cred(db)
+
+    monkeypatch.setattr(
+        scheduler.instagram, "post_carousel",
+        lambda **kw: {"remote_id": "1", "url": "https://instagram.com/p/x/",
+                      "collaborators": [], "collaborators_rejected": []})
+
+    lead = carousel.lead_for(db, cid)
+    scheduler.fanout_to_platforms(db, lead, fired_at=datetime.now(), targets=["instagram"])
+    db.commit()
+
+    assert r2_stub == {}, f"leaked {len(r2_stub)} staged object(s)"
+    for p in posts:
+        pp = db.get(PostPlatform, (p.id, cred.id))
+        assert pp is None or pp.staging_remote_id is None

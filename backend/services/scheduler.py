@@ -836,6 +836,12 @@ def _post_instagram_carousel(
 
     if pp is not None:
         pp.carousel_children = None
+    # Every frame staged its own object. The single-photo path cleans up after itself;
+    # without this the carousel path leaked one file per frame on every publish — and
+    # worse, the rows kept claiming those refs, so the orphan sweep read them as live
+    # and would never have reaped them either.
+    for frame in frames:
+        ig_variant.cleanup_staged(db, db.get(PostPlatform, (frame.id, cred.id)))
     log.info("carousel %s published as %s (%d frames)",
              post.carousel_id[:8], result["remote_id"], len(frames))
     return result["remote_id"], result["url"]
