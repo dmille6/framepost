@@ -41,3 +41,6 @@ logs/
 
 # Claude Code per-user local config (may contain test creds in permission allowlists)
 .claude/settings.local.json
+cloudflare.env
+*.env
+!.env.example

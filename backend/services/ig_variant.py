@@ -20,6 +20,7 @@ import io
 import logging
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from sqlalchemy.orm import Session
 from models import AppConfig, Post, PostPlatform
 from services import faces, storage
 from services.platforms import flickr
-from services import channel_health, publish_errors
+from services import channel_health, publish_errors, r2
 
 log = logging.getLogger("framepost.ig_variant")
 
@@ -62,6 +63,22 @@ Rect = tuple[float, float, float, float]
 # Meta's fetcher rejects Flickr `_o` Original URLs but takes derivatives of the same
 # photo. Staging uploads are ≤1440px, so "Large 2048" is their exact native pixels.
 STAGING_URL_PREFERENCE = ("Large 2048", "Large 1600", "Large", "Medium 800")
+
+# Staging refs are "<remote>|<ratio_key>". A bare remote is a Flickr photo id; this
+# prefix marks an R2 object key instead. One column, two backends, and the existing
+# orphan sweep keeps working for both.
+R2_PREFIX = "r2:"
+
+# Ratio key recorded when the photo needed no reshaping and was staged as-is.
+NATIVE_RATIO_KEY = "native"
+
+
+def _is_r2(ref: str) -> bool:
+    return ref.startswith(R2_PREFIX)
+
+
+def _r2_key(ref: str) -> str:
+    return ref[len(R2_PREFIX):]
 
 
 # -----------------------------------------------------------------------------
@@ -373,6 +390,10 @@ def ensure_staged(
     if existing and not force:
         staged_id, staged_ratio = existing
         if staged_ratio == ratio_key:
+            if _is_r2(staged_id):
+                # Presigned URLs expire, so mint a fresh one rather than reusing the
+                # last — the object itself is what we're reusing, not the link.
+                return staged_id, r2.presign_get(_r2_key(staged_id))
             try:
                 return staged_id, flickr.get_display_image_url(
                     db, staged_id, preference=STAGING_URL_PREFERENCE
@@ -383,10 +404,32 @@ def ensure_staged(
             _delete_photo(db, staged_id)
 
     src = _source_path(post)
+    if ratio_key == NATIVE_RATIO_KEY:
+        # Nothing is out of range — we only re-render so the file we hand Meta comes
+        # from a host we control. Target the photo's own ratio so the crop is a no-op.
+        with Image.open(src) as _im:
+            target_ratio = _im.width / _im.height
+    else:
+        target_ratio = RATIOS[ratio_key]
     data = render_variant(
-        src, target_ratio=RATIOS[ratio_key], fit=fit, offset=offset,
+        src, target_ratio=target_ratio, fit=fit, offset=offset,
         rect=rect_for(post), focal=focal_for(post),
     )
+
+    if r2.configured():
+        key = f"ig/{post.id}/{uuid.uuid4().hex}.jpg"
+        r2.put(key, data)
+        ref = R2_PREFIX + key
+        if pp is None:
+            pp = db.get(PostPlatform, (post.id, platform_id))
+        if pp is None:
+            pp = PostPlatform(post_id=post.id, platform_id=platform_id)
+            db.add(pp)
+        pp.staging_remote_id = _encode_staging(ref, ratio_key)
+        db.commit()  # survive the caller's rollback if the publish attempt fails
+        url = r2.presign_get(key)
+        log.info("post %s: staged IG %s variant in R2 as %s", post.id[:8], ratio_key, key)
+        return ref, url
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(data)
         tmp_path = Path(tmp.name)
@@ -435,6 +478,9 @@ def _wait_until_fetchable(url: str, *, tries: int = 8, interval: float = 5.0) ->
 
 
 def _delete_photo(db: Session, photo_id: str) -> None:
+    if _is_r2(photo_id):
+        r2.delete(_r2_key(photo_id))
+        return
     try:
         flickr.rest_call(db, "flickr.photos.delete", photo_id=photo_id)
     except flickr.FlickrError as e:

@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
+from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -722,26 +722,30 @@ def _ig_collaborators(db, post: Post) -> list[str]:
 
 
 def _ig_image_url(db, cred: PlatformCredential, frame: Post, *, force_restage: bool = False) -> str:
-    """The public URL Meta should fetch for one frame, staging a cropped variant when the
-    source ratio is out of range.
+    """The public URL Meta should fetch for one frame.
 
-    Meta ingests from a URL rather than an upload, so the frame has to be on Flickr
-    first — that's the canonical public copy.
+    Meta ingests from a URL rather than an upload, so the bytes have to be somewhere
+    public. With R2 configured that is our own bucket and every frame is staged there,
+    including ones needing no reshaping — Meta proved unable to fetch from Flickr at all
+    on 2026-09-11 while reading the identical bytes from R2, so Flickr is no longer in
+    the Instagram path. Without R2 we fall back to the Flickr rendition as before.
     """
-    if not frame.flickr_photo_id:
-        raise instagram.InstagramError(
-            f"frame {frame.id[:8]} isn't on Flickr yet — Meta fetches the image from a "
-            f"public URL, so the carousel can't be built until it is.",
-        )
     floor, ratio_key, _tested = ig_variant.supported_floor(db)
     ratio = (frame.width / frame.height) if frame.width and frame.height else None
-    if not ig_variant.needs_transform(ratio, floor):
+    transform = ig_variant.needs_transform(ratio, floor)
+    if not transform and not r2.configured():
+        if not frame.flickr_photo_id:
+            raise instagram.InstagramError(
+                f"frame {frame.id[:8]} isn't on Flickr yet — Meta fetches the image from a "
+                f"public URL, so the carousel can't be built until it is.",
+            )
         return flickr.get_display_image_url(db, frame.flickr_photo_id)
     pp = db.get(PostPlatform, (frame.id, cred.id))
     if not pp:
         pp = _mark_carousel_member(db, frame, cred)
     _staging_id, url = ig_variant.ensure_staged(
-        db, frame, pp, platform_id=cred.id, ratio_key=ratio_key,
+        db, frame, pp, platform_id=cred.id,
+        ratio_key=ratio_key if transform else ig_variant.NATIVE_RATIO_KEY,
         fit=frame.ig_fit or "crop", offset=frame.ig_crop_offset, force=force_restage,
     )
     return url
@@ -899,7 +903,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         # Out-of-range aspect ratios get a crop/pad variant staged as a hidden Flickr
         # photo instead (see services/ig_variant.py), honoring the per-post ig_fit /
         # ig_crop_offset choices from the editor.
-        if not post.flickr_photo_id:
+        if not post.flickr_photo_id and not r2.configured():
             raise instagram.InstagramError(
                 "Instagram needs the photo on Flickr first — Meta fetches the image from a "
                 "public URL and FramePost uses the Flickr rendition. Flickr was skipped for "
@@ -912,7 +916,10 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         pp0 = db.get(PostPlatform, (post.id, cred.id))
         staging_id: str | None = None
 
-        if ig_variant.needs_transform(ratio, floor):
+        # With R2 configured every photo is staged in our own bucket, reshaped or not:
+        # Meta could not fetch from Flickr at all on 2026-09-11 while reading the same
+        # bytes from R2 without complaint.
+        if ig_variant.needs_transform(ratio, floor) or r2.configured():
             staging_id, image_url = ig_variant.ensure_staged(
                 db, post, pp0, platform_id=cred.id,
                 ratio_key=ratio_key, fit=fit, offset=post.ig_crop_offset,
