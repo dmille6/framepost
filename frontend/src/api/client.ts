@@ -291,6 +291,42 @@ export type CropAnchor = {
 
 /** ignoreFocal asks what auto would do with no focal point stored — the crop editor
  *  holds the unsaved point itself and needs the detection answer underneath it. */
+/** A carousel: several posts that publish as one Instagram post. */
+export type CarouselFrame = {
+  post_id: string;
+  position: number;
+  title: string | null;
+  original_filename: string | null;
+};
+
+export type CarouselResult = {
+  carousel_id: string | null;
+  frames: CarouselFrame[];
+  /** Non-empty means nothing was changed. */
+  errors: string[];
+};
+
+export const createCarousel = (
+  postIds: string[],
+  leadId: string,
+  opts: { dryRun?: boolean } = {},
+) =>
+  apiFetch<CarouselResult>("/api/carousels", {
+    method: "POST",
+    body: JSON.stringify({ post_ids: postIds, lead_id: leadId, dry_run: !!opts.dryRun }),
+  });
+
+export const reorderCarousel = (carouselId: string, orderedIds: string[]) =>
+  apiFetch<CarouselResult>(`/api/carousels/${carouselId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ ordered_ids: orderedIds }),
+  });
+
+export const ungroupCarousel = (carouselId: string) =>
+  apiFetch<{ ok: true; freed: number }>(`/api/carousels/${carouselId}`, {
+    method: "DELETE",
+  });
+
 export const fetchCropAnchor = (postId: string, ignoreFocal = false) =>
   apiFetch<CropAnchor>(
     `/api/posts/${postId}/crop-anchor${ignoreFocal ? "?ignore_focal=true" : ""}`,
@@ -415,6 +451,8 @@ export type ScheduledItem = {
   status: string;
   posted_at: string | null;
   error_message: string | null;
+  carousel_id: string | null;
+  carousel_position: number | null;
 };
 
 export const listScheduled = (fromIso?: string, toIso?: string) => {

@@ -79,6 +79,11 @@ class ScheduledItem(BaseModel):
     status: str
     posted_at: datetime | None
     error_message: str | None
+    # Carousel membership, so the queue can show one row per post rather than one per
+    # frame. Members share the lead's scheduled_at, so they always land in the same
+    # window and the count can be worked out client-side.
+    carousel_id: str | None = None
+    carousel_position: int | None = None
 
     class Config:
         from_attributes = True

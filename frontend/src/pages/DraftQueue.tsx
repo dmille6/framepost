@@ -20,6 +20,7 @@ import type { EditorChanges } from "../components/MetadataEditor";
 
 import BulkEditDialog from "../components/BulkEditDialog";
 import FindReplaceDialog from "../components/FindReplaceDialog";
+import CarouselDialog from "../components/CarouselDialog";
 import IgCropFilmstrip from "../components/IgCropFilmstrip";
 import DraftCard from "../components/DraftCard";
 import EmptyState from "../components/EmptyState";
@@ -122,6 +123,7 @@ export default function DraftQueue() {
   const [smartFillOpen, setSmartFillOpen] = useState(false);
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
   const [filmstripOpen, setFilmstripOpen] = useState(false);
+  const [carouselOpen, setCarouselOpen] = useState(false);
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<"newest" | "oldest" | "captured" | "largest" | "ready">("newest");
@@ -476,6 +478,15 @@ export default function DraftQueue() {
                         Crop for IG ({checkedIds.size})
                       </button>
                       <button
+                        className="fp-btn-ghost"
+                        disabled={checkedIds.size < 2}
+                        onClick={() => setCarouselOpen(true)}
+                        title="Publish the selection as one Instagram post"
+                        style={{ padding: "6px 14px", fontSize: 13 }}
+                      >
+                        Carousel ({checkedIds.size})
+                      </button>
+                      <button
                         className="fp-btn"
                         disabled={checkedIds.size === 0}
                         onClick={() => setSmartFillOpen(true)}
@@ -588,6 +599,19 @@ export default function DraftQueue() {
           onCancel={() => setScheduling(null)}
           onSubmit={async (iso) => {
             await scheduleMutation.mutateAsync({ id: scheduling.id, iso });
+          }}
+        />
+      )}
+
+      {carouselOpen && (
+        <CarouselDialog
+          posts={drafts.filter((d) => checkedIds.has(d.id))}
+          onCancel={() => setCarouselOpen(false)}
+          onGrouped={() => {
+            setCarouselOpen(false);
+            exitMultiSelect();
+            void qc.invalidateQueries({ queryKey: ["drafts"] });
+            void qc.invalidateQueries({ queryKey: ["schedule"] });
           }}
         />
       )}

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getPost,
   postNow,
+  ungroupCarousel,
   type Post,
   type ScheduledItem,
   setPostAlbums,
@@ -116,6 +117,13 @@ export default function ScheduledItemModal({
           onUnschedule={onUnschedule}
           onPostNow={() => postNowMutation.mutate()}
           postNowPending={postNowMutation.isPending}
+          onUngroup={async () => {
+            if (!item.carousel_id) return;
+            await ungroupCarousel(item.carousel_id);
+            void qc.invalidateQueries({ queryKey: ["schedule"] });
+            void qc.invalidateQueries({ queryKey: ["drafts"] });
+            onClose();
+          }}
         />
 
         <div style={{ padding: 20, overflow: "auto" }}>
@@ -203,6 +211,7 @@ function ModalHeader({
   onUnschedule,
   onPostNow,
   postNowPending,
+  onUngroup,
 }: {
   item: ScheduledItem;
   editable: boolean;
@@ -212,6 +221,7 @@ function ModalHeader({
   onUnschedule: () => Promise<void>;
   onPostNow: () => void;
   postNowPending: boolean;
+  onUngroup: () => Promise<void>;
 }) {
   return (
     <div
@@ -251,6 +261,17 @@ function ModalHeader({
           }}
         >
           <span className={`fp-pill fp-pill-${item.status}`}>{item.status}</span>
+          {item.carousel_id && (
+            <span
+              title="These publish as one Instagram post"
+              style={{
+                fontSize: 11, padding: "1px 6px", borderRadius: 999,
+                color: "var(--teal)", border: "0.5px solid var(--teal)",
+              }}
+            >
+              ⧉ carousel
+            </span>
+          )}
           {item.scheduled_at && (
             <span title={absoluteTime(item.scheduled_at)}>
               {item.status === "posted" || item.status === "late"
@@ -260,6 +281,18 @@ function ModalHeader({
           )}
         </div>
       </div>
+
+      {editable && item.carousel_id && (
+        <button
+          className="fp-btn-ghost"
+          onClick={() => void onUngroup()}
+          disabled={busy}
+          title="Split back into separate posts. Their scheduled times stay as they are."
+          style={{ padding: "7px 12px", fontSize: 13 }}
+        >
+          Ungroup
+        </button>
+      )}
 
       {editable && (
         <>

@@ -95,6 +95,8 @@ class PostOut(BaseModel):
     ig_crop_ratio: str | None = None
     ig_focal_x: float | None = None
     ig_focal_y: float | None = None
+    carousel_id: str | None = None
+    carousel_position: int | None = None
     include_exif: bool = False
     created_at: datetime
 

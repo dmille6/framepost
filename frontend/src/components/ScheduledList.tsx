@@ -18,9 +18,22 @@ export default function ScheduledList({ items, onPick }: Props) {
     );
   }
 
+  // A carousel is one post, so it gets one row. Members are folded away and the lead
+  // carries the count — listing ten frames of one Instagram post as ten queue entries
+  // would misrepresent what is actually going out.
+  const frameCount = new Map<string, number>();
+  for (const item of items) {
+    if (item.carousel_id) {
+      frameCount.set(item.carousel_id, (frameCount.get(item.carousel_id) ?? 0) + 1);
+    }
+  }
+  const visible = items.filter(
+    (i) => !i.carousel_id || (i.carousel_position ?? 0) === 0,
+  );
+
   // Group by local-date for visual breaks.
   const groups = new Map<string, ScheduledItem[]>();
-  for (const item of items) {
+  for (const item of visible) {
     if (!item.scheduled_at) continue;
     const local = new Date(item.scheduled_at + "Z");
     const key = local.toDateString();
@@ -49,7 +62,12 @@ export default function ScheduledList({ items, onPick }: Props) {
             </span>
           </div>
           {group.map((item) => (
-            <Row key={item.id} item={item} onClick={() => onPick(item)} />
+            <Row
+              key={item.id}
+              item={item}
+              frames={item.carousel_id ? frameCount.get(item.carousel_id) ?? 1 : 0}
+              onClick={() => onPick(item)}
+            />
           ))}
         </div>
       ))}
@@ -69,7 +87,16 @@ function relativeDayLabel(d: Date): string {
   return `in ${diff} days`;
 }
 
-function Row({ item, onClick }: { item: ScheduledItem; onClick: () => void }) {
+function Row({
+  item,
+  frames,
+  onClick,
+}: {
+  item: ScheduledItem;
+  /** How many photos this row stands for. 0 = an ordinary single-photo post. */
+  frames: number;
+  onClick: () => void;
+}) {
   const time = item.scheduled_at
     ? new Date(item.scheduled_at + "Z").toLocaleTimeString(undefined, {
         hour: "numeric",
@@ -119,6 +146,18 @@ function Row({ item, onClick }: { item: ScheduledItem; onClick: () => void }) {
           }}
         >
           {item.title || item.original_filename || "(untitled)"}
+          {frames > 1 && (
+            <span
+              title={`Carousel — ${frames} photos publish as one Instagram post`}
+              style={{
+                marginLeft: 8, fontSize: 10.5, fontWeight: 500, padding: "1px 6px",
+                borderRadius: 999, verticalAlign: "middle",
+                color: "var(--teal)", border: "0.5px solid var(--teal)",
+              }}
+            >
+              ⧉ {frames}
+            </span>
+          )}
         </div>
         {item.description && (
           <div

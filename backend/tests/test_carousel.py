@@ -338,3 +338,77 @@ def test_sync_leaves_ordinary_posts_alone(db):
     _sync_carousel_members(db)
     db.commit()
     assert loner.scheduled_at == datetime(2026, 11, 2, 12, 0)
+
+
+# --- the API handlers ---------------------------------------------------------------
+# Called as plain functions: this repo has no TestClient/CSRF harness, and the behaviour
+# worth pinning here is the handler logic, not FastAPI's routing.
+
+class _User:
+    username = "tester"
+
+
+def test_dry_run_reports_problems_without_changing_anything(db):
+    from routes.carousels import CarouselCreate, create_carousel
+
+    posts = _set(db, 2)
+    wide = _post(db, w=4000, h=1000, title="pano")
+    db.commit()
+    ids = [p.id for p in posts] + [wide.id]
+
+    out = create_carousel(
+        CarouselCreate(post_ids=ids, lead_id=posts[0].id, dry_run=True), db, _User()
+    )
+    assert out.errors and out.carousel_id is None
+    for p in posts:
+        db.refresh(p)
+        assert not carousel.is_in_carousel(p)
+
+
+def test_create_keeps_the_order_it_was_given(db):
+    """The dialog's arrangement is the carousel's order — the first id is the cover."""
+    from routes.carousels import CarouselCreate, create_carousel
+
+    posts = _set(db, 3)
+    wanted = [posts[2].id, posts[0].id, posts[1].id]
+    out = create_carousel(
+        CarouselCreate(post_ids=wanted, lead_id=wanted[0]), db, _User()
+    )
+    assert out.errors == []
+    assert [f.post_id for f in out.frames] == wanted
+    assert [f.position for f in out.frames] == [0, 1, 2]
+
+
+def test_create_refuses_when_a_selected_photo_is_gone(db):
+    from routes.carousels import CarouselCreate, create_carousel
+
+    posts = _set(db, 2)
+    out = create_carousel(
+        CarouselCreate(post_ids=[posts[0].id, posts[1].id, "deadbeef"], lead_id=posts[0].id),
+        db, _User(),
+    )
+    assert out.carousel_id is None
+    assert any("no longer exist" in e for e in out.errors)
+
+
+def test_reorder_and_ungroup_round_trip(db):
+    from routes.carousels import (
+        CarouselCreate, CarouselReorder, create_carousel, reorder_carousel,
+        ungroup_carousel,
+    )
+
+    posts = _set(db, 3)
+    made = create_carousel(
+        CarouselCreate(post_ids=[p.id for p in posts], lead_id=posts[0].id), db, _User()
+    )
+    cid = made.carousel_id
+    assert cid
+
+    flipped = [posts[1].id, posts[2].id, posts[0].id]
+    out = reorder_carousel(cid, CarouselReorder(ordered_ids=flipped), db, _User())
+    assert [f.post_id for f in out.frames] == flipped
+
+    assert ungroup_carousel(cid, db, _User())["freed"] == 3
+    for p in posts:
+        db.refresh(p)
+        assert not carousel.is_in_carousel(p)
