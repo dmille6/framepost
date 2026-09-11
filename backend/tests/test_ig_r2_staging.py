@@ -221,3 +221,51 @@ def test_the_rendered_crop_actually_comes_out_at_the_composed_ratio(db, tmp_path
                              fit="crop", offset=None)
     with Image.open(io.BytesIO(next(iter(r2_stub.values())))) as im:
         assert abs((im.width / im.height) - 0.75) < 0.01, f"got {im.width}x{im.height}"
+
+
+
+def test_a_single_landscape_post_is_not_cropped_by_the_publish_path(db, tmp_path, r2_stub, monkeypatch):
+    """Covers the call site, not just the decision.
+
+    target_ratio_key was tested in isolation and the carousel caller was fixed, but the
+    single-photo caller went on passing ratio_key — computing the right answer and
+    throwing it away, so every in-range photo was force-cropped to the portrait floor.
+    A unit test on the function could not catch that; only the wiring shows it.
+
+    Note the staged object is deleted on a successful publish, so the bytes are captured
+    as they go up rather than read out of the store afterwards.
+    """
+    import io
+    import uuid as _uuid
+    from datetime import datetime
+
+    from models import PlatformCredential, Post
+    from services import r2, scheduler
+
+    src = tmp_path / "landscape.jpg"
+    Image.new("RGB", (2048, 1365), (90, 20, 60)).save(src, "JPEG")
+    post = Post(id=_uuid.uuid4().hex, status="posted", width=2048, height=1365,
+                original_path=str(src), flickr_photo_id="1")   # 1.50, in range, no crop
+    cred = PlatformCredential(id=_uuid.uuid4().hex, platform="instagram", access_token="t")
+    db.add_all([post, cred])
+    db.commit()
+
+    uploaded: list[bytes] = []
+    real_put = r2.put
+    monkeypatch.setattr(r2, "put", lambda k, body, **kw: (uploaded.append(body),
+                                                          real_put(k, body, **kw))[1])
+    monkeypatch.setattr(scheduler.instagram, "post_photo",
+                        lambda **kw: {"remote_id": "1", "url": "https://instagram.com/p/x/",
+                                      "collaborators": [], "collaborators_rejected": []})
+    monkeypatch.setattr(scheduler.flickr, "get_display_image_url",
+                        lambda db, pid, **kw: "https://flickr/x.jpg")
+
+    scheduler.fanout_to_platforms(db, post, fired_at=datetime.now(), targets=["instagram"])
+    db.commit()
+
+    assert uploaded, "nothing was staged — the publish path never reached R2"
+    with Image.open(io.BytesIO(uploaded[-1])) as im:
+        ratio = im.width / im.height
+    assert abs(ratio - 1.5) < 0.01, (
+        f"a 3:2 landscape with no crop rect was published at {ratio:.2f} "
+        f"({im.width}x{im.height}) — the publish path ignored target_ratio_key")

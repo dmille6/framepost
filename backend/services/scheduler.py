@@ -929,7 +929,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         if wanted != ig_variant.NATIVE_RATIO_KEY or r2.configured():
             staging_id, image_url = ig_variant.ensure_staged(
                 db, post, pp0, platform_id=cred.id,
-                ratio_key=ratio_key, fit=fit, offset=post.ig_crop_offset,
+                ratio_key=wanted, fit=fit, offset=post.ig_crop_offset,
             )
         else:
             image_url = flickr.get_display_image_url(db, post.flickr_photo_id)
