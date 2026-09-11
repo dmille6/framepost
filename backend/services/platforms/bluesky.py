@@ -38,6 +38,7 @@ log = logging.getLogger("framepost.bluesky")
 
 PLATFORM = "bluesky"
 DEFAULT_PDS = "https://bsky.social"
+PUBLIC_APPVIEW = "https://public.api.bsky.app"
 MAX_BLOB_BYTES = 976_000  # ~1MB Bluesky cap; leave headroom for atproto envelope
 MAX_TEXT_GRAPHEMES = 300
 # atproto's embed.images ceiling. A carousel bigger than this is threaded rather than
@@ -328,6 +329,40 @@ def _detect_facets(text: str) -> list[dict]:
     return facets
 
 
+def _sync_handle(db: Session, row: PlatformCredential, session: "_Session") -> str:
+    """Return the live handle, persisting it when it has drifted from what we stored."""
+    live = _current_handle(session.did or "", session.handle or row.account_name or "")
+    if live and live != row.account_name:
+        log.info("bluesky: handle changed %r -> %r — updating stored account name",
+                 row.account_name, live)
+        row.account_name = live
+        db.commit()
+    return live
+
+
+def _current_handle(did: str, fallback: str) -> str:
+    """The account's handle right now, resolved from its DID.
+
+    Handles are mutable on Bluesky; DIDs are not. The stored account_name is whatever the
+    handle was at connect time, and _load_session rebuilds the session from it, so a
+    rename left every permalink we recorded pointing at an account that no longer exists
+    — silently, because nothing here reads its own links back. This is an unauthenticated
+    lookup against the public appview; on any failure we keep the stored name, which is
+    no worse than before.
+    """
+    if not did:
+        return fallback
+    try:
+        with http_client.client(timeout=15) as c:
+            r = c.get(f"{PUBLIC_APPVIEW}/xrpc/app.bsky.actor.getProfile", params={"actor": did})
+        if r.status_code == 200:
+            return r.json().get("handle") or fallback
+        log.info("bluesky: handle lookup for %s returned HTTP %s", did, r.status_code)
+    except Exception as e:  # noqa: BLE001
+        log.info("bluesky: handle lookup failed (%s) — keeping %s", type(e).__name__, fallback)
+    return fallback
+
+
 def _public_post_url(handle: str, at_uri: str) -> str:
     """Convert an at:// URI to a public bsky.app permalink."""
     # at://did:plc:.../app.bsky.feed.post/3krx...  →  https://bsky.app/profile/{handle}/post/{rkey}
@@ -434,7 +469,7 @@ def post_photos(
     return {
         "at_uri": at_uri,
         "cid": body.get("cid"),
-        "url": _public_post_url(session.handle, at_uri),
+        "url": _public_post_url(_sync_handle(db, row, session), at_uri),
     }
 
 
