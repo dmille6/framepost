@@ -168,8 +168,28 @@ export default function DraftCard({
             .filter(Boolean)
             .join(" · ")}
         </div>
-        <div style={{ marginTop: 6 }}>
+        <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center" }}>
           <span className={`fp-pill fp-pill-${post.status}`}>{post.status}</span>
+          {/* Carousel membership, with the slide number — the cover is the one that
+              matters, since it sets the ratio and owns the Instagram post. */}
+          {post.carousel_id && (
+            <span
+              title={
+                (post.carousel_position ?? 0) === 0
+                  ? "Cover of a carousel — publishes as one Instagram post"
+                  : "Part of a carousel — publishes with its cover as one Instagram post"
+              }
+              style={{
+                fontSize: 10.5, fontWeight: 500, padding: "1px 6px", borderRadius: 999,
+                whiteSpace: "nowrap",
+                color: "var(--teal)", border: "0.5px solid var(--teal)",
+              }}
+            >
+              ⧉ {(post.carousel_position ?? 0) === 0
+                ? "cover"
+                : (post.carousel_position ?? 0) + 1}
+            </span>
+          )}
         </div>
       </div>
     </button>
