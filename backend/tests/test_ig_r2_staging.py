@@ -174,3 +174,50 @@ def test_a_published_carousel_leaves_nothing_in_the_bucket(db, tmp_path, r2_stub
     for p in posts:
         pp = db.get(PostPlatform, (p.id, cred.id))
         assert pp is None or pp.staging_remote_id is None
+
+
+# --- which ratio gets rendered -------------------------------------------------------
+
+def _rect(post, x=0.1, y=0.05, w=0.6, h=0.8):
+    post.ig_crop_x, post.ig_crop_y, post.ig_crop_w, post.ig_crop_h = x, y, w, h
+    return post
+
+
+def test_an_explicit_crop_is_rendered_at_the_ratio_it_was_composed_against(db, tmp_path):
+    """The studio draws its window against ratio_key, so the stored rect IS a ratio_key
+    rect. Rendering at the photo's own ratio expands it into a different shape — that
+    shipped on 2026-09-11 and cropped six of eight carousel frames wrong."""
+    post = _rect(_post(db, tmp_path, w=2048, h=1365))   # 1.50, comfortably in range
+    assert ig_variant.needs_transform(1.5, 0.75) is False
+    assert ig_variant.target_ratio_key(post, 1.5, 0.75, "3:4") == "3:4"
+
+
+def test_a_photo_nobody_cropped_keeps_its_own_shape(db, tmp_path):
+    """Forcing ratio_key here would cut a portrait out of a landscape the user was happy
+    with — which is what happened to the single post published that day."""
+    post = _post(db, tmp_path, w=4096, h=2731)          # 1.50, no rect
+    assert ig_variant.target_ratio_key(post, 1.5, 0.75, "3:4") == ig_variant.NATIVE_RATIO_KEY
+
+
+def test_an_out_of_range_photo_is_reshaped_with_or_without_a_crop(db, tmp_path):
+    post = _post(db, tmp_path, w=1000, h=2000)          # 0.50, below the floor
+    assert ig_variant.target_ratio_key(post, 0.5, 0.75, "3:4") == "3:4"
+
+
+def test_asking_to_pad_implies_a_target_ratio(db, tmp_path):
+    """Letterboxing is meaningless without something to letterbox into."""
+    post = _post(db, tmp_path, w=2048, h=1365)
+    post.ig_fit = "pad_blur"
+    assert ig_variant.target_ratio_key(post, 1.5, 0.75, "3:4") == "3:4"
+
+
+def test_the_rendered_crop_actually_comes_out_at_the_composed_ratio(db, tmp_path, r2_stub):
+    """End to end: a 3:4 rect on an in-range landscape produces a 3:4 JPEG."""
+    import io
+
+    post, cred = _rect(_post(db, tmp_path, w=2048, h=1365)), _cred(db)
+    wanted = ig_variant.target_ratio_key(post, 1.5, 0.75, "3:4")
+    ig_variant.ensure_staged(db, post, None, platform_id=cred.id, ratio_key=wanted,
+                             fit="crop", offset=None)
+    with Image.open(io.BytesIO(next(iter(r2_stub.values())))) as im:
+        assert abs((im.width / im.height) - 0.75) < 0.01, f"got {im.width}x{im.height}"

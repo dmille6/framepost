@@ -112,6 +112,32 @@ def is_aspect_error(err: Exception) -> bool:
     return "aspect ratio" in str(err).lower()
 
 
+def target_ratio_key(post: Post, ratio: float | None, floor: float, ratio_key: str) -> str:
+    """Which ratio Instagram's copy of this photo should be rendered at.
+
+    Three reasons to reshape, and only the first is about the photo itself:
+
+      out of range   Meta would reject it as-is.
+      explicit crop  the studio composes its window against ratio_key, so the stored
+                     rect *is* a ratio_key rect. Rendering at the photo's own ratio
+                     instead expands that window into a different shape — which is
+                     exactly what shipped on 2026-09-11 and cropped six of eight
+                     carousel frames wrong.
+      pad fit        asking to letterbox only means anything against a target ratio.
+
+    Everything else is re-hosted at its own shape. Forcing ratio_key on a photo nobody
+    asked to crop would take a landscape frame the user was happy with and cut a
+    portrait out of it.
+    """
+    if needs_transform(ratio, floor):
+        return ratio_key
+    if rect_for(post) is not None:
+        return ratio_key
+    if (post.ig_fit or "crop") != "crop":
+        return ratio_key
+    return NATIVE_RATIO_KEY
+
+
 def needs_transform(ratio: float | None, floor: float) -> bool:
     """Unknown dims → False (let Meta judge the untouched rendition)."""
     if not ratio:
