@@ -22,7 +22,7 @@ from database import get_session
 from models import AppConfig, EngagementSnapshot, Post, User
 from routes.auth import current_user
 from routes.posts import PostOut
-from services import events
+from services import carousel as carousel_svc, events
 
 
 def _user_timezone(db: Session) -> ZoneInfo:
@@ -525,6 +525,11 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
             posts.append((pid, p, f"post is {p.status}, only pending posts can be scheduled"))
         elif p.scheduled_at is not None:
             posts.append((pid, p, "already scheduled"))
+        elif carousel_svc.is_member(p):
+            # _stratified exists to spread a show's photos apart, which is exactly wrong
+            # for a carousel — it would scatter the frames of one post across weeks.
+            # Members take the cover's slot in _sync_carousel_members below.
+            posts.append((pid, p, "part of a carousel — takes the cover photo's slot"))
         else:
             posts.append((pid, p, None))
 
@@ -654,6 +659,7 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
                     "via": "smart_fill_random_scatter",
                 },
             )
+        _sync_carousel_members(db)
         db.commit()
 
     return SmartFillResponse(
@@ -662,6 +668,26 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
         skipped=skipped_n,
         confirmed=body.confirm and scheduled_n > 0,
     )
+
+
+
+def _sync_carousel_members(db: Session) -> int:
+    """Pull every carousel member onto its lead's scheduled_at. Returns how many moved.
+
+    A carousel publishes as one post, so its frames firing on three different days would
+    be a genuinely confusing bug rather than a cosmetic one. Cheap to run over the whole
+    table and it means no scheduling path has to remember this on its own.
+    """
+    moved = 0
+    leads = db.execute(
+        select(Post).where(Post.carousel_id.is_not(None), Post.carousel_position == 0)
+    ).scalars().all()
+    for lead in leads:
+        for m in carousel_svc.members(db, lead.carousel_id):
+            if m.id != lead.id and m.scheduled_at != lead.scheduled_at:
+                m.scheduled_at = lead.scheduled_at
+                moved += 1
+    return moved
 
 
 @router.post("/smart-fill", response_model=SmartFillResponse)
@@ -707,6 +733,11 @@ def smart_fill(
             posts.append((pid, p, f"post is {p.status}, only pending posts can be scheduled"))
         elif p.scheduled_at is not None:
             posts.append((pid, p, "already scheduled"))
+        elif carousel_svc.is_member(p):
+            # _stratified exists to spread a show's photos apart, which is exactly wrong
+            # for a carousel — it would scatter the frames of one post across weeks.
+            # Members take the cover's slot in _sync_carousel_members below.
+            posts.append((pid, p, "part of a carousel — takes the cover photo's slot"))
         else:
             posts.append((pid, p, None))
 
@@ -779,6 +810,7 @@ def smart_fill(
                     "via": "smart_fill",
                 },
             )
+        _sync_carousel_members(db)
         db.commit()
 
     return SmartFillResponse(

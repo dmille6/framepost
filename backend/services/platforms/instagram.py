@@ -39,7 +39,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple, Sequence
 
 import httpx
 from sqlalchemy import select
@@ -66,6 +66,15 @@ REFRESH_LEEWAY = timedelta(days=7)
 
 # Meta accepts at most 3 co-authors per media.
 MAX_COLLABORATORS = 3
+# Meta's ceiling on carousel children. A carousel takes its aspect ratio from the FIRST
+# child and crops the rest to match, which is why grouping validates ratio up front.
+MAX_CAROUSEL = 10
+
+
+class CarouselImage(NamedTuple):
+    """One slide. alt is per-image; the caption belongs to the carousel, not the slide."""
+    url: str
+    alt: str | None = None
 
 # Instagram caps: caption 2200 chars, alt text 1000.
 MAX_CAPTION = 2200
@@ -409,9 +418,99 @@ def post_photo(
     )
     if rejected:
         log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
-    # Step 2: wait for the container to be ready. Image containers usually come back
-    # FINISHED on the first check.
-    for attempt in range(STATUS_POLL_TRIES):
+
+    _await_container(container_id, token, describing=f"url={image_url}")
+    media_id, permalink = _publish_container(ig_user_id, container_id, token)
+
+    return {
+        "remote_id": str(media_id),
+        "url": permalink,
+        "collaborators": used_collabs,
+        "collaborators_rejected": rejected,
+    }
+
+
+def post_carousel(
+    db: Session,
+    *,
+    images: Sequence[CarouselImage],
+    caption: str,
+    collaborators: list[str] | None = None,
+) -> dict:
+    """Publish 2..MAX_CAROUSEL images as one carousel. Returns the same shape as
+    post_photo.
+
+    Three steps rather than two: a container per image (is_carousel_item, no caption of
+    its own), then a parent container listing them, then publish the parent. The caption
+    and the co-author invitations belong to the parent — a child carrying either is a
+    silent no-op, which is the kind of bug that only shows up on someone else's profile.
+
+    Children are created sequentially. Meta's fetcher races CDN propagation of freshly
+    staged images (see _create_container), so firing ten at once mostly buys ten
+    simultaneous chances to lose that race.
+    """
+    if not 2 <= len(images) <= MAX_CAROUSEL:
+        raise InstagramError(
+            f"a carousel needs 2..{MAX_CAROUSEL} images, got {len(images)}",
+            permanent=True,
+        )
+
+    row = _load_credential(db)
+    _maybe_refresh(db, row)
+    token = decrypt_token(row.access_token)
+    ig_user_id = json.loads(row.extra_json or "{}").get("ig_user_id")
+    if not ig_user_id:
+        raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
+
+    child_ids: list[str] = []
+    for i, img in enumerate(images):
+        data = {
+            "image_url": img.url,
+            "is_carousel_item": "true",
+            "access_token": token,
+        }
+        alt = (img.alt or "").strip()
+        if alt:
+            data["alt_text"] = alt[:MAX_ALT_TEXT]
+        # No collaborators on children — the empty list still gets the in-line retry for
+        # Meta's fetcher, which is the part that matters here.
+        child_id, _, _ = _create_container(ig_user_id, data, [])
+        _await_container(child_id, token, describing=f"child {i + 1}/{len(images)}, url={img.url}")
+        child_ids.append(child_id)
+
+    parent_data = {
+        "media_type": "CAROUSEL",
+        "children": ",".join(child_ids),
+        "caption": (caption or "")[:MAX_CAPTION],
+        "access_token": token,
+    }
+    wanted_collabs = [
+        h.lstrip("@").strip()
+        for h in (collaborators or [])
+        if h and h.strip()
+    ][:MAX_COLLABORATORS]
+    parent_id, used_collabs, rejected = _create_container(
+        ig_user_id, parent_data, wanted_collabs
+    )
+    if rejected:
+        log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
+
+    _await_container(parent_id, token, describing=f"carousel of {len(child_ids)}")
+    media_id, permalink = _publish_container(ig_user_id, parent_id, token)
+
+    return {
+        "remote_id": str(media_id),
+        "url": permalink,
+        "collaborators": used_collabs,
+        "collaborators_rejected": rejected,
+    }
+
+
+def _await_container(container_id: str, token: str, *, describing: str) -> None:
+    """Block until Meta says the container is ready. Image containers usually come back
+    FINISHED on the first check."""
+    status_code = None
+    for _attempt in range(STATUS_POLL_TRIES):
         with _client() as c:
             r = c.get(f"/{container_id}", params={
                 "fields": "status_code",
@@ -421,21 +520,22 @@ def post_photo(
             _raise_api_error(r, "container status check")
         status_code = r.json().get("status_code")
         if status_code == "FINISHED":
-            break
+            return
         if status_code in ("ERROR", "EXPIRED"):
             raise InstagramError(
                 f"media container ended in {status_code} — Meta couldn't ingest the image "
-                f"(url={image_url})",
+                f"({describing})",
                 permanent=True,
             )
         time.sleep(STATUS_POLL_INTERVAL)
-    else:
-        raise InstagramError(
-            f"media container still {status_code!r} after "
-            f"{STATUS_POLL_TRIES * STATUS_POLL_INTERVAL:.0f}s — will retry"
-        )
+    raise InstagramError(
+        f"media container still {status_code!r} after "
+        f"{STATUS_POLL_TRIES * STATUS_POLL_INTERVAL:.0f}s ({describing}) — will retry"
+    )
 
-    # Step 3: publish.
+
+def _publish_container(ig_user_id: str, container_id: str, token: str) -> tuple[str, str | None]:
+    """Publish a finished container. Returns (media_id, permalink)."""
     with _client() as c:
         r = c.post(f"/{ig_user_id}/media_publish", data={
             "creation_id": container_id,
@@ -456,13 +556,7 @@ def post_photo(
             permalink = r.json().get("permalink")
     except Exception:
         log.warning("instagram permalink lookup failed for media %s", media_id)
-
-    return {
-        "remote_id": str(media_id),
-        "url": permalink,
-        "collaborators": used_collabs,
-        "collaborators_rejected": rejected,
-    }
+    return str(media_id), permalink
 
 
 def publishing_quota(db: Session) -> dict:

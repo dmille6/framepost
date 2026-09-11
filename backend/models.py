@@ -92,6 +92,11 @@ class Post(Base):
     # Null = detect a face, fall back to centre.
     ig_focal_x = Column(Float)
     ig_focal_y = Column(Float)
+    # Carousel membership (0023). Shared id across members; position 0 is the lead, which
+    # owns the Instagram post for the whole group. Null on ordinary posts. Members keep
+    # publishing to Flickr individually — only the carousel platforms collapse.
+    carousel_id = Column(String, index=True)
+    carousel_position = Column(Integer)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 

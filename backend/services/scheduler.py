@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
+from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -655,6 +655,113 @@ def _collabs_enabled(db) -> bool:
     return (row.value if row and row.value else "true").lower() == "true"
 
 
+def _mark_carousel_member(db, post: Post, cred: PlatformCredential) -> PostPlatform:
+    """Park a member's platform row so it reads as handled, not pending."""
+    pp = db.get(PostPlatform, (post.id, cred.id))
+    if not pp:
+        pp = PostPlatform(post_id=post.id, platform_id=cred.id)
+        db.add(pp)
+    pp.status = carousel_svc.MEMBER_STATUS
+    pp.error_message = None
+    pp.next_retry_at = None
+    return pp
+
+
+def _ig_collaborators(db, post: Post) -> list[str]:
+    """Performers tagged on the post, as Instagram handles.
+
+    An accepted collab puts the photo on the performer's profile and in their followers'
+    feeds — the cheapest reach available to a photographer who shoots people with their
+    own audiences. Opt out per install via app_config.
+    """
+    if not _collabs_enabled(db):
+        return []
+    return [
+        p.instagram_handle
+        for p in performers_svc.get_post_performers(db, post.id)
+        if p.instagram_handle
+    ][:instagram.MAX_COLLABORATORS]
+
+
+def _ig_image_url(db, cred: PlatformCredential, frame: Post, *, force_restage: bool = False) -> str:
+    """The public URL Meta should fetch for one frame, staging a cropped variant when the
+    source ratio is out of range.
+
+    Meta ingests from a URL rather than an upload, so the frame has to be on Flickr
+    first — that's the canonical public copy.
+    """
+    if not frame.flickr_photo_id:
+        raise instagram.InstagramError(
+            f"frame {frame.id[:8]} isn't on Flickr yet — Meta fetches the image from a "
+            f"public URL, so the carousel can't be built until it is.",
+        )
+    floor, ratio_key, _tested = ig_variant.supported_floor(db)
+    ratio = (frame.width / frame.height) if frame.width and frame.height else None
+    if not ig_variant.needs_transform(ratio, floor):
+        return flickr.get_display_image_url(db, frame.flickr_photo_id)
+    pp = db.get(PostPlatform, (frame.id, cred.id))
+    if not pp:
+        pp = _mark_carousel_member(db, frame, cred)
+    _staging_id, url = ig_variant.ensure_staged(
+        db, frame, pp, platform_id=cred.id, ratio_key=ratio_key,
+        fit=frame.ig_fit or "crop", offset=frame.ig_crop_offset, force=force_restage,
+    )
+    return url
+
+
+def _post_instagram_carousel(
+    db, cred: PlatformCredential, post: Post, *, caption: str
+) -> tuple[str, str | None]:
+    """Publish the lead's whole carousel. Returns (remote_id, remote_url).
+
+    Staging ids are committed before the publish attempt, same invariant as the single
+    path: a retry after a transient failure reuses the uploads instead of re-staging ten
+    photos, and the daily orphan sweep can tell in-flight variants from abandoned ones.
+    """
+    frames = carousel_svc.members(db, post.carousel_id)
+    if len(frames) < carousel_svc.MIN_MEMBERS:
+        raise instagram.InstagramError(
+            f"carousel {post.carousel_id[:8]} has {len(frames)} frame(s) — it was probably "
+            f"ungrouped or deleted underneath the schedule.",
+            permanent=True,
+        )
+
+    def _build(force: bool) -> list[instagram.CarouselImage]:
+        out = [
+            instagram.CarouselImage(
+                url=_ig_image_url(db, cred, f, force_restage=force),
+                alt=(f.alt_text or "").strip() or None,
+            )
+            for f in frames
+        ]
+        db.commit()
+        return out
+
+    images = _build(False)
+    collabs = _ig_collaborators(db, post)
+    try:
+        result = instagram.post_carousel(
+            db=db, images=images, caption=caption, collaborators=collabs
+        )
+    except instagram.InstagramError as e:
+        # Same 3:4 probe as the single path. A carousel costs one wasted upload per
+        # frame exactly once per install, which is the price of finding out.
+        _floor, ratio_key, _tested = ig_variant.supported_floor(db)
+        if ratio_key == "3:4" and ig_variant.is_aspect_error(e):
+            log.info("carousel %s: Meta rejected 3:4 — recording 4:5 floor and re-staging",
+                     post.carousel_id[:8])
+            ig_variant.record_floor(db, "4:5")
+            result = instagram.post_carousel(
+                db=db, images=_build(True), caption=caption, collaborators=collabs
+            )
+        else:
+            raise
+
+    log.info("carousel %s published as %s (%d frames)",
+             post.carousel_id[:8], result["remote_id"], len(frames))
+    return result["remote_id"], result["url"]
+
+
 def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: datetime) -> None:
     """Attempt one platform fanout; persist outcome to post_platforms + activity timeline."""
     src = Path(post.original_path) if post.original_path else None
@@ -703,6 +810,8 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
             alt_text=alt,
         )
         remote_id, remote_url = result["remote_id"], result["url"]
+    elif cred.platform == "instagram" and carousel_svc.is_lead(post):
+        remote_id, remote_url = _post_instagram_carousel(db, cred, post, caption=text)
     elif cred.platform == "instagram":
         # Meta ingests from a public URL rather than an upload, so we hand it the photo's
         # Flickr rendition — the canonical public copy, already up by the time fanout runs.
@@ -891,6 +1000,16 @@ def fanout_to_platforms(
                 "post %s: %s already posted, skipping fanout",
                 post.id[:8], cred.platform,
             )
+            continue
+
+        # A carousel publishes once, from its lead. Members still fan out to Flickr (one
+        # photo per photo, which is the point of the archive) but their row here exists
+        # only to hold the staging id the lead will publish — it must never read as
+        # pending, or the health banner spends forever waiting on a post that will never
+        # be made.
+        if cred.platform in carousel_svc.CAROUSEL_PLATFORMS and carousel_svc.is_member(post):
+            _mark_carousel_member(db, post, cred)
+            db.commit()
             continue
 
         try:
