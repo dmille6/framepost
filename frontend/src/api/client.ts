@@ -130,6 +130,9 @@ export type Post = {
   // Photographer-set crop anchor (0022); null = fall back to face detection.
   ig_focal_x: number | null;
   ig_focal_y: number | null;
+  // Carousel membership (0023); position 0 is the cover. Null on ordinary posts.
+  carousel_id: string | null;
+  carousel_position: number | null;
   // Opt in to appending the camera/lens/exposure line to the description (0020).
   // shot_info is read-only: the server formats the exact line include_exif appends.
   include_exif: boolean;
@@ -297,6 +300,8 @@ export type CarouselFrame = {
   position: number;
   title: string | null;
   original_filename: string | null;
+  width: number | null;
+  height: number | null;
 };
 
 export type CarouselResult = {
@@ -315,6 +320,9 @@ export const createCarousel = (
     method: "POST",
     body: JSON.stringify({ post_ids: postIds, lead_id: leadId, dry_run: !!opts.dryRun }),
   });
+
+export const fetchCarousel = (carouselId: string) =>
+  apiFetch<CarouselResult>(`/api/carousels/${carouselId}`);
 
 export const reorderCarousel = (carouselId: string, orderedIds: string[]) =>
   apiFetch<CarouselResult>(`/api/carousels/${carouselId}`, {

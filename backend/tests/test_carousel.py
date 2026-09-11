@@ -412,3 +412,29 @@ def test_reorder_and_ungroup_round_trip(db):
     for p in posts:
         db.refresh(p)
         assert not carousel.is_in_carousel(p)
+
+
+def test_reorder_renumbers_everyone_even_from_a_partial_list(db):
+    """The dialog can be opened on a subset of a carousel. Renumbering only the named
+    frames would leave the rest on stale positions, colliding with the new ones and
+    making the published order depend on how SQLite broke the tie."""
+    posts = _set(db, 5)
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+
+    # Caller names only three of the five.
+    carousel.reorder(db, cid, [posts[3].id, posts[1].id, posts[0].id])
+    ordered = carousel.members(db, cid)
+
+    positions = [p.carousel_position for p in ordered]
+    assert positions == [0, 1, 2, 3, 4]          # contiguous, no duplicates
+    assert [p.id for p in ordered][:3] == [posts[3].id, posts[1].id, posts[0].id]
+    # The unnamed two keep their relative order, at the end.
+    assert [p.id for p in ordered][3:] == [posts[2].id, posts[4].id]
+
+
+def test_reorder_with_every_frame_named_is_exactly_that_order(db):
+    posts = _set(db, 4)
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+    wanted = [posts[2].id, posts[3].id, posts[0].id, posts[1].id]
+    carousel.reorder(db, cid, wanted)
+    assert [p.id for p in carousel.members(db, cid)] == wanted

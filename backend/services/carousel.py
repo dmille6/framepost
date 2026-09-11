@@ -168,11 +168,19 @@ def group(db: Session, posts: list[Post], *, lead_id: str) -> str:
 
 
 def reorder(db: Session, carousel_id: str, ordered_ids: list[str]) -> None:
-    """Set positions from an explicit order. First id becomes the lead."""
-    by_id = {p.id: p for p in members(db, carousel_id)}
-    for i, pid in enumerate(ordered_ids):
-        if pid in by_id:
-            by_id[pid].carousel_position = i
+    """Set positions from an explicit order. First id becomes the lead.
+
+    Renumbers every member 0..n-1, not just the ones named. A partial list — a caller
+    holding a subset of the carousel — would otherwise leave the unnamed frames on stale
+    positions, colliding with the new ones and making the order depend on how SQLite
+    happened to break the tie. Unnamed frames keep their relative order, at the end.
+    """
+    current = members(db, carousel_id)
+    by_id = {p.id: p for p in current}
+    named = [by_id[pid] for pid in ordered_ids if pid in by_id]
+    rest = [p for p in current if p.id not in {n.id for n in named}]
+    for i, p in enumerate(named + rest):
+        p.carousel_position = i
     db.commit()
 
 

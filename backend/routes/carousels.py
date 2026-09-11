@@ -27,6 +27,8 @@ class CarouselFrame(BaseModel):
     position: int
     title: str | None = None
     original_filename: str | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 class CarouselOut(BaseModel):
@@ -54,6 +56,8 @@ def _frames(db: Session, carousel_id: str) -> list[CarouselFrame]:
             position=p.carousel_position or 0,
             title=p.title,
             original_filename=p.original_filename,
+            width=p.width,
+            height=p.height,
         )
         for p in carousel_svc.members(db, carousel_id)
     ]
