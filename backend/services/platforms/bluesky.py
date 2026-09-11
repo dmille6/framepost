@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from services import http_client
 from PIL import Image, ImageOps
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -61,7 +62,7 @@ class _Session:
 
 
 def _client(pds: str = DEFAULT_PDS) -> httpx.Client:
-    return httpx.Client(base_url=pds.rstrip("/"), timeout=30.0)
+    return http_client.client(base_url=pds.rstrip("/"), timeout=30.0)
 
 
 def _create_session(handle: str, app_password: str, pds: str = DEFAULT_PDS) -> _Session:

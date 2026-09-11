@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from services import http_client
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -59,7 +60,7 @@ class PendingApp:
 
 
 def _client(instance_url: str) -> httpx.Client:
-    return httpx.Client(base_url=instance_url.rstrip("/"), timeout=30.0)
+    return http_client.client(base_url=instance_url.rstrip("/"), timeout=30.0)
 
 
 def _normalize_instance(instance_url: str) -> str:

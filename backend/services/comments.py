@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from services import http_client
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -358,7 +359,7 @@ def _sync_pixelfed(db: Session, post_platforms: list[tuple[PostPlatform, Platfor
             access = decrypt_token(cred.access_token)
             base = cred.instance_url.rstrip("/")
             headers = {"Authorization": f"Bearer {access}"}
-            with httpx.Client(timeout=30.0) as c:
+            with http_client.client(timeout=30.0) as c:
                 # Status object — has favourites_count, reblogs_count, replies_count.
                 r1 = c.get(f"{base}/api/v1/statuses/{pp.remote_id}", headers=headers)
                 if r1.status_code >= 400:
@@ -462,7 +463,7 @@ def _sync_instagram(db: Session, post_platforms: list[tuple[PostPlatform, Platfo
         try:
             token = decrypt_token(cred.access_token)
             headers = {"Authorization": f"Bearer {token}"}
-            with httpx.Client(timeout=30.0) as c:
+            with http_client.client(timeout=30.0) as c:
                 r1 = c.get(
                     f"{_IG_GRAPH}/{pp.remote_id}",
                     headers=headers,
@@ -591,7 +592,7 @@ def sync_instagram_account_stats(db: Session) -> dict[str, Any]:
             row = AccountStat(platform="instagram", stat_date=today)
             db.add(row)
 
-        with httpx.Client(timeout=30.0) as c:
+        with http_client.client(timeout=30.0) as c:
             prof = c.get(
                 f"{_IG_GRAPH}/{ig_user_id}", headers=headers,
                 params={"fields": "followers_count,follows_count,media_count"},

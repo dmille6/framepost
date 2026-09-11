@@ -33,6 +33,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+from services import http_client
 
 REQUEST_TOKEN_URL = "https://www.flickr.com/services/oauth/request_token"
 AUTHORIZE_URL = "https://www.flickr.com/services/oauth/authorize"
@@ -331,7 +332,7 @@ def upload_photo(
     headers = {"Authorization": auth_header}
     files = {"photo": (Path(image_path).name, photo_bytes, "image/jpeg")}
     try:
-        with httpx.Client(timeout=300.0) as client:
+        with http_client.client(timeout=300.0) as client:
             response = client.post(UPLOAD_URL, data=data, files=files, headers=headers)
     except Exception as e:
         raise FlickrError(f"upload transport failed: {e}") from e
@@ -373,7 +374,7 @@ def rest_call(db: Session, method: str, **params) -> "ET.Element":
         token_secret=decrypt_token(cred.refresh_token),
     )
     try:
-        with httpx.Client(timeout=60.0) as client:
+        with http_client.client(timeout=60.0) as client:
             response = client.post(REST_URL, data=payload, headers={"Authorization": auth_header})
     except Exception as e:
         raise FlickrError(f"REST transport failed for {method}: {e}") from e

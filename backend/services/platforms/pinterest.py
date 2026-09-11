@@ -30,6 +30,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from services import http_client
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -71,7 +72,7 @@ def _basic_auth_header() -> str:
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(timeout=60.0)
+    return http_client.client(timeout=60.0)
 
 
 def begin_connect(db: Session, *, redirect_uri: str) -> tuple[str, str]:

@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple, Sequence
 
 import httpx
+from services import http_client
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -101,7 +102,7 @@ def aspect_ok(width: int, height: int) -> bool:
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=f"{GRAPH}/{API_VERSION}", timeout=60.0)
+    return http_client.client(base_url=f"{GRAPH}/{API_VERSION}", timeout=60.0)
 
 
 def _error_text(r: httpx.Response) -> str:
@@ -242,7 +243,7 @@ def _refresh(db: Session, row: PlatformCredential) -> None:
     rejects refreshing brand-new tokens, which is why connect() doesn't refresh."""
     token = decrypt_token(row.access_token)
     # Note: refresh_access_token is unversioned (no /vXX.X prefix).
-    with httpx.Client(base_url=GRAPH, timeout=30.0) as c:
+    with http_client.client(base_url=GRAPH, timeout=30.0) as c:
         r = c.get("/refresh_access_token", params={
             "grant_type": "ig_refresh_token",
             "access_token": token,
