@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Ask GPT from the repo root. Runs inside the backend container, which holds the
+# openai SDK and the key; nothing extra is installed on the host.
+cd /opt/framepost || exit 1
+exec docker compose exec -T backend python /app/tools/askgpt.py "$@"
