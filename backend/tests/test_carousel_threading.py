@@ -119,3 +119,52 @@ def test_pixelfed_refuses_more_than_four_images_in_one_status(db):
     with pytest.raises(pixelfed.PixelfedError) as e:
         pixelfed.post_photos(db, frames=_frames(5), text="x")
     assert e.value.permanent
+
+
+# --- the form payload actually has to survive httpx ----------------------------------
+
+def test_pixelfed_status_payload_encodes_repeated_media_ids(db, monkeypatch, tmp_path):
+    """A list of (key, value) tuples looks like a reasonable way to repeat media_ids[],
+    and httpx accepts it at call time and then dies at send time with "expected a
+    bytes-like object, tuple found". Only building the request catches that, so this
+    test does.
+    """
+    import httpx
+    from PIL import Image
+
+    class FakeResp:
+        status_code = 200
+        text = "{}"
+        def __init__(self, payload): self._p = payload
+        def json(self): return self._p
+
+    sent: dict = {}
+
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, path, headers=None, files=None, data=None):
+            if path.endswith("/media"):
+                return FakeResp({"id": f"m{len(sent)}"})
+            sent["data"] = data
+            return FakeResp({"id": "99", "url": "https://pixelfed/99"})
+
+    class FakeRow:
+        access_token = "tok"
+        instance_url = "https://pixelfed.social"
+
+    monkeypatch.setattr(pixelfed, "_load_credential", lambda db: FakeRow())
+    monkeypatch.setattr(pixelfed, "decrypt_token", lambda t: "plain")
+    monkeypatch.setattr(pixelfed, "_client", lambda url: FakeClient())
+
+    frames = []
+    for i in range(3):
+        f = tmp_path / f"{i}.jpg"
+        Image.new("RGB", (10, 10)).save(f, "JPEG")
+        frames.append((f, f"alt {i}"))
+
+    pixelfed.post_photos(db, frames=frames, text="caption")
+
+    # The real check: httpx must be able to encode it, and produce one key per image.
+    body = httpx.Request("POST", "https://x/", data=sent["data"]).read().decode()
+    assert body.count("media_ids%5B%5D=") == 3

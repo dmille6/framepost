@@ -338,14 +338,16 @@ def post_photos(
             )
         media_ids.append(r.json()["id"])
 
-    # Step 2: status post. media_ids[] repeats once per attachment.
-    payload = [
-        ("status", text or ""),
-        ("visibility", visibility),
-        *[("media_ids[]", mid) for mid in media_ids],
-    ]
+    # Step 2: status post. A list value is how httpx repeats a form key, which is what
+    # media_ids[] needs for more than one attachment — a list of (key, value) TUPLES is
+    # not accepted by httpx's form encoder and blows up at send time, not at call time.
+    payload: dict[str, object] = {
+        "status": text or "",
+        "visibility": visibility,
+        "media_ids[]": media_ids,
+    }
     if in_reply_to:
-        payload.append(("in_reply_to_id", in_reply_to))
+        payload["in_reply_to_id"] = in_reply_to
     with _client(instance_url) as c:
         r = c.post("/api/v1/statuses", headers=headers, data=payload)
     if r.status_code >= 400:
