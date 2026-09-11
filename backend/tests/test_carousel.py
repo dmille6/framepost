@@ -438,3 +438,76 @@ def test_reorder_with_every_frame_named_is_exactly_that_order(db):
     wanted = [posts[2].id, posts[3].id, posts[0].id, posts[1].id]
     carousel.reorder(db, cid, wanted)
     assert [p.id for p in carousel.members(db, cid)] == wanted
+
+
+# --- scheduling one frame moves the whole carousel -----------------------------------
+
+def test_scheduling_any_frame_drags_the_whole_carousel(db):
+    """Scheduling the cover on its own leaves the other frames unscheduled, so they never
+    reach Flickr — and the lead's Instagram publish then has no URL to hand Meta."""
+    from datetime import datetime
+    from routes.schedule import _sync_carousel_siblings
+
+    posts = _set(db, 4)
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+    lead = carousel.lead_for(db, cid)
+    lead.scheduled_at = datetime(2026, 12, 1, 20, 0)
+    assert _sync_carousel_siblings(db, lead) == 3
+    db.commit()
+    assert {p.scheduled_at for p in carousel.members(db, cid)} == {lead.scheduled_at}
+
+
+def test_scheduling_a_member_moves_the_carousel_too(db):
+    """Whichever frame you moved is the one you meant — not only the lead."""
+    from datetime import datetime
+    from routes.schedule import _sync_carousel_siblings
+
+    posts = _set(db, 3)
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+    member = carousel.members(db, cid)[2]
+    member.scheduled_at = datetime(2026, 12, 5, 9, 0)
+    _sync_carousel_siblings(db, member)
+    db.commit()
+    assert {p.scheduled_at for p in carousel.members(db, cid)} == {member.scheduled_at}
+
+
+def test_unscheduling_one_frame_unschedules_the_carousel(db):
+    """A half-scheduled carousel fires a lead with missing frames, which is worse than
+    not firing at all."""
+    from datetime import datetime
+    from routes.schedule import _sync_carousel_siblings
+
+    posts = _set(db, 3)
+    for p in posts:
+        p.scheduled_at = datetime(2026, 12, 1, 20, 0)
+    db.commit()
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+    lead = carousel.lead_for(db, cid)
+    lead.scheduled_at = None
+    _sync_carousel_siblings(db, lead)
+    db.commit()
+    assert all(p.scheduled_at is None for p in carousel.members(db, cid))
+
+
+def test_a_carousels_own_frames_are_not_an_hour_conflict(db):
+    """Every frame shares the hour by design — it publishes as one post. Counting them
+    against each other would make a carousel unschedulable, and the old check used
+    scalar_one_or_none so eight siblings raised instead of returning a conflict."""
+    from datetime import datetime
+    from routes.schedule import _slot_taken
+
+    posts = _set(db, 8)
+    when = datetime(2026, 12, 1, 20, 0)
+    for p in posts:
+        p.scheduled_at = when
+    db.commit()
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+    lead = carousel.lead_for(db, cid)
+
+    assert _slot_taken(db, when, exclude_post_id=lead.id, exclude_carousel_id=cid) is None
+    # An unrelated post in the same hour is still a conflict.
+    other = _post(db, title="someone else")
+    other.scheduled_at = when
+    db.commit()
+    hit = _slot_taken(db, when, exclude_post_id=lead.id, exclude_carousel_id=cid)
+    assert hit is not None and hit.id == other.id

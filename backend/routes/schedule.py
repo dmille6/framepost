@@ -101,7 +101,20 @@ def _hour_bounds(when: datetime) -> tuple[datetime, datetime]:
     return start, start + timedelta(hours=1)
 
 
-def _slot_taken(db: Session, when: datetime, exclude_post_id: str | None = None) -> Post | None:
+def _slot_taken(
+    db: Session,
+    when: datetime,
+    exclude_post_id: str | None = None,
+    exclude_carousel_id: str | None = None,
+) -> Post | None:
+    """Another post already occupying this hour, if any.
+
+    A carousel deliberately puts every frame in the same hour — it publishes as one post
+    — so its own members must not count as a conflict with each other.
+
+    Returns the first match rather than demanding exactly one: an hour holding several
+    posts is a state the scatter can reach, and a scheduling attempt shouldn't 500 on it.
+    """
     start, end = _hour_bounds(when)
     q = select(Post).where(
         and_(
@@ -113,7 +126,30 @@ def _slot_taken(db: Session, when: datetime, exclude_post_id: str | None = None)
     )
     if exclude_post_id:
         q = q.where(Post.id != exclude_post_id)
-    return db.execute(q).scalar_one_or_none()
+    if exclude_carousel_id:
+        q = q.where(
+            (Post.carousel_id.is_(None)) | (Post.carousel_id != exclude_carousel_id)
+        )
+    return db.execute(q).scalars().first()
+
+
+def _sync_carousel_siblings(db: Session, post: Post) -> int:
+    """Put every frame of this post's carousel on the same scheduled_at.
+
+    A carousel fires as one post, so a frame left behind on a different time — or on no
+    time at all — never reaches Flickr, and the lead's Instagram publish then fails
+    because Meta fetches each frame from its Flickr URL. Applies to any frame, not just
+    the lead: whichever one you moved is the one you meant.
+    """
+    if not post.carousel_id:
+        return 0
+    moved = 0
+    for m in carousel_svc.members(db, post.carousel_id):
+        if m.id != post.id and m.scheduled_at != post.scheduled_at:
+            m.scheduled_at = post.scheduled_at
+            m.updated_at = datetime.now(timezone.utc)
+            moved += 1
+    return moved
 
 
 @router.post("", response_model=PostOut, status_code=status.HTTP_201_CREATED)
@@ -133,7 +169,9 @@ def schedule_post(
     if when <= now:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "scheduled_at must be in the future")
 
-    conflict = _slot_taken(db, when, exclude_post_id=post.id)
+    conflict = _slot_taken(
+        db, when, exclude_post_id=post.id, exclude_carousel_id=post.carousel_id
+    )
     if conflict:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -148,6 +186,7 @@ def schedule_post(
     previous = post.scheduled_at
     post.scheduled_at = when
     post.updated_at = datetime.now(timezone.utc)
+    _sync_carousel_siblings(db, post)
     events.log_event(
         db,
         post_id=post.id,
@@ -191,6 +230,9 @@ def post_now(
     post.retry_count = 0
     post.error_message = None
     post.updated_at = now
+    # Firing the cover on its own would leave the other frames unscheduled, so they'd
+    # never reach Flickr and the carousel's Instagram publish would have nothing to fetch.
+    _sync_carousel_siblings(db, post)
     events.log_event(
         db,
         post_id=post.id,
@@ -220,6 +262,9 @@ def unschedule_post(
 
     previous = post.scheduled_at
     post.scheduled_at = None
+    # Unscheduling one frame unschedules the carousel: a half-scheduled carousel fires a
+    # lead with missing frames, which is worse than not firing.
+    _sync_carousel_siblings(db, post)
     post.updated_at = datetime.now(timezone.utc)
     events.log_event(
         db,

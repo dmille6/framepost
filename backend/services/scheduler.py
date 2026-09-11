@@ -275,6 +275,13 @@ def fire_due_posts() -> None:
         if not due:
             return
 
+        # Carousel frames before their cover. Every frame of a carousel shares one
+        # scheduled_at, so they all come due in the same pass — and the cover's Instagram
+        # publish hands Meta a Flickr URL per frame, which only exists once that frame has
+        # uploaded. Firing the cover first would fail the whole carousel on a condition
+        # that resolves itself seconds later. Stable, so everything else keeps its order.
+        due.sort(key=lambda p: (p.carousel_position or 0) == 0)
+
         for post in due:
             sched = post.scheduled_at
             if sched < cutoff_missed and not post.flickr_photo_id:
