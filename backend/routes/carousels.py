@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import Post, User
 from routes.auth import current_user
+from routes.posts import PostOut
 from services import carousel as carousel_svc, events
 
 log = logging.getLogger("framepost.carousels")
@@ -117,6 +118,25 @@ def get_carousel(
     if not frames:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "carousel not found")
     return CarouselOut(carousel_id=carousel_id, frames=frames)
+
+
+@router.get("/{carousel_id}/posts", response_model=list[PostOut])
+def get_carousel_posts(
+    carousel_id: str,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Every frame in full, in slide order.
+
+    CarouselOut carries enough to draw a list; the crop editor needs the whole post —
+    ig_fit, the crop rect, the focal point. Deliberately indifferent to post status: a
+    carousel's frames go `posted` when it publishes and then vanish from the draft
+    queue, which used to leave no way to fix a crop after the fact.
+    """
+    frames = carousel_svc.members(db, carousel_id)
+    if not frames:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "carousel not found")
+    return [PostOut.model_validate(p) for p in frames]
 
 
 @router.patch("/{carousel_id}", response_model=CarouselOut)

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError, type HistoryPost, listHistory, repostToFlickr, thumbnailUrl } from "../api/client";
 import ActivityTimeline from "../components/ActivityTimeline";
+import CarouselFramesCrop from "../components/CarouselFramesCrop";
 import PostCommentsSection from "../components/PostCommentsSection";
 import EmptyState from "../components/EmptyState";
 import InstagramPanel from "../components/InstagramPanel";
@@ -23,6 +24,8 @@ export default function Published() {
   const [active, setActive] = useState<Set<StatusKey>>(new Set(STATUSES));
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<HistoryPost | null>(null);
+  // A published carousel's frames live nowhere else in the UI — this is their way in.
+  const [cropCarouselId, setCropCarouselId] = useState<string | null>(null);
 
   const { data: posts = [], isLoading } = useQuery({
     queryKey: ["published", q, [...active].sort()],
@@ -84,18 +87,38 @@ export default function Published() {
         ) : (
           <div className="fp-grid-cards">
             {posts.map((p) => (
-              <Tile key={p.id} post={p} onClick={() => setSelected(p)} />
+              <Tile
+                key={p.id}
+                post={p}
+                onClick={() => setSelected(p)}
+                onOpenCarousel={setCropCarouselId}
+              />
             ))}
           </div>
         )}
       </div>
 
       {selected && <DetailModal post={selected} onClose={() => setSelected(null)} />}
+
+      {cropCarouselId && (
+        <CarouselFramesCrop
+          carouselId={cropCarouselId}
+          onClose={() => setCropCarouselId(null)}
+        />
+      )}
     </>
   );
 }
 
-function Tile({ post, onClick }: { post: HistoryPost; onClick: () => void }) {
+function Tile({
+  post,
+  onClick,
+  onOpenCarousel,
+}: {
+  post: HistoryPost;
+  onClick: () => void;
+  onOpenCarousel: (carouselId: string) => void;
+}) {
   const when = post.posted_at ?? post.scheduled_at;
   return (
     <button
@@ -128,6 +151,35 @@ function Tile({ post, onClick }: { post: HistoryPost; onClick: () => void }) {
         </div>
         <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span className={`fp-pill fp-pill-${post.status}`}>{post.status}</span>
+          {post.carousel_id && (
+            <span
+              role="button"
+              tabIndex={0}
+              title="Open this carousel's frames to re-crop them"
+              onClick={(e) => {
+                // The tile is itself a button; without this the click opens the detail
+                // modal instead, and a nested <button> would be invalid markup.
+                e.stopPropagation();
+                onOpenCarousel(post.carousel_id!);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onOpenCarousel(post.carousel_id!);
+                }
+              }}
+              style={{
+                fontSize: 10.5, fontWeight: 500, padding: "1px 6px", borderRadius: 999,
+                whiteSpace: "nowrap", cursor: "pointer",
+                color: "var(--teal)", border: "0.5px solid var(--teal)",
+              }}
+            >
+              ⧉ {(post.carousel_position ?? 0) === 0
+                ? "cover"
+                : (post.carousel_position ?? 0) + 1}
+            </span>
+          )}
           {post.posted_to_instagram_at && (
             <span
               title={`Posted to Instagram ${absoluteTime(post.posted_to_instagram_at)}`}

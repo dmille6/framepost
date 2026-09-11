@@ -583,6 +583,9 @@ export type HistoryPost = {
   retry_count: number;
   posted_to_instagram_at: string | null;
   reddit_posted_at: string | null;
+  // Published frames are only reachable through their carousel, so the row has to name it.
+  carousel_id: string | null;
+  carousel_position: number | null;
 };
 
 export type TimelineEvent = {
@@ -592,6 +595,10 @@ export type TimelineEvent = {
   details: Record<string, unknown> | null;
   created_at: string;
 };
+
+/** Every frame of a carousel in full, in slide order, whatever their status. */
+export const fetchCarouselPosts = (carouselId: string) =>
+  apiFetch<Post[]>(`/api/carousels/${carouselId}/posts`);
 
 export const listHistory = (q?: string, statuses?: string[]) => {
   const qs = new URLSearchParams();

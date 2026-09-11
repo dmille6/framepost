@@ -45,6 +45,11 @@ class HistoryPost(BaseModel):
     retry_count: int
     posted_to_instagram_at: datetime | None = None
     reddit_posted_at: datetime | None = None
+    # A published carousel's frames are only reachable through their carousel, so the
+    # history row has to say which one it belongs to. Without this the frames of a
+    # posted carousel had no route back to their crop editor at all.
+    carousel_id: str | None = None
+    carousel_position: int | None = None
 
     @computed_field
     @property
