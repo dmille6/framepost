@@ -350,6 +350,13 @@ def fire_due_posts() -> None:
 
 # Instagram limits posts to 5 hashtags (Dec 2025) and says targeted ones outperform
 # many generic ones. Everything else keeps the historical 30.
+# How long to wait before resuming a part-built Instagram carousel. Meta rations
+# image fetches to roughly one per few minutes per app and disguises the refusal as
+# "the media could not be fetched from this URI", so an attempt that just got a frame
+# through has to sit out the cooldown — the 1-minute first step of the shared backoff
+# curve lands inside it and burns the next frame's chance too.
+CAROUSEL_RESUME_SECONDS = 360
+
 HASHTAG_CAP = {"instagram": 5}
 DEFAULT_HASHTAG_CAP = 30
 
@@ -768,11 +775,35 @@ def _post_instagram_carousel(
         db.commit()
         return out
 
+    pp = db.get(PostPlatform, (post.id, cred.id))
+
+    def _children() -> list[str]:
+        return [c for c in ((pp.carousel_children if pp else "") or "").split(",") if c]
+
+    def _remember(ids: list[str]) -> None:
+        """Make the children built so far durable immediately.
+
+        Committed mid-flight on purpose: the caller rolls back the failed attempt, and
+        a child that survives the rollback is a frame the next attempt doesn't have to
+        spend another fetch on.
+        """
+        if pp is None:
+            return
+        pp.carousel_children = ",".join(ids) or None
+        db.commit()
+
     images = _build(False)
     collabs = _ig_collaborators(db, post)
+    resume = _children()
+    if len(resume) > len(images):
+        # Frames were removed from the group since the last attempt; the carried-over
+        # children no longer describe this carousel.
+        resume = []
+        _remember([])
     try:
         result = instagram.post_carousel(
-            db=db, images=images, caption=caption, collaborators=collabs
+            db=db, images=images, caption=caption, collaborators=collabs,
+            resume=resume, on_child=_remember,
         )
     except instagram.InstagramError as e:
         # Same 3:4 probe as the single path. A carousel costs one wasted upload per
@@ -782,12 +813,25 @@ def _post_instagram_carousel(
             log.info("carousel %s: Meta rejected 3:4 — recording 4:5 floor and re-staging",
                      post.carousel_id[:8])
             ig_variant.record_floor(db, "4:5")
+            # Re-staging gives every frame a new URL, so children built against the old
+            # ones are worthless. Start the carousel over.
+            _remember([])
             result = instagram.post_carousel(
-                db=db, images=_build(True), caption=caption, collaborators=collabs
+                db=db, images=_build(True), caption=caption, collaborators=collabs,
+                on_child=_remember,
             )
         else:
+            if len(_children()) > len(resume):
+                # Got further than last time. The finished children are durable, so this
+                # attempt earned its keep and shouldn't spend a try — and the next one
+                # has to clear Meta's fetch cooldown, which the 1-minute first step of
+                # the backoff curve does not.
+                e.made_progress = True
+                e.retry_after_seconds = CAROUSEL_RESUME_SECONDS
             raise
 
+    if pp is not None:
+        pp.carousel_children = None
     log.info("carousel %s published as %s (%d frames)",
              post.carousel_id[:8], result["remote_id"], len(frames))
     return result["remote_id"], result["url"]
@@ -1073,11 +1117,24 @@ def _record_platform_failure(
         if not pp:
             pp = PostPlatform(post_id=post.id, platform_id=cred.id)
             db.add(pp)
-        pp.retry_count = (pp.retry_count or 0) + 1
+        # An attempt that got further than the one before it doesn't spend a try. Only
+        # a platform that can make durable partial progress sets this (today: Instagram
+        # carousels, whose finished child containers survive the rollback), so the
+        # attempt budget still bounds anything that is merely failing over and over.
+        if not getattr(err, "made_progress", False):
+            pp.retry_count = (pp.retry_count or 0) + 1
         pp.error_message = str(err)[:1000]
         max_attempts = retry.max_attempts(db)
         # Same invariant as the Flickr path: a retry we can't schedule is exhaustion.
-        nxt = None if permanent else retry.next_retry_at(db, pp.retry_count)
+        after = getattr(err, "retry_after_seconds", None)
+        if permanent:
+            nxt = None
+        elif after:
+            # The platform named its own cooldown; the shared backoff curve knows
+            # nothing about per-platform rate limits.
+            nxt = (datetime.now(timezone.utc) + timedelta(seconds=int(after))).replace(tzinfo=None)
+        else:
+            nxt = retry.next_retry_at(db, max(1, pp.retry_count))
         exhausted = permanent or pp.retry_count >= max_attempts or nxt is None
         pp.status = "failed" if exhausted else "pending"
         pp.error_message = f"{failure.user_message} ({str(err)[:400]})"[:1000]

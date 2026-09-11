@@ -297,6 +297,12 @@ class PostPlatform(Base):
     # the publish attempt (survives rollback) so retries reuse the upload and the daily
     # orphan sweep can tell live from abandoned. Cleared after successful publish.
     staging_remote_id = Column(Text)
+    # Instagram carousel children already built with Meta, comma separated, in frame
+    # order. Meta throttles image fetches to roughly one per few minutes and reports the
+    # throttle as an un-fetchable URL, so a ten-frame carousel cannot be assembled in a
+    # single pass. Containers live 24h, so each attempt resumes from the last one's
+    # children instead of starting over. Cleared once the parent publishes.
+    carousel_children = Column(Text)
 
 
 class AppConfig(Base):

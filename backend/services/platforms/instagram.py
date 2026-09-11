@@ -39,7 +39,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, NamedTuple, Sequence
+from typing import Any, Callable, NamedTuple, Sequence
 
 import httpx
 from services import http_client
@@ -318,10 +318,28 @@ def _bad_collaborator_handles(resp: httpx.Response, candidates: list[str]) -> li
     return named or list(candidates)
 
 
+def _is_fetch_failure(text: str) -> bool:
+    """Does this 400 mean Meta declined to fetch image_url?
+
+    Two phrasings for one condition, and which one comes back depends on whether Meta
+    fills in error_user_title: "Media download has failed" and "The media could not be
+    fetched from this URI". Matching only the first read the second as a permanent bad
+    request, which fails the post outright — and the second is the one that shows up
+    when Meta is rationing fetches rather than actually choking on the image.
+    """
+    low = text.lower()
+    return "download" in low or "could not be fetched" in low
+
+
 def _create_container(
-    ig_user_id: str, data: dict, collaborators: list[str]
+    ig_user_id: str, data: dict, collaborators: list[str], *, fetch_attempts: int = 3
 ) -> tuple[str, list[str], list[str]]:
     """Create the media container, degrading gracefully on bad collaborators.
+
+    fetch_attempts: how many times to re-offer image_url when Meta says it couldn't
+    download it. Worth 3 for a lone photo, where the likely cause is Meta racing CDN
+    propagation of a just-staged variant. Worth exactly 1 inside a carousel, where the
+    likely cause is Meta's fetch throttle and every extra attempt re-trips it.
 
     Returns (container_id, collaborators_actually_sent, collaborators_dropped).
     """
@@ -337,12 +355,12 @@ def _create_container(
         # "Media download has failed" is Meta's fetcher racing CDN propagation of
         # image_url (bites freshly-uploaded staging variants). Transient despite the
         # 400 — retry in-line before handing off to the retry queue.
-        for fetch_attempt in range(3):
+        for fetch_attempt in range(fetch_attempts):
             with _client() as c:
                 r = c.post(f"/{ig_user_id}/media", data=body)
             if r.status_code < 400:
                 break
-            if "download" in _error_text(r).lower() and fetch_attempt < 2:
+            if _is_fetch_failure(_error_text(r)) and fetch_attempt < fetch_attempts - 1:
                 log.info("Meta couldn't fetch image_url (attempt %d) — waiting for CDN",
                          fetch_attempt + 1)
                 time.sleep(10.0)
@@ -361,7 +379,7 @@ def _create_container(
             attempt_collabs = [h for h in attempt_collabs if h not in bad]
             continue  # retry without the handles Meta refused
 
-        if "download" in _error_text(r).lower():
+        if _is_fetch_failure(_error_text(r)):
             raise InstagramError(
                 f"Meta couldn't fetch the image URL after retries: {_error_text(r)}",
                 permanent=False,
@@ -437,9 +455,19 @@ def post_carousel(
     images: Sequence[CarouselImage],
     caption: str,
     collaborators: list[str] | None = None,
+    resume: Sequence[str] = (),
+    on_child: Callable[[list[str]], None] | None = None,
 ) -> dict:
     """Publish 2..MAX_CAROUSEL images as one carousel. Returns the same shape as
     post_photo.
+
+    resume/on_child make the build restartable. Meta rations image fetches to roughly
+    one per few minutes per app and reports the refusal as "the media could not be
+    fetched from this URI" — indistinguishable from a dead link, and it fires even for
+    URLs that curl fetches fine. A carousel needs one fetch per frame, so in practice
+    only the first frame of an attempt gets through. on_child is called with the
+    children built so far after each one; passing them back as resume next time lets a
+    carousel finish across several attempts instead of restarting forever.
 
     Three steps rather than two: a container per image (is_carousel_item, no caption of
     its own), then a parent container listing them, then publish the parent. The caption
@@ -463,8 +491,18 @@ def post_carousel(
     if not ig_user_id:
         raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
 
-    child_ids: list[str] = []
+    # Children an earlier attempt already built, in frame order. Meta keeps a container
+    # for 24h, which is far longer than it takes to work through the fetch throttle.
+    child_ids: list[str] = [c for c in resume if c]
+    if len(child_ids) > len(images):
+        raise InstagramError(
+            f"carousel has {len(images)} frames but {len(child_ids)} children were "
+            f"carried over — the group changed underneath the schedule.",
+            permanent=True,
+        )
     for i, img in enumerate(images):
+        if i < len(child_ids):
+            continue
         data = {
             "image_url": img.url,
             "is_carousel_item": "true",
@@ -473,11 +511,13 @@ def post_carousel(
         alt = (img.alt or "").strip()
         if alt:
             data["alt_text"] = alt[:MAX_ALT_TEXT]
-        # No collaborators on children — the empty list still gets the in-line retry for
-        # Meta's fetcher, which is the part that matters here.
-        child_id, _, _ = _create_container(ig_user_id, data, [])
+        # No collaborators on children — the caption and the co-author invitations
+        # belong to the parent. One fetch attempt only: see _create_container.
+        child_id, _, _ = _create_container(ig_user_id, data, [], fetch_attempts=1)
         _await_container(child_id, token, describing=f"child {i + 1}/{len(images)}, url={img.url}")
         child_ids.append(child_id)
+        if on_child:
+            on_child(list(child_ids))
 
     parent_data = {
         "media_type": "CAROUSEL",
