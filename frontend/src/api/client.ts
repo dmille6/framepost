@@ -1281,6 +1281,7 @@ export type Venue = {
   id: string;
   display_name: string;
   instagram_handle: string | null;
+  bluesky_handle: string | null;
   usage_count: number;
   created_at: string;
   updated_at: string;
@@ -1299,7 +1300,7 @@ export const createVenue = (display_name: string, instagram_handle?: string | nu
 
 export const updateVenue = (
   id: string,
-  patch: { display_name?: string; instagram_handle?: string | null },
+  patch: { display_name?: string; instagram_handle?: string | null; bluesky_handle?: string | null },
 ) =>
   apiFetch<Venue>(`/api/venues/${id}`, {
     method: "PATCH",
@@ -1319,6 +1320,7 @@ export type Performer = {
   id: string;
   display_name: string;
   instagram_handle: string | null;
+  bluesky_handle: string | null;
   /** "ok" | "needs_check" — set when Instagram refuses the handle on a collab invite. */
   handle_status: string;
   handle_error: string | null;
@@ -1340,7 +1342,7 @@ export const createPerformer = (display_name: string, instagram_handle?: string 
 
 export const updatePerformer = (
   id: string,
-  patch: { display_name?: string; instagram_handle?: string | null },
+  patch: { display_name?: string; instagram_handle?: string | null; bluesky_handle?: string | null },
 ) =>
   apiFetch<Performer>(`/api/performers/${id}`, {
     method: "PATCH",

@@ -49,6 +49,7 @@ def _normalize_handle(raw: str | None) -> str | None:
 class VenueIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     instagram_handle: str | None = Field(None, max_length=100)
+    bluesky_handle: str | None = Field(None, max_length=253)
 
     @field_validator("display_name")
     @classmethod
@@ -62,12 +63,14 @@ class VenueIn(BaseModel):
 class VenuePatch(BaseModel):
     display_name: str | None = Field(None, min_length=1, max_length=200)
     instagram_handle: str | None = Field(None, max_length=100)
+    bluesky_handle: str | None = Field(None, max_length=253)
 
 
 class VenueOut(BaseModel):
     id: str
     display_name: str
     instagram_handle: str | None
+    bluesky_handle: str | None
     usage_count: int
     created_at: datetime
     updated_at: datetime
@@ -78,6 +81,7 @@ def _to_out(v: Venue, usage_count: int = 0) -> VenueOut:
         id=v.id,
         display_name=v.display_name,
         instagram_handle=v.instagram_handle,
+        bluesky_handle=v.bluesky_handle,
         usage_count=usage_count,
         created_at=v.created_at,
         updated_at=v.updated_at,
@@ -134,6 +138,7 @@ def create_venue(
         id=uuid.uuid4().hex,
         display_name=name,
         instagram_handle=handle,
+        bluesky_handle=_normalize_handle(body.bluesky_handle),
     )
     db.add(v)
     db.commit()
@@ -170,6 +175,9 @@ def update_venue(
 
     if body.instagram_handle is not None:
         v.instagram_handle = _normalize_handle(body.instagram_handle) if body.instagram_handle.strip() else None
+
+    if body.bluesky_handle is not None:
+        v.bluesky_handle = _normalize_handle(body.bluesky_handle) if body.bluesky_handle.strip() else None
 
     v.updated_at = datetime.now(timezone.utc)
     db.commit()

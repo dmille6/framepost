@@ -32,7 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from crypto import decrypt_token, encrypt_token
-from models import PlatformCredential
+from models import Performer, PlatformCredential, Venue
 
 log = logging.getLogger("framepost.bluesky")
 
@@ -299,9 +299,69 @@ def _trim_text(text: str) -> str:
     return text[: MAX_TEXT_GRAPHEMES - 1].rstrip() + "…"
 
 
-def _detect_facets(text: str) -> list[dict]:
-    """Detect #hashtags and URLs and emit atproto 'facets' so they render as links/tags.
-    Uses byte offsets, not character offsets — atproto requirement."""
+# An @token as it appears in a stored caption. Instagram handles allow letters,
+# digits, periods and underscores; Bluesky handles are domain-shaped. This matches
+# either, so the rewrite below can recognise what is there before deciding.
+_MENTION_RE = re.compile(r"(?:^|(?<=\s))@([A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]|[A-Za-z0-9])")
+
+
+def rewrite_mentions(db: Session, text: str) -> str:
+    """Turn Instagram handles in a stored caption into something true on Bluesky.
+
+    Mentions are baked into post.description once, at authoring time, as
+    '@instagram_handle' — and that one string is sent to every platform. On Bluesky
+    the account does not exist under that name, so it renders as grey text that
+    looks like a mention, notifies nobody, and misleads anyone who clicks.
+
+    Three outcomes, in order:
+      - performer/venue has a bluesky_handle -> '@that_handle', which can then carry
+        a real mention facet
+      - performer/venue known but no bluesky_handle -> their display name, as plain
+        text, so the credit still reads as a credit rather than a broken link
+      - token matches nobody we know -> left exactly as it was; mangling text we
+        don't understand is worse than leaving it
+    """
+    by_ig: dict[str, tuple[str | None, str]] = {}
+    for model in (Venue, Performer):
+        for row in db.execute(select(model).where(model.instagram_handle.is_not(None))).scalars():
+            if row.instagram_handle:
+                # Performers are loaded second and win a collision: a name shared with
+                # a venue is far more likely to be the person being credited.
+                by_ig[row.instagram_handle.lower()] = (row.bluesky_handle, row.display_name)
+
+    def replace(m: re.Match) -> str:
+        entry = by_ig.get(m.group(1).lower())
+        if entry is None:
+            return m.group(0)
+        bsky, display = entry
+        return f"@{bsky}" if bsky else display
+
+    return _MENTION_RE.sub(replace, text)
+
+
+def _resolve_handle(handle: str) -> str | None:
+    """Handle -> DID, or None when it doesn't resolve.
+
+    A mention facet carries a DID, never a handle, so an unresolvable handle must
+    produce no facet at all rather than a broken one. Unauthenticated lookup against
+    the public appview.
+    """
+    try:
+        with http_client.client(timeout=10) as c:
+            r = c.get(f"{PUBLIC_APPVIEW}/xrpc/com.atproto.identity.resolveHandle",
+                      params={"handle": handle})
+        if r.status_code == 200:
+            return r.json().get("did") or None
+        log.info("bluesky: handle %r did not resolve (HTTP %s)", handle, r.status_code)
+    except Exception as e:  # noqa: BLE001
+        log.info("bluesky: resolving %r failed (%s)", handle, type(e).__name__)
+    return None
+
+
+def _detect_facets(text: str, *, resolve=_resolve_handle) -> list[dict]:
+    """Detect #hashtags, URLs and @mentions and emit atproto 'facets' so they render
+    as tags/links/mentions. Uses byte offsets, not character offsets — atproto
+    requirement."""
     text_bytes = text.encode("utf-8")
     facets: list[dict] = []
 
@@ -324,6 +384,27 @@ def _detect_facets(text: str) -> list[dict]:
         facets.append({
             "index": {"byteStart": byte_start, "byteEnd": byte_end},
             "features": [{"$type": "app.bsky.richtext.facet#link", "uri": m.group(0)}],
+        })
+
+    # Mentions. Only handles that resolve to a DID become facets — atproto records the
+    # DID, and a handle that doesn't resolve would otherwise be written as a mention of
+    # nobody. A bare word is skipped without a lookup: every real Bluesky handle is
+    # domain-shaped, so requiring a dot keeps stray '@word' text out of the network.
+    seen: dict[str, str | None] = {}
+    for m in _MENTION_RE.finditer(text):
+        handle = m.group(1)
+        if "." not in handle:
+            continue
+        if handle not in seen:
+            seen[handle] = resolve(handle)
+        did = seen[handle]
+        if not did:
+            continue
+        byte_start = len(text[: m.start(1) - 1].encode("utf-8"))  # include the '@'
+        byte_end = len(text[: m.end(1)].encode("utf-8"))
+        facets.append({
+            "index": {"byteStart": byte_start, "byteEnd": byte_end},
+            "features": [{"$type": "app.bsky.richtext.facet#mention", "did": did}],
         })
 
     return facets
@@ -433,7 +514,9 @@ def post_photos(
         for s, alt in frames
     ]
 
-    body_text = _trim_text(text or "")
+    # Rewrite before trimming: a display-name fallback can be longer than the handle
+    # it replaces, and the 300-grapheme budget has to be measured on what actually posts.
+    body_text = _trim_text(rewrite_mentions(db, text or ""))
     record = {
         "$type": "app.bsky.feed.post",
         "text": body_text,

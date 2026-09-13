@@ -54,6 +54,7 @@ def _normalize_handle(raw: str | None) -> str | None:
 class PerformerIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=200)
     instagram_handle: str | None = Field(None, max_length=100)
+    bluesky_handle: str | None = Field(None, max_length=253)
 
     @field_validator("display_name")
     @classmethod
@@ -67,12 +68,14 @@ class PerformerIn(BaseModel):
 class PerformerPatch(BaseModel):
     display_name: str | None = Field(None, min_length=1, max_length=200)
     instagram_handle: str | None = Field(None, max_length=100)
+    bluesky_handle: str | None = Field(None, max_length=253)
 
 
 class PerformerOut(BaseModel):
     id: str
     display_name: str
     instagram_handle: str | None
+    bluesky_handle: str | None
     handle_status: str
     handle_error: str | None
     usage_count: int
@@ -85,6 +88,7 @@ def _to_out(p: Performer, usage_count: int = 0) -> PerformerOut:
         id=p.id,
         display_name=p.display_name,
         instagram_handle=p.instagram_handle,
+        bluesky_handle=p.bluesky_handle,
         handle_status=p.handle_status or "ok",
         handle_error=p.handle_error,
         usage_count=usage_count,
@@ -149,6 +153,7 @@ def create_performer(
         id=uuid.uuid4().hex,
         display_name=name,
         instagram_handle=handle,
+        bluesky_handle=_normalize_handle(body.bluesky_handle),
     )
     db.add(p)
     db.commit()
@@ -187,6 +192,9 @@ def update_performer(
     if body.instagram_handle is not None:
         # Empty string clears the handle; otherwise normalize.
         p.instagram_handle = _normalize_handle(body.instagram_handle) if body.instagram_handle.strip() else None
+
+    if body.bluesky_handle is not None:
+        p.bluesky_handle = _normalize_handle(body.bluesky_handle) if body.bluesky_handle.strip() else None
 
     p.updated_at = datetime.now(timezone.utc)
     db.commit()

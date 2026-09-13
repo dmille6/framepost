@@ -140,12 +140,14 @@ function VenueRow({ venue }: { venue: Venue }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(venue.display_name);
   const [handle, setHandle] = useState(venue.instagram_handle ?? "");
+  const [bsky, setBsky] = useState(venue.bluesky_handle ?? "");
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     setName(venue.display_name);
     setHandle(venue.instagram_handle ?? "");
-  }, [venue.display_name, venue.instagram_handle]);
+    setBsky(venue.bluesky_handle ?? "");
+  }, [venue.display_name, venue.instagram_handle, venue.bluesky_handle]);
 
   const save = useMutation({
     mutationFn: () =>
@@ -154,6 +156,10 @@ function VenueRow({ venue }: { venue: Venue }) {
         instagram_handle:
           (handle.trim() || null) !== (venue.instagram_handle ?? null)
             ? handle.trim() || null
+            : undefined,
+        bluesky_handle:
+          (bsky.trim() || null) !== (venue.bluesky_handle ?? null)
+            ? bsky.trim() || null
             : undefined,
       }),
     onSuccess: () => {
@@ -208,9 +214,17 @@ function VenueRow({ venue }: { venue: Venue }) {
               setEditing(false);
               setName(venue.display_name);
               setHandle(venue.instagram_handle ?? "");
+              setBsky(venue.bluesky_handle ?? "");
               setErr(null);
             }
           }}
+        />
+        <input
+          className="fp-input"
+          style={{ gridColumn: "1 / -1" }}
+          value={bsky}
+          onChange={(e) => setBsky(e.target.value.replace(/^@+/, ""))}
+          placeholder="bluesky handle, e.g. name.bsky.social — leave blank if not on Bluesky"
         />
         <div style={{ display: "flex", gap: 6 }}>
           <button
@@ -219,6 +233,7 @@ function VenueRow({ venue }: { venue: Venue }) {
               setEditing(false);
               setName(venue.display_name);
               setHandle(venue.instagram_handle ?? "");
+              setBsky(venue.bluesky_handle ?? "");
               setErr(null);
             }}
             style={{ padding: "6px 10px", fontSize: 12 }}
@@ -268,6 +283,18 @@ function VenueRow({ venue }: { venue: Venue }) {
             </a>
           ) : (
             <span style={{ color: "var(--text-fade)" }}>no IG handle</span>
+          )}
+          {venue.bluesky_handle ? (
+            <a
+              href={`https://bsky.app/profile/${venue.bluesky_handle}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "var(--text-dim)" }}
+            >
+              @{venue.bluesky_handle} ↗
+            </a>
+          ) : (
+            <span style={{ color: "var(--text-fade)" }}>no Bluesky handle</span>
           )}
           <span>
             {venue.usage_count} post{venue.usage_count === 1 ? "" : "s"}

@@ -142,12 +142,14 @@ function PerformerRow({ performer }: { performer: Performer }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(performer.display_name);
   const [handle, setHandle] = useState(performer.instagram_handle ?? "");
+  const [bsky, setBsky] = useState(performer.bluesky_handle ?? "");
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     setName(performer.display_name);
     setHandle(performer.instagram_handle ?? "");
-  }, [performer.display_name, performer.instagram_handle]);
+    setBsky(performer.bluesky_handle ?? "");
+  }, [performer.display_name, performer.instagram_handle, performer.bluesky_handle]);
 
   const save = useMutation({
     mutationFn: () =>
@@ -156,6 +158,10 @@ function PerformerRow({ performer }: { performer: Performer }) {
         instagram_handle:
           (handle.trim() || null) !== (performer.instagram_handle ?? null)
             ? handle.trim() || null
+            : undefined,
+        bluesky_handle:
+          (bsky.trim() || null) !== (performer.bluesky_handle ?? null)
+            ? bsky.trim() || null
             : undefined,
       }),
     onSuccess: () => {
@@ -215,9 +221,17 @@ function PerformerRow({ performer }: { performer: Performer }) {
               setEditing(false);
               setName(performer.display_name);
               setHandle(performer.instagram_handle ?? "");
+              setBsky(performer.bluesky_handle ?? "");
               setErr(null);
             }
           }}
+        />
+        <input
+          className="fp-input"
+          style={{ gridColumn: "1 / -1" }}
+          value={bsky}
+          onChange={(e) => setBsky(e.target.value.replace(/^@+/, ""))}
+          placeholder="bluesky handle, e.g. name.bsky.social — leave blank if not on Bluesky"
         />
         <div style={{ display: "flex", gap: 6 }}>
           <button
@@ -226,6 +240,7 @@ function PerformerRow({ performer }: { performer: Performer }) {
               setEditing(false);
               setName(performer.display_name);
               setHandle(performer.instagram_handle ?? "");
+              setBsky(performer.bluesky_handle ?? "");
               setErr(null);
             }}
             style={{ padding: "6px 10px", fontSize: 12 }}
@@ -275,6 +290,18 @@ function PerformerRow({ performer }: { performer: Performer }) {
             </a>
           ) : (
             <span style={{ color: "var(--text-fade)" }}>no IG handle</span>
+          )}
+          {performer.bluesky_handle ? (
+            <a
+              href={`https://bsky.app/profile/${performer.bluesky_handle}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "var(--text-dim)" }}
+            >
+              @{performer.bluesky_handle} ↗
+            </a>
+          ) : (
+            <span style={{ color: "var(--text-fade)" }}>no Bluesky handle</span>
           )}
           <span>
             {performer.usage_count} post{performer.usage_count === 1 ? "" : "s"}

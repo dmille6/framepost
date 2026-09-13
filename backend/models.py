@@ -347,6 +347,9 @@ class Venue(Base):
     id = Column(String, primary_key=True)
     display_name = Column(Text, nullable=False, unique=True)
     instagram_handle = Column(Text)  # stored without leading @
+    # Bluesky handles are domain-shaped and unrelated to the Instagram one, so
+    # they can only be recorded, never derived. Null = not on Bluesky / unknown.
+    bluesky_handle = Column(Text)  # stored without leading @
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
@@ -356,6 +359,9 @@ class Performer(Base):
     id = Column(String, primary_key=True)
     display_name = Column(Text, nullable=False, unique=True)
     instagram_handle = Column(Text)  # stored without leading @
+    # Bluesky handles are domain-shaped and unrelated to the Instagram one, so
+    # they can only be recorded, never derived. Null = not on Bluesky / unknown.
+    bluesky_handle = Column(Text)  # stored without leading @
     # "ok" | "needs_check". Meta refusing this handle on a collab invite means it is
     # private, renamed, or gone — flag it rather than letting it quietly cost every
     # future collaboration on this performer's photos.
