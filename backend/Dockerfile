@@ -35,4 +35,12 @@ USER app
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers makes uvicorn honour X-Forwarded-Proto/For rather than reporting the
+# scheme of nginx's own hop, which is what request.base_url (and therefore every OAuth
+# callback URL) is built from. Without it the nginx fix above has no effect.
+#
+# forwarded-allow-ips=* is safe here specifically because port 8000 is never published
+# to the host -- only services on the compose network can reach it, so there is no
+# untrusted client able to forge these headers.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--proxy-headers", "--forwarded-allow-ips", "*"]
