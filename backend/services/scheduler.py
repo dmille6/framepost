@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_throttle, ig_variant, image, r2, retry, storage, tags, trending, watcher
+from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -173,6 +173,19 @@ def _flickr_post(db, post: Post, fired_at: datetime) -> None:
             actor="worker",
             details={"flickr_photo_id": photo_id, "url": post.flickr_url},
         )
+
+        # Assign groups now: the photo exists on Flickr and its tags are final, so
+        # tag rules evaluate against what was actually published. Delivery is paced
+        # separately by submit_due_groups.
+        assigned = group_routing.ensure_assignments(db, post)
+        if assigned:
+            events.log_event(
+                db,
+                post_id=post.id,
+                event_type="groups_assigned",
+                actor="worker",
+                details={"groups": [g.name for g in assigned]},
+            )
 
         # Add to selected albums. Failures are non-fatal — log and continue.
         rows = db.execute(

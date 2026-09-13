@@ -44,6 +44,8 @@ class GroupOut(BaseModel):
     name: str
     category: str | None
     daily_limit: int | None
+    limit_period: str
+    match_tags: str | None
     content_notes: str | None
     no_watermark: bool
     default_enabled: bool
@@ -59,6 +61,8 @@ class GroupOut(BaseModel):
             name=g.name,
             category=g.category,
             daily_limit=g.daily_limit,
+            limit_period=g.limit_period or "day",
+            match_tags=g.match_tags,
             content_notes=g.content_notes,
             no_watermark=bool(g.no_watermark),
             default_enabled=bool(g.default_enabled),
@@ -70,6 +74,8 @@ class GroupIn(BaseModel):
     name: str
     category: str | None = None
     daily_limit: int | None = None
+    limit_period: str = "day"
+    match_tags: str | None = None
     content_notes: str | None = None
     no_watermark: bool = False
     default_enabled: bool = False
@@ -98,6 +104,8 @@ def create_group(
         name=body.name,
         category=body.category,
         daily_limit=body.daily_limit,
+        limit_period=body.limit_period or "day",
+        match_tags=body.match_tags,
         content_notes=body.content_notes,
         no_watermark=1 if body.no_watermark else 0,
         default_enabled=1 if body.default_enabled else 0,
@@ -123,6 +131,8 @@ def update_group(
     g.name = body.name
     g.category = body.category
     g.daily_limit = body.daily_limit
+    g.limit_period = body.limit_period or "day"
+    g.match_tags = body.match_tags
     g.content_notes = body.content_notes
     g.no_watermark = 1 if body.no_watermark else 0
     g.default_enabled = 1 if body.default_enabled else 0
@@ -166,8 +176,12 @@ def set_post_groups(
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
 ):
-    if not db.get(Post, post_id):
+    post = db.get(Post, post_id)
+    if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    # Record that a human chose, so the publish-time seeder leaves this post alone
+    # even when the chosen set is empty.
+    post.groups_overridden = 1
     valid_ids = set(db.execute(select(Group.id)).scalars().all())
     requested = [g for g in body.group_ids if g in valid_ids]
 

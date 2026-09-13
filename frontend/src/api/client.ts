@@ -909,6 +909,8 @@ export type Group = {
   name: string;
   category: string | null;
   daily_limit: number | null;
+  limit_period: string;
+  match_tags: string | null;
   content_notes: string | null;
   no_watermark: boolean;
   default_enabled: boolean;

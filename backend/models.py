@@ -56,6 +56,9 @@ class Post(Base):
     safety_level = Column(String, server_default="safe")
     content_type = Column(String, server_default="photo")
     flickr_photo_id = Column(String, index=True)
+    # The photographer saved a group selection for this post (even an empty
+    # one); the publish-time seeder must not overwrite that decision.
+    groups_overridden = Column(Integer, nullable=False, server_default="0")
     flickr_url = Column(Text)
     retry_count = Column(Integer, nullable=False, server_default="0")
     next_retry_at = Column(DateTime)
@@ -228,6 +231,8 @@ class Group(Base):
     # the period is configurable, so read it as "submissions per window".
     daily_limit = Column(Integer)
     limit_period = Column(String, nullable=False, server_default="day")
+    # CSV of tags gating this group. Null = no condition, the group takes any post.
+    match_tags = Column(Text)
     content_notes = Column(Text)
     no_watermark = Column(Integer, nullable=False, server_default="0")
     default_enabled = Column(Integer, nullable=False, server_default="0")

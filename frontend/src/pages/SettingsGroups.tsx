@@ -16,6 +16,8 @@ const EMPTY: GroupInput = {
   name: "",
   category: "",
   daily_limit: null,
+  limit_period: "day",
+  match_tags: "",
   content_notes: "",
   no_watermark: false,
   default_enabled: false,
@@ -68,7 +70,8 @@ export default function SettingsGroups() {
             <tr style={{ textAlign: "left", color: "var(--text-fade)", fontSize: 11 }}>
               <Th>Group</Th>
               <Th>Category</Th>
-              <Th>Daily limit</Th>
+              <Th>Limit</Th>
+              <Th>Applies to</Th>
               <Th>Default</Th>
               <Th />
             </tr>
@@ -83,7 +86,16 @@ export default function SettingsGroups() {
                   )}
                 </Td>
                 <Td>{g.category ?? "—"}</Td>
-                <Td>{g.daily_limit ?? "—"}</Td>
+                <Td>{g.daily_limit ? `${g.daily_limit}/${g.limit_period}` : "no limit"}</Td>
+                <Td>
+                  {g.match_tags ? (
+                    <span title={g.match_tags}>
+                      {g.match_tags.split(",").map((t) => t.trim()).filter(Boolean).join(", ")}
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--text-fade)" }}>any post</span>
+                  )}
+                </Td>
                 <Td>{g.default_enabled ? "yes" : "—"}</Td>
                 <Td>
                   <button className="fp-link" onClick={() => setEditing({ form: groupToInput(g), id: g.id })}>
@@ -126,6 +138,8 @@ function groupToInput(g: Group): GroupInput {
     name: g.name,
     category: g.category ?? "",
     daily_limit: g.daily_limit,
+    limit_period: g.limit_period ?? "day",
+    match_tags: g.match_tags ?? "",
     content_notes: g.content_notes ?? "",
     no_watermark: g.no_watermark,
     default_enabled: g.default_enabled,
@@ -166,8 +180,19 @@ function GroupForm({
         <Field label="Category">
           <input className="fp-input" value={form.category ?? ""} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Burlesque/Stage, Live Music, Portrait…" />
         </Field>
-        <Field label="Daily submission limit (optional)">
-          <input className="fp-input" type="number" min={0} value={form.daily_limit ?? ""} onChange={(e) => setForm({ ...form, daily_limit: e.target.value === "" ? null : Number(e.target.value) })} />
+        <Field label="Submission limit" hint="Blank means no limit. Synced from Flickr daily — an over-quota submission is rejected permanently.">
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="fp-input" style={{ flex: 1 }} type="number" min={0} value={form.daily_limit ?? ""} onChange={(e) => setForm({ ...form, daily_limit: e.target.value === "" ? null : Number(e.target.value) })} />
+            <select className="fp-input" style={{ flex: 1 }} value={form.limit_period} onChange={(e) => setForm({ ...form, limit_period: e.target.value })}>
+              <option value="day">per day</option>
+              <option value="week">per week</option>
+              <option value="month">per month</option>
+              <option value="ever">ever (lifetime)</option>
+            </select>
+          </div>
+        </Field>
+        <Field label="Only posts tagged (optional)" hint="Comma-separated. Blank means every post. Use this for groups that fit only part of your work, like concert pools.">
+          <input className="fp-input" value={form.match_tags ?? ""} onChange={(e) => setForm({ ...form, match_tags: e.target.value })} placeholder="concert, livemusic, band" />
         </Field>
         <Field label="Content notes / rules">
           <textarea className="fp-textarea" rows={2} value={form.content_notes ?? ""} onChange={(e) => setForm({ ...form, content_notes: e.target.value })} />
