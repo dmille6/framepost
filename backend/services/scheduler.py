@@ -374,12 +374,17 @@ def fire_due_posts() -> None:
 # exist. Nothing measures it; treat it as a tunable knob rather than a derived constant.
 CAROUSEL_RESUME_SECONDS = 360
 
-# Flickr's "Photo already in pool". Not a failure: the photo is in the group, which
-# is the entire goal of the submission. It shows up whenever a photo was added by hand
-# before FramePost knew about that group -- unavoidable right after a roster expansion,
-# and recording it as failed would leave the roster permanently dirty with rows that
-# describe a success.
-FLICKR_ALREADY_IN_POOL = 3
+# Flickr codes that are refusals in shape but successes in fact, so the submission
+# must not be recorded as failed:
+#   3  "Photo already in pool"  -- the photo is in the group, which is the entire goal.
+#      Appears whenever a photo was added by hand before FramePost knew about that
+#      group: unavoidable right after a roster expansion.
+#   6  "added to the Pending Queue for this Pool" -- a moderated pool accepted the
+#      submission and is holding it for a moderator. Nothing is left for us to do, and
+#      retrying would resubmit to that queue.
+# Recording either as failed leaves the roster permanently dirty with rows describing
+# a success, and burns the retry budget a real refusal needs.
+FLICKR_SUBMISSION_ALREADY_DONE = {3, 6}
 
 HASHTAG_CAP = {"instagram": 5}
 DEFAULT_HASHTAG_CAP = 30
@@ -1343,7 +1348,7 @@ def submit_due_groups() -> None:
                 log.info("post %s submitted to group %s", post.id[:8], group.name)
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
-                if getattr(e, "code", None) == FLICKR_ALREADY_IN_POOL:
+                if getattr(e, "code", None) in FLICKR_SUBMISSION_ALREADY_DONE:
                     pg.status = "submitted"
                     pg.submitted_at = now
                     pg.error_message = None
@@ -1353,9 +1358,11 @@ def submit_due_groups() -> None:
                         post_id=post.id,
                         event_type="group_submitted",
                         actor="worker",
-                        details={"group": group.name, "already_present": True},
+                        details={"group": group.name, "already_present": True,
+                                 "flickr_code": getattr(e, "code", None)},
                     )
-                    log.info("post %s was already in group %s", post.id[:8], group.name)
+                    log.info("post %s already handled by group %s (%s)",
+                             post.id[:8], group.name, msg)
                     continue
                 permanent = isinstance(e, flickr.FlickrError) and e.permanent
                 pg.retry_count = (pg.retry_count or 0) + 1

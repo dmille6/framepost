@@ -317,11 +317,15 @@ def test_lifetime_cap_defers_rather_than_failing(db):
 # "already in pool" is a success, not a failure
 # --------------------------------------------------------------------------
 
-def test_a_photo_already_in_the_pool_counts_as_submitted(db, monkeypatch):
-    """Flickr error 3 means the photo is in the group -- the whole point of the
-    submission. It appears whenever a photo was added by hand before FramePost knew
-    about that group, which is routine right after a roster expansion; recording it
-    as failed would leave rows that describe a success permanently marked wrong."""
+@pytest.mark.parametrize("code,msg", [
+    (3, "flickr error 3: Photo already in pool"),
+    (6, "flickr error 6: Your Photo has been added to the Pending Queue for this Pool"),
+])
+def test_a_submission_flickr_already_handled_counts_as_submitted(db, monkeypatch, code, msg):
+    """Codes 3 and 6 are refusals in shape but successes in fact: the photo is in the
+    pool, or a moderated pool is holding it for review. Both are routine right after a
+    roster expansion, and recording them as failed leaves rows describing a success
+    permanently marked wrong -- and spends retries a real refusal needs."""
     from services.platforms import flickr as flickr_mod
 
     g = _group(db, limit=None)
@@ -329,8 +333,7 @@ def test_a_photo_already_in_the_pool_counts_as_submitted(db, monkeypatch):
     db.commit()
 
     def already_there(_db, _method, **_kw):
-        raise flickr_mod.FlickrError("flickr error 3: Photo already in pool",
-                                     code=3, permanent=True)
+        raise flickr_mod.FlickrError(msg, code=code, permanent=True)
 
     monkeypatch.setattr(db, "close", lambda: None)
     monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
