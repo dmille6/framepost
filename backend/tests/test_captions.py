@@ -1,5 +1,5 @@
-import re
 """Caption-building regressions: title echo, hashtag legality."""
+import re
 import uuid
 
 from models import Post
@@ -213,18 +213,27 @@ def test_export_pipeline_markers_never_take_a_slot(db):
 def test_a_slot_is_reserved_for_a_subject_tag(db):
     """The High Society run came out as performer + venue + venue + show + city, with
     nothing saying what the picture shows. Proper nouns are maximally specific and often
-    have no audience at all — nobody searches #allways."""
+    have no audience at all.
+
+    Asserts on parsed tokens, not substrings: '#allways' is a prefix of
+    '#allwayslounge', so a containment check on the raw caption passes either way.
+    """
     post = _post(title="Miss Angie Z", description="High Society at the AllWays.",
                  tags="angiez, allways, allwayslounge, highsociety, neworleans, "
                       "burlesque, burlyq, cabaret")
     db.add(post)
     db.commit()
-    caption = _build_caption_for("instagram", post, db)
-    assert caption.count("#") == 5
-    assert "#burlesque" in caption
-    # Paid for out of the weakest of the five, not the strongest.
-    assert "#angiez" in caption
-    assert "#neworleans" not in caption
+    tags = re.findall(r"#([A-Za-z0-9_]+)", _build_caption_for("instagram", post, db))
+    assert len(tags) == 5
+    assert "burlesque" in tags          # the reserved subject slot
+    assert "angiez" in tags             # paid out of the weakest, not the strongest
+    assert "burlyq" not in tags         # the weakest, evicted
+    assert "cabaret" not in tags
+    # #allways is filtered as a venue-name fragment, so the slot it used to hold is
+    # spent on a tag people actually search.
+    assert "allways" not in tags
+    assert "allwayslounge" in tags
+    assert "neworleans" in tags
 
 
 def test_the_reserve_is_a_no_op_when_a_subject_tag_already_made_it(db):

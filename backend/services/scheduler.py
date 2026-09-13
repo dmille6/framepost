@@ -389,6 +389,22 @@ _NOT_DISCOVERY = {
     "photography", "photographer", "photo", "photooftheday",
     "darrellmiller", "darrellmillerphotography",
     "exported", "postframe",               # export-pipeline markers, not subjects
+    # Fragments of a venue or company name that are meaningless alone and, worse,
+    # land on the same post as the full form: #allways rode along with
+    # #allwayslounge on 48 posts and #venardos with #venardoscircus on 27, each
+    # pair spending two of five slots to name one place. _spread_stems permits two
+    # per stem by design, so it lets these through; the full form is strictly
+    # better, and "#allways" on its own reaches people misspelling "always".
+    "allways", "venardos",
+}
+
+# Misspellings that reach nobody. A hashtag has no spellcheck and no near-match
+# fallback: #louisana simply is not #louisiana, and it took a slot on 40 posts —
+# never once alongside the correct spelling, so the slot bought nothing at all.
+# Corrected on the way into the caption rather than in stored tags, so the
+# photographer's own keywords are left as they typed them.
+_TAG_ALIASES = {
+    "louisana": "louisiana",
 }
 
 # Dates again, in words. Lightroom writes a month keyword alongside the year, so the
@@ -654,7 +670,7 @@ def _build_caption_for(platform: str, post: Post, db) -> str:
 
     tight = cap < DEFAULT_HASHTAG_CAP
     post_tags = [
-        f"#{c}" for c in (
+        f"#{_TAG_ALIASES.get(c, c)}" for c in (
             "".join(ch for ch in raw.lower() if ch.isalnum() or ch == "_")
             for raw in (tag_str.split() if tag_str else [])
         ) if c

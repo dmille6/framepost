@@ -14,9 +14,15 @@ from PIL import Image, ImageOps
 
 from services import caption_text
 
-# IG hard-caps captions at 2200 chars and hashtags at 30 per post. We cap below that to
-# leave headroom for a signature and to keep tag lists tight (most engagement studies show
-# diminishing returns past ~15-20 tags anyway).
+# IG hard-caps captions at 2200 chars. MAX_CAPTION_CHARS matches that ceiling exactly.
+#
+# MAX_HASHTAGS is NOT a headroom choice of ours: Instagram cut the per-post hashtag limit
+# from 30 to 5 in Dec 2025 and said the remaining ones are topic labels rather than a
+# reach lever. Raising this does not buy more tags, it builds a caption the platform will
+# reject or truncate. The old "diminishing returns past ~15-20 tags" reasoning that used
+# to live here described a 30-tag world that no longer exists.
+#
+# scheduler.HASHTAG_CAP carries the same number for the caption builder; they must agree.
 MAX_CAPTION_CHARS = 2200
 MAX_HASHTAGS = 5
 
