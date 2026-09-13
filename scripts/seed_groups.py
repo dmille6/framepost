@@ -1,0 +1,99 @@
+"""Seed the Flickr groups roster with active, on-genre pools.
+
+Idempotent: matches on flickr_group_id, inserts only what's missing, never
+touches an existing row.
+
+Run AFTER joining the groups on Flickr -- a submission to a group you don't
+belong to fails permanently. Run `sync_throttles` afterwards (or just wait for
+the daily job): the limits below are what Flickr published when this list was
+built, and the group owner can change them at any time.
+
+    docker compose exec -T backend python /tmp/seed_groups.py
+
+Selection criteria: every group here posted within the last ~8 days. Membership
+count was deliberately NOT the filter -- "LIVE MUSIC" has 28k members and has
+been dead for 5,233 days, and the obvious "Burlesque" group died in 2018.
+"""
+import sys
+import uuid
+from datetime import datetime, timezone
+
+sys.path.insert(0, "/app")
+
+from database import SessionLocal  # noqa: E402
+from models import Group  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+
+# (flickr_group_id, name, category, limit, period, default_enabled, notes)
+#
+# default_enabled is 1 only where the group accepts any subject he shoots.
+# The music/concert pools are deliberately 0: only ~14% of his catalogue is
+# tagged concert/livemusic, and bulk-submitting burlesque to a concert pool is
+# how a moderator removes you. Those are routed by tag instead.
+GROUPS = [
+    # --- subject-agnostic: technique and gear, fit every photo ------------
+    ("20843169@N00", "Low light photography",          "lowlight", None, "day", 1, "10.1k members"),
+    ("813587@N21",   "The Available Light Gang",       "lowlight", None, "day", 1, "535 members"),
+    ("656594@N20",   "Available Darkness",             "lowlight", None, "day", 1, "546 members"),
+    ("2738011@N23",  "Low Light And Night Photography","lowlight", 5,    "day", 0, "18+ group"),
+    ("766351@N21",   "SONY ALPHA: Amateur to Advanced","gear",     5,    "day", 1, "11k members"),
+    ("822590@N23",   "Sony Alpha World",               "gear",     None, "day", 1, "9.4k members"),
+    ("579871@N23",   "SONY ALPHA CLUB",                "gear",     None, "day", 1, "8.4k members"),
+    ("925860@N22",   "Sony Alpha Community",           "gear",     None, "day", 1, "5k members"),
+
+    # --- exact subject fit -------------------------------------------------
+    ("1278126@N25",  "Stage photography:",             "performance", None, "day", 1, "small but exact match, posts daily"),
+    ("93564694@N00", "Theatre",                        "performance", None, "day", 1, "472 members"),
+    ("537270@N21",   "(Acting) The Action of Theatre", "performance", 25,  "day", 1, "334 members"),
+
+    # --- tag-routed: real but partial coverage of the catalogue -----------
+    ("1135153@N23",  "circus love",                    "niche", None, "day",   0, "route on tag: circus (136 posts)"),
+    ("34995731@N00", "Street Performers",              "niche", 3,    "day",   0, "route on tag: performer/street"),
+    ("877178@N20",   "Pinup Artist and Models",        "niche", None, "day",   0, "route on tag: pinup (4 posts)"),
+    ("575198@N25",   "That's Pinup!",                  "niche", 5,    "day",   0, "18+; route on tag: pinup"),
+
+    # --- music pools: tag-routed only, ~14% of catalogue ------------------
+    ("29928242@N00", "Live Music Photography",         "music", 13, "day",   0, "route on tag: concert/livemusic"),
+    ("77055362@N00", "Concert Photographer",           "music", None, "day", 0, "route on tag: concert/livemusic"),
+    ("86111082@N00", "Concerts",                       "music", None, "day", 0, "route on tag: concert/livemusic"),
+    ("83934753@N00", "Music Photography",              "music", None, "day", 0, "route on tag: concert/livemusic"),
+    ("351309@N21",   "Music Photography goes Digital", "music", None, "day", 0, "route on tag: concert/livemusic"),
+    ("54089018@N00", "Concert Photography",            "music", 1,  "week",  0, "37.8k members; 1 per WEEK"),
+    ("41181764@N00", "[DMS] only DYNAMIC MUSIC SHOTS", "music", 30, "month", 0, "30 per month"),
+]
+
+
+def main() -> int:
+    db = SessionLocal()
+    try:
+        existing = set(db.execute(select(Group.flickr_group_id)).scalars().all())
+        added = 0
+        for fid, name, category, limit, period, enabled, notes in GROUPS:
+            if fid in existing:
+                print(f"  skip (already present): {name}")
+                continue
+            db.add(Group(
+                id=uuid.uuid4().hex,
+                flickr_group_id=fid,
+                name=name,
+                category=category,
+                daily_limit=limit,
+                limit_period=period,
+                content_notes=notes,
+                no_watermark=0,
+                default_enabled=enabled,
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            ))
+            added += 1
+            print(f"  + {category:<12} {name}")
+        db.commit()
+        total = db.execute(select(Group)).scalars().all()
+        print(f"\nadded {added}; roster is now {len(total)} groups")
+        print("next: run sync_throttles to replace these limits with Flickr's live values")
+        return 0
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

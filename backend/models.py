@@ -224,7 +224,10 @@ class Group(Base):
     flickr_group_id = Column(String)
     name = Column(Text, nullable=False)
     category = Column(String)
+    # Count of submissions allowed per limit_period. Named "daily" since 0001;
+    # the period is configurable, so read it as "submissions per window".
     daily_limit = Column(Integer)
+    limit_period = Column(String, nullable=False, server_default="day")
     content_notes = Column(Text)
     no_watermark = Column(Integer, nullable=False, server_default="0")
     default_enabled = Column(Integer, nullable=False, server_default="0")

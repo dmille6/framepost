@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, ig_variant, image, r2, retry, storage, tags, trending, watcher
+from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_throttle, ig_variant, image, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -1246,7 +1246,13 @@ def submit_due_groups() -> None:
                 Post.flickr_photo_id.is_not(None),
                 (PostGroup.next_retry_at.is_(None)) | (PostGroup.next_retry_at <= now),
             )
+            # Oldest post first: when a group's throttle is the binding constraint the
+            # backlog should drain in the order it was shot, not by row id.
+            .order_by(Post.posted_at.asc(), PostGroup.id.asc())
         ).all()
+
+        # One quota read per group, then spent down locally across this pass.
+        quota: dict[str, int | None] = {}
 
         for pg, post, group in rows:
             if not group.flickr_group_id:
@@ -1260,6 +1266,21 @@ def submit_due_groups() -> None:
                     details={"group": group.name, "reason": "no flickr_group_id"},
                 )
                 continue
+
+            if group.id not in quota:
+                quota[group.id] = group_throttle.remaining(db, group, now)
+            allowance = quota[group.id]
+            if allowance is not None and allowance <= 0:
+                # Not a failure -- the group's published throttle is spent for this
+                # window. Defer to when the oldest submission ages out and leave
+                # retry_count alone, so waiting never consumes the error budget.
+                pg.next_retry_at = group_throttle.next_slot_at(db, group, now)
+                log.debug(
+                    "group %s throttled; post %s deferred to %s",
+                    group.name, post.id[:8], pg.next_retry_at,
+                )
+                continue
+
             try:
                 flickr.rest_call(
                     db,
@@ -1278,6 +1299,8 @@ def submit_due_groups() -> None:
                     actor="worker",
                     details={"group": group.name, "flickr_group_id": group.flickr_group_id},
                 )
+                if allowance is not None:
+                    quota[group.id] = allowance - 1
                 log.info("post %s submitted to group %s", post.id[:8], group.name)
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
@@ -1318,6 +1341,14 @@ def daily_flickr_sync() -> None:
             flickr_sync.sync_albums(db)
         except Exception:
             log.exception("daily album sync failed")
+
+        try:
+            for name, before, after in group_throttle.sync_throttles(
+                db, rest_call=flickr.rest_call
+            ):
+                log.info("group throttle %s: %s -> %s", name, before, after)
+        except Exception:
+            log.exception("group throttle sync failed")
         try:
             flickr_sync.sync_recent_photos(db)
         except Exception:
