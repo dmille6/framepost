@@ -311,3 +311,55 @@ def test_lifetime_cap_defers_rather_than_failing(db):
     _already_submitted(db, g, NOW - timedelta(days=900))
     assert group_throttle.remaining(db, g, NOW) == 0
     assert group_throttle.next_slot_at(db, g, NOW) > NOW
+
+
+# --------------------------------------------------------------------------
+# "already in pool" is a success, not a failure
+# --------------------------------------------------------------------------
+
+def test_a_photo_already_in_the_pool_counts_as_submitted(db, monkeypatch):
+    """Flickr error 3 means the photo is in the group -- the whole point of the
+    submission. It appears whenever a photo was added by hand before FramePost knew
+    about that group, which is routine right after a roster expansion; recording it
+    as failed would leave rows that describe a success permanently marked wrong."""
+    from services.platforms import flickr as flickr_mod
+
+    g = _group(db, limit=None)
+    _pending(db, g, _post(db, photo_id="dupe"))
+    db.commit()
+
+    def already_there(_db, _method, **_kw):
+        raise flickr_mod.FlickrError("flickr error 3: Photo already in pool",
+                                     code=3, permanent=True)
+
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(scheduler.flickr, "rest_call", already_there)
+    scheduler.submit_due_groups()
+
+    row = db.query(PostGroup).one()
+    assert row.status == "submitted"
+    assert row.retry_count == 0
+    assert row.error_message is None
+
+
+def test_other_permanent_errors_still_fail(db, monkeypatch):
+    """The exemption is code 3 only; a real refusal must still be recorded."""
+    from services.platforms import flickr as flickr_mod
+
+    g = _group(db, limit=None)
+    _pending(db, g, _post(db, photo_id="nope"))
+    db.commit()
+
+    def refused(_db, _method, **_kw):
+        raise flickr_mod.FlickrError("flickr error 2: Group not found",
+                                     code=2, permanent=True)
+
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(scheduler.flickr, "rest_call", refused)
+    scheduler.submit_due_groups()
+
+    row = db.query(PostGroup).one()
+    assert row.status == "failed"
+    assert "Group not found" in (row.error_message or "")

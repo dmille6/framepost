@@ -374,6 +374,13 @@ def fire_due_posts() -> None:
 # exist. Nothing measures it; treat it as a tunable knob rather than a derived constant.
 CAROUSEL_RESUME_SECONDS = 360
 
+# Flickr's "Photo already in pool". Not a failure: the photo is in the group, which
+# is the entire goal of the submission. It shows up whenever a photo was added by hand
+# before FramePost knew about that group -- unavoidable right after a roster expansion,
+# and recording it as failed would leave the roster permanently dirty with rows that
+# describe a success.
+FLICKR_ALREADY_IN_POOL = 3
+
 HASHTAG_CAP = {"instagram": 5}
 DEFAULT_HASHTAG_CAP = 30
 
@@ -1336,6 +1343,20 @@ def submit_due_groups() -> None:
                 log.info("post %s submitted to group %s", post.id[:8], group.name)
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
+                if getattr(e, "code", None) == FLICKR_ALREADY_IN_POOL:
+                    pg.status = "submitted"
+                    pg.submitted_at = now
+                    pg.error_message = None
+                    pg.next_retry_at = None
+                    events.log_event(
+                        db,
+                        post_id=post.id,
+                        event_type="group_submitted",
+                        actor="worker",
+                        details={"group": group.name, "already_present": True},
+                    )
+                    log.info("post %s was already in group %s", post.id[:8], group.name)
+                    continue
                 permanent = isinstance(e, flickr.FlickrError) and e.permanent
                 pg.retry_count = (pg.retry_count or 0) + 1
                 pg.error_message = msg
