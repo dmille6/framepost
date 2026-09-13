@@ -363,11 +363,15 @@ def fire_due_posts() -> None:
 
 # Instagram limits posts to 5 hashtags (Dec 2025) and says targeted ones outperform
 # many generic ones. Everything else keeps the historical 30.
-# How long to wait before resuming a part-built Instagram carousel. Meta rations
-# image fetches to roughly one per few minutes per app and disguises the refusal as
-# "the media could not be fetched from this URI", so an attempt that just got a frame
-# through has to sit out the cooldown — the 1-minute first step of the shared backoff
-# curve lands inside it and burns the next frame's chance too.
+# How long to wait before resuming a part-built Instagram carousel. The 1-minute first
+# step of the shared backoff curve is too eager here: it re-offers a URL seconds after a
+# fetch failed, which mostly buys a second failure.
+#
+# The 360 was originally chosen to sit out a supposed Meta fetch cooldown. That theory
+# was wrong — the failures were Flickr refusing to serve Meta's fetcher, proven by R2
+# serving the identical bytes successfully in the same minute. The value is kept as
+# deliberately conservative spacing, NOT because a six-minute cooldown is known to
+# exist. Nothing measures it; treat it as a tunable knob rather than a derived constant.
 CAROUSEL_RESUME_SECONDS = 360
 
 HASHTAG_CAP = {"instagram": 5}
@@ -841,8 +845,7 @@ def _post_instagram_carousel(
             if len(_children()) > len(resume):
                 # Got further than last time. The finished children are durable, so this
                 # attempt earned its keep and shouldn't spend a try — and the next one
-                # has to clear Meta's fetch cooldown, which the 1-minute first step of
-                # the backoff curve does not.
+                # wants more spacing than the 1-minute first step of the backoff curve.
                 e.made_progress = True
                 e.retry_after_seconds = CAROUSEL_RESUME_SECONDS
             raise

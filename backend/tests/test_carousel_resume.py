@@ -1,11 +1,20 @@
 """A carousel is built across attempts, not in one burst.
 
-Meta rations image fetches to roughly one per few minutes per app and disguises the
-refusal as "the media could not be fetched from this URI" — the same 400 shape a dead
-link gets, fired for URLs curl pulls down fine. A carousel needs one fetch per frame,
-so in practice only the first frame of an attempt gets through and an eight-frame set
-can never finish in one pass. Children are therefore durable: each attempt resumes from
-the last one's, and an attempt that got a frame through doesn't spend a try.
+Meta will not accept uploaded bytes for an image — it ingests only from a public URL —
+so every frame depends on Meta's fetcher succeeding. A failed fetch is reported as "the
+media could not be fetched from this URI": a 400 shaped exactly like a dead link, fired
+for URLs curl pulls down fine.
+
+The outage this machinery was built for (2026-09-11) was Flickr refusing to serve Meta's
+fetcher. That was proven by handing Meta the identical bytes from R2 in the same minute
+and having them accepted — it was NOT a Meta rate limit, which was an earlier reading the
+evidence disproved. Don't rebuild that theory from the error text alone. Staging to R2
+took Flickr out of the path entirely.
+
+The resume machinery still earns its keep: a fetch can fail intermittently, most often
+Meta racing CDN propagation of a just-staged object, and a partly built carousel must not
+restart from zero. Children are therefore durable — each attempt resumes from the last
+one's, and an attempt that got a frame through doesn't spend a try.
 """
 import json
 import types
@@ -39,7 +48,7 @@ def _fake_ig(monkeypatch, *, children_allowed: int | None = None) -> list[dict]:
     """Stand in for graph.instagram.com, returning the bodies actually POSTed.
 
     children_allowed: how many child containers get through before Meta starts claiming
-    it can't fetch the URL. None means no throttle.
+    it can't fetch the URL. None means every fetch succeeds.
     """
     posts: list[dict] = []
 
@@ -97,7 +106,7 @@ def test_the_parent_lists_carried_over_children_first(db, monkeypatch):
 
 
 def test_each_child_is_reported_as_soon_as_it_exists(db, monkeypatch):
-    """on_child fires per child rather than at the end, so a throttled attempt still
+    """on_child fires per child rather than at the end, so a failed attempt still
     leaves the frames it finished behind."""
     _fake_ig(monkeypatch)
     seen: list[list[str]] = []
@@ -114,19 +123,20 @@ def test_more_children_than_frames_is_refused_permanently(db, monkeypatch):
     assert e.value.permanent
 
 
-# --- the throttle ---------------------------------------------------------------------
+# --- when a frame's fetch fails -------------------------------------------------------
 
-def test_a_throttled_child_is_not_re_offered_in_line(db, monkeypatch):
-    """Re-offering the URL seconds later doesn't race a CDN — it re-trips the limiter
-    and spends the next frame's chance. Three in-line attempts is right for a lone photo
-    and wrong here."""
+def test_a_failed_child_is_not_re_offered_in_line(db, monkeypatch):
+    """A carousel already retries at a better layer: the next attempt resumes from the
+    children that landed, spaced by the backoff curve rather than by seconds. Re-offering
+    the same URL in line duplicates that in the worst place. Three in-line attempts is
+    right for a lone photo and wrong here."""
     posts = _fake_ig(monkeypatch, children_allowed=1)
     with pytest.raises(ig.InstagramError):
         ig.post_carousel(db, images=_images(3), caption="c")
     assert _children(posts) == ["https://example/u0.jpg", "https://example/u1.jpg"]
 
 
-def test_a_throttled_carousel_is_retryable(db, monkeypatch):
+def test_a_fetch_failure_is_retryable(db, monkeypatch):
     """Meta's wording reads like a dead link. Treating it as permanent would fail every
     carousel outright."""
     _fake_ig(monkeypatch, children_allowed=1)
@@ -135,7 +145,7 @@ def test_a_throttled_carousel_is_retryable(db, monkeypatch):
     assert not e.value.permanent
 
 
-def test_the_frames_that_landed_survive_the_throttle(db, monkeypatch):
+def test_the_frames_that_landed_survive_the_failure(db, monkeypatch):
     _fake_ig(monkeypatch, children_allowed=2)
     seen: list[list[str]] = []
     with pytest.raises(ig.InstagramError):
@@ -181,7 +191,7 @@ def test_progress_does_not_spend_a_try(db):
     """Eight frames at one per attempt would exhaust a five-attempt budget before the
     carousel could finish. An attempt that got further than the last one earned its
     keep."""
-    err = ig.InstagramError("throttled")
+    err = ig.InstagramError("could not be fetched")
     err.made_progress = True
     err.retry_after_seconds = scheduler.CAROUSEL_RESUME_SECONDS
     assert _failure_row(db, err).retry_count == 0
@@ -193,9 +203,9 @@ def test_a_failure_with_nothing_to_show_still_spends_one(db):
 
 
 def test_the_platforms_own_cooldown_wins_over_the_backoff_curve(db):
-    """The shared curve opens at one minute, which lands inside Meta's fetch cooldown
-    and burns the next frame's chance."""
-    err = ig.InstagramError("throttled")
+    """A platform that states its own wait knows better than the shared curve, which
+    opens at one minute."""
+    err = ig.InstagramError("could not be fetched")
     err.made_progress = True
     err.retry_after_seconds = scheduler.CAROUSEL_RESUME_SECONDS
     row = _failure_row(db, err)

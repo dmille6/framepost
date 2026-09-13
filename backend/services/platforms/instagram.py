@@ -338,8 +338,9 @@ def _create_container(
 
     fetch_attempts: how many times to re-offer image_url when Meta says it couldn't
     download it. Worth 3 for a lone photo, where the likely cause is Meta racing CDN
-    propagation of a just-staged variant. Worth exactly 1 inside a carousel, where the
-    likely cause is Meta's fetch throttle and every extra attempt re-trips it.
+    propagation of a just-staged variant. Worth exactly 1 inside a carousel, which
+    already retries at a better layer — the next attempt resumes from the children that
+    landed, spaced by the backoff curve rather than by seconds.
 
     Returns (container_id, collaborators_actually_sent, collaborators_dropped).
     """
@@ -461,11 +462,11 @@ def post_carousel(
     """Publish 2..MAX_CAROUSEL images as one carousel. Returns the same shape as
     post_photo.
 
-    resume/on_child make the build restartable. Meta rations image fetches to roughly
-    one per few minutes per app and reports the refusal as "the media could not be
-    fetched from this URI" — indistinguishable from a dead link, and it fires even for
-    URLs that curl fetches fine. A carousel needs one fetch per frame, so in practice
-    only the first frame of an attempt gets through. on_child is called with the
+    resume/on_child make the build restartable. Every frame depends on Meta fetching a
+    public URL, and a failure is reported as "the media could not be fetched from this
+    URI" — indistinguishable from a dead link, and it fires even for URLs that curl
+    fetches fine. Once fetches start failing only the frames before the first failure get
+    through, so a long carousel may need several attempts. on_child is called with the
     children built so far after each one; passing them back as resume next time lets a
     carousel finish across several attempts instead of restarting forever.
 
@@ -492,7 +493,7 @@ def post_carousel(
         raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
 
     # Children an earlier attempt already built, in frame order. Meta keeps a container
-    # for 24h, which is far longer than it takes to work through the fetch throttle.
+    # for 24h, far longer than the gap between retry attempts.
     child_ids: list[str] = [c for c in resume if c]
     if len(child_ids) > len(images):
         raise InstagramError(
