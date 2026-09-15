@@ -22,7 +22,7 @@ from database import get_session
 from models import AppConfig, EngagementSnapshot, Post, User
 from routes.auth import current_user
 from routes.posts import PostOut
-from services import carousel as carousel_svc, events
+from services import analytics_core, carousel as carousel_svc, events
 
 
 def _user_timezone(db: Session) -> ZoneInfo:
@@ -408,65 +408,54 @@ _CLAMP_MIN_HOUR = 8   # inclusive — no learned slot before 8 AM local
 _CLAMP_MAX_HOUR = 23  # inclusive — no learned slot after 11 PM local
 
 
+LEARNED_PLATFORM = "instagram"
+LEARNED_WINDOW = "7d"
+_MIN_LEARNED_POSTS = 30
+
+
 def _learned_popular_hours(db: Session) -> tuple[list[int], bool, int]:
-    """Rank local posting hours by realized engagement across all platforms.
+    """Rank local posting hours by Instagram engagement measured at a fixed age.
 
-    Data: latest engagement_snapshots row per (post, platform), summed per post.
-    Score: likes + 2×comments — views are excluded because only Flickr reports them
-    and their scale would drown the cross-platform signal. Hours are the post's
-    fired time converted to the configured local timezone.
+    Three things were wrong with the previous version, and they compounded.
 
-    Hours with fewer than _MIN_HOUR_SAMPLES posts don't qualify (one lucky photo at
-    3 AM shouldn't move the schedule); the pool is topped up from _POPULAR_HOURS to
-    _LEARNED_HOUR_COUNT entries so scatter always has variety.
+    It pooled every platform. Flickr has two orders of magnitude more engagement rows
+    than Instagram, so the ranking was effectively Flickr's — presented to the user as
+    advice about when to post, in a dialog whose output goes to Instagram.
 
-    Returns (hours, learned, sample_posts): learned=False means pure defaults.
+    It bucketed by Post.posted_at, the Flickr fire time. A post that reached Instagram
+    hours later through a retry was filed under the hour it hit Flickr.
+
+    It compared lifetime totals. An older post has had longer to accumulate, so the
+    ranking partly measured age. collect_samples with a window compares posts at the
+    same age instead, which is what the age-window analytics were built for.
+
+    The more useful change is that this can now say it does not know. Below
+    _MIN_LEARNED_POSTS samples, or without _MIN_HOUR_SAMPLES in any single hour, it
+    returns the defaults and learned=False rather than a confident-looking ranking
+    drawn from a handful of posts. Timing is a weak lever compared with what is in the
+    photograph; a schedule built on eight posts is noise wearing a number.
     """
-    sub = (
-        select(
-            EngagementSnapshot.post_id,
-            EngagementSnapshot.platform,
-            func.max(EngagementSnapshot.sampled_at).label("latest"),
-        )
-        .group_by(EngagementSnapshot.post_id, EngagementSnapshot.platform)
-        .subquery()
+    samples = analytics_core.collect_samples(
+        db, platform=LEARNED_PLATFORM, window=LEARNED_WINDOW
     )
-    rows = db.execute(
-        select(
-            Post.id,
-            Post.posted_at,
-            EngagementSnapshot.likes,
-            EngagementSnapshot.comments_count,
-        )
-        .join(EngagementSnapshot, EngagementSnapshot.post_id == Post.id)
-        .join(
-            sub,
-            (sub.c.post_id == EngagementSnapshot.post_id)
-            & (sub.c.platform == EngagementSnapshot.platform)
-            & (sub.c.latest == EngagementSnapshot.sampled_at),
-        )
-        .where(Post.posted_at.is_not(None))
-    ).all()
-
-    scores: dict[str, tuple[datetime, float]] = {}
-    for pid, posted_at, likes, comments in rows:
-        dt, sc = scores.get(pid, (posted_at, 0.0))
-        scores[pid] = (dt, sc + (likes or 0) + 2 * (comments or 0))
-
     tz = _user_timezone(db)
-    buckets: dict[int, list[float]] = defaultdict(list)
-    for posted_at, sc in scores.values():
-        local_hour = posted_at.replace(tzinfo=timezone.utc).astimezone(tz).hour
-        buckets[local_hour].append(sc)
 
-    ranked = sorted(
-        (
-            (sum(v) / len(v), h)
-            for h, v in buckets.items()
-            if len(v) >= _MIN_HOUR_SAMPLES and _CLAMP_MIN_HOUR <= h <= _CLAMP_MAX_HOUR
-        ),
-        reverse=True,
-    )
+    buckets: dict[int, list[float]] = defaultdict(list)
+    for s in samples:
+        local_hour = s.posted_at.replace(tzinfo=timezone.utc).astimezone(tz).hour
+        buckets[local_hour].append(s.quality)
+
+    ranked: list[tuple[float, int]] = []
+    if len(samples) >= _MIN_LEARNED_POSTS:
+        ranked = sorted(
+            (
+                (sum(v) / len(v), h)
+                for h, v in buckets.items()
+                if len(v) >= _MIN_HOUR_SAMPLES and _CLAMP_MIN_HOUR <= h <= _CLAMP_MAX_HOUR
+            ),
+            reverse=True,
+        )
+
     hours = [h for _, h in ranked[:_LEARNED_HOUR_COUNT]]
     learned = bool(hours)
     for h in _POPULAR_HOURS:
@@ -474,13 +463,18 @@ def _learned_popular_hours(db: Session) -> tuple[list[int], bool, int]:
             break
         if h not in hours:
             hours.append(h)
-    return hours, learned, len(scores)
+    return hours, learned, len(samples)
 
 
 class PopularHoursOut(BaseModel):
     hours: list[int]
     learned: bool
     sample_posts: int
+    # What the ranking is actually drawn from, so the caller can say so rather than
+    # presenting defaults as though they were measured.
+    platform: str = LEARNED_PLATFORM
+    window: str = LEARNED_WINDOW
+    min_posts: int = _MIN_LEARNED_POSTS
 
 
 @router.get("/popular-hours", response_model=PopularHoursOut)

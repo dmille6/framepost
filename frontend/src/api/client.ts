@@ -504,8 +504,11 @@ export const postNow = (postId: string) =>
 
 export type PopularHours = {
   hours: number[];
-  learned: boolean;
-  sample_posts: number;
+  learned: boolean;      // false = these are defaults, not measured
+  sample_posts: number;  // Instagram posts old enough to have a 7-day reading
+  platform: string;
+  window: string;
+  min_posts: number;     // how many are needed before ranking means anything
 };
 
 export const fetchPopularHours = () =>

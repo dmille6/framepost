@@ -34,8 +34,9 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
   const [preview, setPreview] = useState<SmartFillResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // The hour pool random_scatter will actually use — learned from engagement once
-  // there's enough history, defaults until then.
+  // The hour pool random_scatter will actually use. Ranked by Instagram engagement at a
+  // fixed age once there are enough posts to rank; defaults until then, and the dialog
+  // says which it is rather than letting defaults look like a measurement.
   const { data: popular } = useQuery({
     queryKey: ["popular-hours"],
     queryFn: fetchPopularHours,
@@ -158,11 +159,18 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
             {popular?.learned ? (
               <>
                 {" "}
-                — <span style={{ color: "var(--teal)" }}>learned from your engagement</span> across{" "}
-                {popular.sample_posts} posts.
+                — <span style={{ color: "var(--teal)" }}>ranked by Instagram engagement</span>{" "}
+                at {popular.window}, across {popular.sample_posts} posts.
               </>
             ) : (
-              <> (defaults until there's enough engagement history).</>
+              <>
+                {" "}
+                — defaults. Ranking these by {popular?.platform ?? "Instagram"} engagement
+                needs {popular?.min_posts ?? 30} posts old enough to have a{" "}
+                {popular?.window ?? "7d"} reading; there are{" "}
+                <strong>{popular?.sample_posts ?? 0}</strong>. Posting time is a weak
+                lever next to what is in the photograph.
+              </>
             )}{" "}
             Schedule fuzz still applies so post times look natural. Re-running this gives
             different dates.
