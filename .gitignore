@@ -44,3 +44,5 @@ logs/
 cloudflare.env
 *.env
 !.env.example
+# tsc -b incremental build state; per-machine, never shared.
+*.tsbuildinfo
