@@ -22,8 +22,7 @@ venv/
 
 # Node local
 node_modules/
-# frontend/dist/ is NOT excluded: it is the compiled output that nginx/Dockerfile
-# copies in, built by scripts/build-frontend.sh. Still gitignored -- it is an artifact.
+frontend/dist/
 frontend/build/
 .vite/
 
