@@ -29,6 +29,31 @@ log = logging.getLogger(__name__)
 OUTPUT_W = 1080
 OUTPUT_H = 1920
 FPS = 30
+
+# What Instagram requires of a reel that arrives through the API, as opposed to one
+# dragged into the website. Two of these are not defaults and the file was failing both:
+#
+#   +faststart   moves the moov atom to the front. Meta fetches the video from a URL and
+#                needs the header before the payload; without it the container is only
+#                playable once fully downloaded, and Meta rejects it.
+#   silent AAC   the spec lists an audio codec and Meta's encoder is unreliable on a
+#                track-less file. A silent stereo AAC track costs a few KB and removes
+#                the whole class of failure. Music still gets added in-app afterwards.
+#
+# Segments stay video-only; this applies to the finished file, which is what gets
+# uploaded.
+# JPEG is full-range ("yuvj420p"); video is conventionally limited-range. Handing a
+# full-range stream to a player that assumes limited range crushes blacks and blows
+# highlights -- on stage photography, which lives in both, that is exactly the wrong
+# failure. Converting at the segment stage means concat and the single-segment copy
+# both inherit it.
+_RANGE_FIX = "scale=in_range=full:out_range=tv"
+
+_SILENT_AUDIO_IN = ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+_DELIVERY_ARGS = [
+    "-c:a", "aac", "-b:a", "128k", "-shortest",
+    "-movflags", "+faststart",
+]
 # Upscale factor when handing a static frame to ffmpeg zoompan — without this the gentle
 # zoom-in reveals pixel boundaries. 4x is overkill for the 5% zoom we apply but keeps the
 # math simple and the file irrelevant after concat.
@@ -135,7 +160,7 @@ def _render_simple(seg: PhotoSegment, segment_path: Path, work: Path) -> None:
         "ffmpeg", "-y",
         "-loop", "1",
         "-i", str(frame_path),
-        "-vf", zoompan,
+        "-vf", f"{zoompan},{_RANGE_FIX}",
         "-t", f"{seg.duration_s:.3f}",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
         "-an",
@@ -174,6 +199,7 @@ def _render_director(seg: PhotoSegment, segment_path: Path, work: Path) -> None:
         "ffmpeg", "-y",
         "-framerate", str(FPS),
         "-i", str(frames_dir / "f_%05d.jpg"),
+        "-vf", _RANGE_FIX,
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
         "-an",
         str(segment_path),
@@ -190,11 +216,14 @@ def _concat(segments: list[Path], durations: list[float], output_path: Path, tmp
     total length is sum(durations) - (N-1)*X.
     """
     if len(segments) == 1:
-        # Nothing to fade against — fast-path copy.
+        # Nothing to fade against. Not a stream copy any more: the delivery file needs
+        # an audio track and a relocated moov atom, neither of which survives -c copy.
         cmd = [
             "ffmpeg", "-y",
             "-i", str(segments[0]),
-            "-c", "copy",
+            *_SILENT_AUDIO_IN,
+            "-c:v", "copy",
+            *_DELIVERY_ARGS,
             str(output_path),
         ]
         subprocess.run(cmd, check=True, capture_output=True)
@@ -223,10 +252,12 @@ def _concat(segments: list[Path], durations: list[float], output_path: Path, tmp
     cmd = [
         "ffmpeg", "-y",
         *inputs,
+        *_SILENT_AUDIO_IN,
         "-filter_complex", "; ".join(chain),
         "-map", prev_label,
+        "-map", f"{len(segments)}:a",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
-        "-an",
+        *_DELIVERY_ARGS,
         str(output_path),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
