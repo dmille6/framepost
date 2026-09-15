@@ -140,3 +140,88 @@ def test_record_published_commits_immediately(db):
     db.rollback()
     pp = db.get(PostPlatform, (post.id, cred.id))
     assert pp.status == "posted" and pp.remote_id == "remote-1"
+
+
+# --------------------------------------------------------------------------
+# the Flickr path has the same shape, and a duplicate there lands in the archive
+# --------------------------------------------------------------------------
+
+@pytest.fixture()
+def flickr_ok(monkeypatch, tmp_path):
+    """A successful Flickr upload with the surrounding machinery stubbed out."""
+    src = tmp_path / "shot.arw"
+    src.write_bytes(b"raw")
+    monkeypatch.setattr(scheduler.storage, "DERIVATIVES", tmp_path)
+    monkeypatch.setattr(scheduler.image, "make_derivative",
+                        lambda s, d, edge: d.write_bytes(b"jpeg"))
+    monkeypatch.setattr(scheduler.duplicate, "find_in_flickr_cache", lambda db, h: None)
+    monkeypatch.setattr(scheduler.duplicate, "find_soft_match", lambda db, **kw: None)
+    monkeypatch.setattr(scheduler.tags, "merged_tags_for_post", lambda db, p: "a b")
+    monkeypatch.setattr(scheduler.flickr, "format_tags", lambda *a, **k: "a b")
+    monkeypatch.setattr(scheduler.caption_text, "description_for", lambda *a, **k: "desc")
+    monkeypatch.setattr(scheduler.flickr, "upload_photo", lambda **kw: "9988776655")
+    monkeypatch.setattr(scheduler.flickr, "photo_url", lambda pid: f"https://flickr/{pid}")
+    return str(src)
+
+
+def _pending(db, src: str) -> Post:
+    p = Post(id=uuid.uuid4().hex, status="pending", title="t", original_filename="f.arw",
+             original_path=src, scheduled_at=NOW, retry_count=0)
+    db.add(p)
+    db.flush()
+    return p
+
+
+def test_flickr_upload_survives_failing_bookkeeping(db, flickr_ok, monkeypatch):
+    """The photo is in the archive. Losing the id means the retry uploads it twice."""
+    post = _pending(db, flickr_ok)
+    db.commit()
+    monkeypatch.setattr(scheduler, "_flickr_post_bookkeeping",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("groups blew up")))
+
+    scheduler._flickr_post(db, post, fired_at=NOW)
+
+    fresh = db.get(Post, post.id)
+    assert fresh.flickr_photo_id == "9988776655"
+    assert fresh.status in ("posted", "late")
+
+
+def test_failing_bookkeeping_does_not_raise_past_the_fanout(db, flickr_ok, monkeypatch):
+    """fire_due_posts skips the non-Flickr fanout when this raises, and will never
+    revisit the post because it is no longer pending -- so Instagram would never fire."""
+    post = _pending(db, flickr_ok)
+    db.commit()
+    monkeypatch.setattr(scheduler, "_flickr_post_bookkeeping",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    scheduler._flickr_post(db, post, fired_at=NOW)   # must not raise
+
+
+def test_flickr_id_is_committed_not_just_staged(db, flickr_ok):
+    post = _pending(db, flickr_ok)
+    db.commit()
+    scheduler._flickr_post(db, post, fired_at=NOW)
+    db.rollback()
+    assert db.get(Post, post.id).flickr_photo_id == "9988776655"
+
+
+def test_record_failure_leaves_an_uploaded_post_alone(db):
+    post = Post(id=uuid.uuid4().hex, status="posted", title="t",
+                flickr_photo_id="123456", scheduled_at=NOW, retry_count=0)
+    db.add(post)
+    db.commit()
+
+    scheduler._record_failure(db, post, RuntimeError("album add failed"), fired_at=NOW)
+
+    assert post.status == "posted"
+    assert post.retry_count == 0, "a live photo must not consume a retry"
+    assert post.next_retry_at is None
+
+
+def test_record_failure_still_works_for_a_real_upload_failure(db):
+    post = Post(id=uuid.uuid4().hex, status="pending", title="t",
+                scheduled_at=NOW, retry_count=0)
+    db.add(post)
+    db.commit()
+    scheduler._record_failure(db, post, RuntimeError("upload refused"), fired_at=NOW)
+    assert post.retry_count == 1
+    assert post.status in ("pending", "failed")

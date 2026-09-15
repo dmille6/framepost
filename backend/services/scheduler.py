@@ -165,76 +165,115 @@ def _flickr_post(db, post: Post, fired_at: datetime) -> None:
         late = post.scheduled_at < (fired_at - LATE_THRESHOLD)
         post.status = "late" if late else "posted"
         post.updated_at = fired_at
+        # The photo is on Flickr. Record that before anything else can fail: a rollback
+        # here would lose the id, and the retry would upload a second copy into the
+        # archive.
+        db.commit()
 
-        events.log_event(
-            db,
-            post_id=post.id,
-            event_type="flickr_uploaded",
-            actor="worker",
-            details={"flickr_photo_id": photo_id, "url": post.flickr_url},
-        )
-
-        # Assign groups now: the photo exists on Flickr and its tags are final, so
-        # tag rules evaluate against what was actually published. Delivery is paced
-        # separately by submit_due_groups.
-        assigned = group_routing.ensure_assignments(db, post)
-        if assigned:
-            events.log_event(
-                db,
-                post_id=post.id,
-                event_type="groups_assigned",
-                actor="worker",
-                details={"groups": [g.name for g in assigned]},
+        # Everything below is bookkeeping, and none of it may fail the post. Two reasons.
+        # The photo is already public, so raising would re-upload it. And the caller
+        # skips the non-Flickr fanout when this function raises, so a failure here would
+        # leave the post marked posted with Instagram never fired and nothing to retry
+        # (fire_due_posts only picks up 'pending').
+        try:
+            _flickr_post_bookkeeping(db, post, photo_id, fired_at, late)
+        except Exception:
+            log.exception(
+                "post %s: flickr upload succeeded as %s but bookkeeping failed",
+                post.id[:8], photo_id,
             )
-
-        # Add to selected albums. Failures are non-fatal — log and continue.
-        rows = db.execute(
-            select(Album).join(PostAlbum, PostAlbum.album_id == Album.id).where(PostAlbum.post_id == post.id)
-        ).scalars().all()
-        for album in rows:
-            if not album.flickr_album_id:
-                continue
-            try:
-                flickr.rest_call(
-                    db,
-                    "flickr.photosets.addPhoto",
-                    photoset_id=album.flickr_album_id,
-                    photo_id=photo_id,
-                )
-                events.log_event(
-                    db,
-                    post_id=post.id,
-                    event_type="edited",
-                    actor="worker",
-                    details={"action": "added_to_album", "album": album.name, "flickr_album_id": album.flickr_album_id},
-                )
-            except Exception as ae:  # noqa: BLE001
-                log.warning("post %s: failed to add to album %s: %s", post.id[:8], album.name, ae)
-                events.log_event(
-                    db,
-                    post_id=post.id,
-                    event_type="flickr_failed",
-                    actor="worker",
-                    details={"action": "add_to_album", "album": album.name, "error": str(ae)},
-                )
-        if late:
-            events.log_event(
-                db,
-                post_id=post.id,
-                event_type="marked_late",
-                actor="worker",
-                details={
-                    "scheduled_at": post.scheduled_at.isoformat(),
-                    "fired_at": fired_at.isoformat(),
-                },
-            )
-        _set_config("flickr_last_success", fired_at.isoformat())
-        log.info("post %s posted to flickr as %s", post.id[:8], photo_id)
+            db.rollback()
     finally:
         derivative.unlink(missing_ok=True)
 
 
+def _flickr_post_bookkeeping(
+    db, post: Post, photo_id: str, fired_at: datetime, late: bool
+) -> None:
+    """Timeline, group assignment and album membership for a photo already on Flickr.
+
+    Split out so the publish can be committed before any of it runs. Callers treat a
+    failure here as non-fatal.
+    """
+    events.log_event(
+        db,
+        post_id=post.id,
+        event_type="flickr_uploaded",
+        actor="worker",
+        details={"flickr_photo_id": photo_id, "url": post.flickr_url},
+    )
+
+    # Assign groups now: the photo exists on Flickr and its tags are final, so
+    # tag rules evaluate against what was actually published. Delivery is paced
+    # separately by submit_due_groups.
+    assigned = group_routing.ensure_assignments(db, post)
+    if assigned:
+        events.log_event(
+            db,
+            post_id=post.id,
+            event_type="groups_assigned",
+            actor="worker",
+            details={"groups": [g.name for g in assigned]},
+        )
+
+    # Add to selected albums. Failures are non-fatal — log and continue.
+    rows = db.execute(
+        select(Album).join(PostAlbum, PostAlbum.album_id == Album.id).where(PostAlbum.post_id == post.id)
+    ).scalars().all()
+    for album in rows:
+        if not album.flickr_album_id:
+            continue
+        try:
+            flickr.rest_call(
+                db,
+                "flickr.photosets.addPhoto",
+                photoset_id=album.flickr_album_id,
+                photo_id=photo_id,
+            )
+            events.log_event(
+                db,
+                post_id=post.id,
+                event_type="edited",
+                actor="worker",
+                details={"action": "added_to_album", "album": album.name, "flickr_album_id": album.flickr_album_id},
+            )
+        except Exception as ae:  # noqa: BLE001
+            log.warning("post %s: failed to add to album %s: %s", post.id[:8], album.name, ae)
+            events.log_event(
+                db,
+                post_id=post.id,
+                event_type="flickr_failed",
+                actor="worker",
+                details={"action": "add_to_album", "album": album.name, "error": str(ae)},
+            )
+    if late:
+        events.log_event(
+            db,
+            post_id=post.id,
+            event_type="marked_late",
+            actor="worker",
+            details={
+                "scheduled_at": post.scheduled_at.isoformat(),
+                "fired_at": fired_at.isoformat(),
+            },
+        )
+    _set_config("flickr_last_success", fired_at.isoformat())
+    log.info("post %s posted to flickr as %s", post.id[:8], photo_id)
+
+
 def _record_failure(db, post: Post, err: Exception, fired_at: datetime) -> None:
+    if post.flickr_photo_id:
+        # The upload succeeded and was committed; only something after it failed.
+        # Scheduling a retry would put a second copy of the photo in the archive.
+        # repost-flickr clears flickr_photo_id before re-queueing, so a genuine
+        # re-upload attempt never reaches this branch.
+        #
+        # A backstop: _flickr_post already swallows post-publish failures. It stays
+        # because the invariant -- an uploaded photo is never re-uploaded by a retry --
+        # should not depend on that one try/except staying where it is.
+        log.warning("post %s: flickr photo %s is live; not recording a failure for: %s",
+                    post.id[:8], post.flickr_photo_id, err)
+        return
     msg = str(err)
     permanent = isinstance(err, flickr.FlickrError) and err.permanent
     post.retry_count = (post.retry_count or 0) + 1
