@@ -125,7 +125,7 @@ def main(commit: bool, force_evening: bool, weeks: int, late_only: bool) -> int:
     ).scalars().all()
 
     # Posts per day across the whole window, including the ones this pass will not
-    # touch -- a late post can only stay on its own day if nothing else is there.
+    # touch. Used only to report which days are already carrying more than one post.
     day_counts: dict[object, int] = defaultdict(int)
     for r in rows:
         day_counts[r.scheduled_at.date()] += 1
@@ -141,9 +141,13 @@ def main(commit: bool, force_evening: bool, weeks: int, late_only: bool) -> int:
         return 0
 
     late = sum(1 for r in rows if is_dead_hour(r.scheduled_at.hour))
+    shared = sum(1 for r in rows
+                 if is_dead_hour(r.scheduled_at.hour) and day_counts[r.scheduled_at.date()] > 1)
     print(f"{len(rows)} scheduled post(s) in the next {weeks} weeks "
           f"({rows[0].scheduled_at:%d %b} to {rows[-1].scheduled_at:%d %b}), "
-          f"{late} of them between 21:00 and 06:00.\n")
+          f"{late} of them between 21:00 and 06:00"
+          + (f"; {shared} share a day with another post, which this pass leaves as it "
+             f"found it.\n" if late_only and shared else ".\n"))
 
     arms = assign_arms([p.id for p in rows], force_evening)
 
@@ -155,18 +159,15 @@ def main(commit: bool, force_evening: bool, weeks: int, late_only: bool) -> int:
     for post in rows:
         original = post.scheduled_at.date()
         day = original
-        if late_only:
-            # Keep the post on its own day whenever it is the only thing there -- the
-            # fix is the hour, and shifting the date as well would ripple through a
-            # queue that is otherwise fine. Move only to avoid creating a crowded day.
-            while day_counts[day] > (1 if day == original else 0):
-                day += timedelta(days=1)
-            if day != original:
-                day_counts[original] -= 1
-                day_counts[day] += 1
-        else:
+        if not late_only:
             while taken[day] >= MAX_PER_DAY:
                 day += timedelta(days=1)
+        # In late-only mode the date never changes. The fault being fixed is the hour;
+        # a day already carrying two posts was crowded before this pass touched it, and
+        # in a queue running about one post a day for a year the "next free day" is the
+        # next gap in that year -- weeks out. An earlier version walked forward to an
+        # empty day and proposed moving posts 27 and 36 days, which is not a retime, it
+        # is a reschedule nobody asked for.
         taken[day] += 1
         window = EVENING if arms[post.id] == "evening" else MIDDAY
         planned.append((post, datetime.combine(day, _time_in(window, post.id))))
