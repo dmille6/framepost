@@ -566,3 +566,32 @@ def test_count_children_is_none_on_an_api_error(monkeypatch):
 
     monkeypatch.setattr(ig, "_client", lambda: _C())
     assert ig._count_children("m1", "tok") is None
+
+
+# --- posted_to_instagram_at on the carousel path -------------------------------------
+# The column meant "posted to Instagram, unless it was a carousel". Nothing failed
+# loudly; a reach analysis written against it just silently excluded every carousel,
+# and the Instagram assist tab kept offering to help post one that was already live.
+
+def test_published_carousels_carry_the_instagram_timestamp(db):
+    """Whatever sets it for a single photo must set it for a carousel lead, or the
+    column cannot be used as a filter by anything."""
+    import inspect
+    from services import scheduler
+
+    src = inspect.getsource(scheduler._post_instagram_carousel)
+    assert "posted_to_instagram_at" in src, (
+        "the carousel publish path must set posted_to_instagram_at, like the single path"
+    )
+
+
+def test_history_does_not_draw_two_chips_for_one_instagram_post(db):
+    """The automated path writes a post_platforms row AND the timestamp. Emitting a chip
+    for each showed the same post twice, the second without a permalink — which reads as
+    a failed extra attempt rather than one successful post."""
+    import inspect
+    from routes import history
+
+    src = inspect.getsource(history)
+    assert "api_platforms" in src
+    assert 'post.posted_to_instagram_at and "instagram" not in api_platforms' in src

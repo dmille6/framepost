@@ -177,7 +177,13 @@ def post_platforms(
     # Manual-tracking platforms (no API integration). When the user clicks "Mark posted" on
     # the IG or Reddit copy-paste tab, we record a timestamp on Post — surface those as chips
     # so the unified 'where did this go' view is complete.
-    if post.posted_to_instagram_at:
+    #
+    # Only as a FALLBACK. The automated path sets posted_to_instagram_at as well as
+    # writing a post_platforms row, so appending unconditionally drew the chip twice --
+    # 29 posts on this install showed two Instagram chips, the second with no permalink,
+    # which reads like a failed extra attempt.
+    api_platforms = {c.platform for _pp, c in rows}
+    if post.posted_to_instagram_at and "instagram" not in api_platforms:
         out.append(
             PostPlatformOut(
                 platform="instagram",
@@ -191,7 +197,7 @@ def post_platforms(
                 retry_count=0,
             )
         )
-    if post.reddit_posted_at:
+    if post.reddit_posted_at and "reddit" not in api_platforms:
         out.append(
             PostPlatformOut(
                 platform="reddit",

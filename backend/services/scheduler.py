@@ -892,6 +892,7 @@ def _post_instagram_carousel(
     path: a retry after a transient failure reuses the uploads instead of re-staging ten
     photos, and the daily orphan sweep can tell in-flight variants from abandoned ones.
     """
+    published_at = datetime.now(timezone.utc).replace(tzinfo=None)
     frames = carousel_svc.members(db, post.carousel_id)
     if len(frames) < carousel_svc.MIN_MEMBERS:
         raise instagram.InstagramError(
@@ -973,6 +974,13 @@ def _post_instagram_carousel(
     # and would never have reaped them either.
     for frame in frames:
         ig_variant.cleanup_staged(db, db.get(PostPlatform, (frame.id, cred.id)))
+    # The same field the single-photo path sets. Without it the column means "posted
+    # to Instagram, unless it was a carousel" -- a trap for every later query, and one
+    # that silently excluded all three carousels from a reach analysis written against
+    # it. The Instagram assist tab reads this too, so a published carousel was still
+    # offering to help post it.
+    post.posted_to_instagram_at = published_at
+
     sent = result.get("frames_sent")
     live = result.get("frames_published")
     if live is not None and sent is not None and live != sent:
