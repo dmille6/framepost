@@ -39,6 +39,39 @@ type Selected = {
   cropEnd?: ReelCrop | null;
 };
 
+/**
+ * How much of a source frame the automatic 9:16 crop throws away, 0..1.
+ *
+ * A reel is 9:16 and most stage frames are 2:3, so some loss is normal and expected.
+ * What is not normal is a landscape frame: 2048x1365 keeps 768px of width and discards
+ * 62% of it, and on the first reel published through the API that turned the cover into
+ * a disembodied arm and a row of audience heads -- the performer was outside the crop
+ * entirely. Nothing warned, because the crop was geometrically valid.
+ *
+ * The number is what matters, not the orientation label: a very wide panorama is the
+ * same failure whether or not anyone calls it landscape.
+ */
+export function croppedAwayFraction(width: number, height: number): number {
+  if (!width || !height) return 0;
+  const c = defaultCropForAspect(width, height);
+  return 1 - (c.width * c.height) / (width * height);
+}
+
+/** Past this, a centre crop is a guess rather than a safe default. A 2:3 portrait
+ *  loses ~16% and is fine; a 3:2 landscape loses ~62% and is not. */
+export const CROP_LOSS_WARN = 0.4;
+
+/** True while this frame still carries the crop the app chose, untouched. A crop the
+ *  photographer set by hand is their decision and never warned about, however severe. */
+export function isAutoCrop(sel: Selected): boolean {
+  if (!sel.crop || sel.cropEnd) return false;
+  const d = defaultCropForAspect(sel.post.width ?? 1080, sel.post.height ?? 1920);
+  return (
+    d.x === sel.crop.x && d.y === sel.crop.y &&
+    d.width === sel.crop.width && d.height === sel.crop.height
+  );
+}
+
 function defaultCropForAspect(width: number, height: number): ReelCrop {
   // Return the largest centered 9:16 rectangle that fits inside the source image.
   const srcAspect = width / height;
@@ -201,6 +234,14 @@ export default function ReelTab({ postId, post }: Props) {
   const isFailed = reel && reel.status === "failed";
 
   const allCropped = selected.every((s) => s.crop !== null);
+  // Frames the automatic crop would mangle. A warning, never a block: an unusual crop
+  // is sometimes exactly what is wanted, and the photographer can see the thumbnail.
+  const riskyCrops = selected.filter(
+    (sel) =>
+      croppedAwayFraction(sel.post.width ?? 0, sel.post.height ?? 0) >= CROP_LOSS_WARN &&
+      isAutoCrop(sel),
+  );
+  const coverIsRisky = riskyCrops.some((sel) => sel.post.id === coverPostId);
   const canGenerate = selected.length >= 1 && allCropped && !isGenerating;
 
   return (
@@ -289,6 +330,13 @@ export default function ReelTab({ postId, post }: Props) {
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
         <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
           {!allCropped && "Crop all photos before generating."}
+          {allCropped && riskyCrops.length > 0 && (
+            <span style={{ color: "var(--amber, #e0b268)" }}>
+              {riskyCrops.length === 1 ? "1 frame is" : `${riskyCrops.length} frames are`}{" "}
+              mostly cropped away by the automatic 9:16 crop
+              {coverIsRisky && ", including the cover"}. Worth setting by hand.
+            </span>
+          )}
         </div>
         <button
           className="fp-btn"
@@ -511,6 +559,11 @@ function SequenceRow({
   onCrop: () => void;
   onSetCover: () => void;
 }) {
+  const lossPct = croppedAwayFraction(
+    selected.post.width ?? 0, selected.post.height ?? 0,
+  );
+  // Only while the crop is still the one we chose. A hand-set crop is a decision.
+  const needsCrop = lossPct >= CROP_LOSS_WARN && isAutoCrop(selected);
   return (
     <div
       style={{
@@ -576,6 +629,27 @@ function SequenceRow({
               : "Not yet cropped"}
           </span>
         </div>
+        {needsCrop && (
+          <button
+            type="button"
+            onClick={onCrop}
+            title="A centred crop this severe usually cuts the performer out of frame. Set it by hand."
+            style={{
+              justifySelf: "start",
+              marginTop: 2,
+              padding: "2px 7px",
+              borderRadius: 4,
+              border: "0.5px solid rgba(224,178,104,0.45)",
+              background: "rgba(224,178,104,0.12)",
+              color: "var(--amber, #e0b268)",
+              fontSize: 10,
+              fontFamily: "inherit",
+              cursor: "pointer",
+            }}
+          >
+            ⚠ {Math.round(lossPct * 100)}% cropped away — check this
+          </button>
+        )}
       </div>
       <div style={{ display: "flex", gap: 4 }}>
         <button
