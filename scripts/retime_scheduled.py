@@ -36,6 +36,13 @@ once the answer is in.
     docker compose exec -T backend python /tmp/retime_scheduled.py --commit
     docker compose exec -T backend python /tmp/retime_scheduled.py --weeks 12 --commit
     docker compose exec -T backend python /tmp/retime_scheduled.py --evening --commit
+
+`--late-only` touches nothing but the posts sitting in the dead hours, anywhere in
+the window, and keeps each on its own day unless something else is already there.
+That is what makes it safe to run across a queue with an experiment already in it:
+the retimed posts are no longer in the dead hours, so they are never selected.
+
+    docker compose exec -T backend python /tmp/retime_scheduled.py --weeks 52 --late-only
 """
 import hashlib
 import sys
@@ -62,7 +69,9 @@ DEFAULT_WEEKS = 8
 
 # Hours nothing should be scheduled into. Separate from the experiment: whichever arm
 # wins, 23:00 is not it, and the live queue had 56 posts sitting in this band.
-DEAD_HOURS = range(21, 24)
+def is_dead_hour(hour: int) -> bool:
+    """21:00-05:59. Both ends of the night, not just the late side of midnight."""
+    return hour >= 21 or hour < 6
 
 
 def _rand(post_id: str, salt: str) -> float:
@@ -99,7 +108,7 @@ def assign_arms(post_ids: list[str], force_evening: bool) -> dict[str, str]:
     return {pid: ("evening" if i < half else "midday") for i, pid in enumerate(ordered)}
 
 
-def main(commit: bool, force_evening: bool, weeks: int) -> int:
+def main(commit: bool, force_evening: bool, weeks: int, late_only: bool) -> int:
     db = SessionLocal()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     horizon = now + timedelta(weeks=weeks)
@@ -115,12 +124,23 @@ def main(commit: bool, force_evening: bool, weeks: int) -> int:
         .order_by(Post.scheduled_at)
     ).scalars().all()
 
+    # Posts per day across the whole window, including the ones this pass will not
+    # touch -- a late post can only stay on its own day if nothing else is there.
+    day_counts: dict[object, int] = defaultdict(int)
+    for r in rows:
+        day_counts[r.scheduled_at.date()] += 1
+
+    if late_only:
+        # Touch only the posts sitting in the dead hours, and leave every other post
+        # exactly where it is. Without this the pass would re-roll the arms of an
+        # experiment already in flight, which is the one thing it must not do.
+        rows = [r for r in rows if is_dead_hour(r.scheduled_at.hour)]
+
     if not rows:
-        print(f"Nothing scheduled in the next {weeks} weeks. No changes.")
+        print(f"Nothing to retime in the next {weeks} weeks. No changes.")
         return 0
 
-    late = sum(1 for r in rows if r.scheduled_at.hour in DEAD_HOURS
-                or r.scheduled_at.hour < 6)
+    late = sum(1 for r in rows if is_dead_hour(r.scheduled_at.hour))
     print(f"{len(rows)} scheduled post(s) in the next {weeks} weeks "
           f"({rows[0].scheduled_at:%d %b} to {rows[-1].scheduled_at:%d %b}), "
           f"{late} of them between 21:00 and 06:00.\n")
@@ -133,9 +153,20 @@ def main(commit: bool, force_evening: bool, weeks: int) -> int:
     taken: dict[object, int] = defaultdict(int)
     planned: list[tuple[Post, datetime]] = []
     for post in rows:
-        day = post.scheduled_at.date()
-        while taken[day] >= MAX_PER_DAY:
-            day = day + timedelta(days=1)
+        original = post.scheduled_at.date()
+        day = original
+        if late_only:
+            # Keep the post on its own day whenever it is the only thing there -- the
+            # fix is the hour, and shifting the date as well would ripple through a
+            # queue that is otherwise fine. Move only to avoid creating a crowded day.
+            while day_counts[day] > (1 if day == original else 0):
+                day += timedelta(days=1)
+            if day != original:
+                day_counts[original] -= 1
+                day_counts[day] += 1
+        else:
+            while taken[day] >= MAX_PER_DAY:
+                day += timedelta(days=1)
         taken[day] += 1
         window = EVENING if arms[post.id] == "evening" else MIDDAY
         planned.append((post, datetime.combine(day, _time_in(window, post.id))))
@@ -185,4 +216,5 @@ if __name__ == "__main__":
     weeks = DEFAULT_WEEKS
     if "--weeks" in sys.argv:
         weeks = int(sys.argv[sys.argv.index("--weeks") + 1])
-    raise SystemExit(main("--commit" in sys.argv, "--evening" in sys.argv, weeks))
+    raise SystemExit(main("--commit" in sys.argv, "--evening" in sys.argv, weeks,
+                          "--late-only" in sys.argv))
