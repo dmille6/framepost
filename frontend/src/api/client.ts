@@ -1533,3 +1533,62 @@ export const findReplaceApply = (body: FindReplaceBody & { post_ids: string[] })
     "/api/posts/find-replace/apply",
     { method: "POST", body: JSON.stringify(body) },
   );
+
+// --- distribution: is the work reaching anyone -------------------------------------
+// The rest of Analytics divides by posts. These divide by audience, which is the only
+// way to tell "nobody saw it" apart from "they saw it and didn't care".
+
+export type RatePoint = {
+  post_id: string;
+  title: string | null;
+  posted_at: string;
+  reach: number;
+  followers: number;
+  reach_rate: number;
+  likes: number;
+  like_rate: number | null;
+};
+
+export type Distribution = {
+  rates: {
+    platform: string;
+    window: string | null;
+    posts: number;
+    low_sample: boolean;
+    median_reach_rate: number | null;
+    median_like_rate: number | null;
+    best: RatePoint[];
+    worst: RatePoint[];
+  };
+  decay: {
+    platform: string;
+    posts: number;
+    low_sample: boolean;
+    pct_by_24h: number | null;
+    pct_by_48h: number | null;
+    n_24h: number;
+    n_48h: number;
+  };
+  conversion: {
+    platform: string;
+    days: number;
+    low_sample: boolean;
+    median_profile_views: number | null;
+    median_new_followers: number | null;
+    conversion_pct: number | null;
+  };
+  cadence: {
+    platform: string;
+    window: string | null;
+    single_post_days: number;
+    multi_post_posts: number;
+    low_sample: boolean;
+    median_reach_rate_single: number | null;
+    median_reach_rate_multi: number | null;
+  };
+};
+
+export const fetchDistribution = (platform = "instagram", window = "7d") =>
+  apiFetch<Distribution>(
+    `/api/analytics/distribution?platform=${encodeURIComponent(platform)}&window=${encodeURIComponent(window)}`,
+  );

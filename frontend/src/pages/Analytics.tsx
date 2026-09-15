@@ -19,6 +19,7 @@ import {
   type TimeSlot,
 } from "../api/client";
 import PageHeader, { CardHeader } from "../components/PageHeader";
+import DistributionPanel from "../components/DistributionPanel";
 import Topbar from "../components/Topbar";
 import { usePageTitle } from "../hooks/usePageTitle";
 import { absoluteTime, relativeTime } from "../lib/time";
@@ -103,6 +104,8 @@ export default function Analytics() {
             </button>
           }
         />
+
+        <DistributionPanel window={window_ ?? "7d"} />
 
         {/* ---- Cross-platform view (engagement_snapshots) ---------------------- */}
         <div className="fp-card" style={{ marginBottom: 16 }}>

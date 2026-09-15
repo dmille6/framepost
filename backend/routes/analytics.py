@@ -299,6 +299,7 @@ def trigger_sync(
 # -----------------------------------------------------------------------------
 
 from services import analytics_core as ac  # noqa: E402
+from services import analytics_distribution as adist  # noqa: E402
 
 
 class PlatformSummary(BaseModel):
@@ -492,3 +493,19 @@ def collab_lift(
     consequence rather than the invite: see analytics_core.collab_lift.
     """
     return ac.collab_lift(db, window=window)
+
+
+@router.get("/distribution")
+def distribution(
+    platform: str = Query("instagram"),
+    window: str | None = Query("7d", pattern="^(24h|48h|7d)$"),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Reach rate, like-per-reach, decay, follow conversion and cadence.
+
+    The rest of Analytics divides by posts, which can only answer "which photo did
+    best". These divide by audience, which is what says whether the account is being
+    shown to anyone -- a different question, and on this account the binding one.
+    """
+    return adist.distribution(db, platform=platform, window=window)
