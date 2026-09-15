@@ -1432,6 +1432,10 @@ export type Reel = {
   status: "pending" | "ready" | "failed";
   error_message: string | null;
   mp4_available: boolean;
+  scheduled_at: string | null;
+  posted_at: string | null;
+  remote_url: string | null;
+  publish_error: string | null;
   photos: ReelPhoto[];
   created_at: string;
   updated_at: string;
@@ -1459,6 +1463,14 @@ export const updateReel = (id: string, patch: Partial<ReelCreate>) =>
 
 export const deleteReel = (id: string) =>
   apiFetch<{ ok: boolean }>(`/api/reels/${id}`, { method: "DELETE" });
+
+/** Queue a rendered reel for automatic publishing. `null` takes it back out.
+ *  Refused server-side unless the reel has finished rendering. */
+export const scheduleReel = (id: string, scheduledAt: string | null) =>
+  apiFetch<Reel>(`/api/reels/${id}/schedule`, {
+    method: "POST",
+    body: JSON.stringify({ scheduled_at: scheduledAt }),
+  });
 
 export const reelDownloadUrl = (id: string) => `/api/reels/${id}/mp4`;
 

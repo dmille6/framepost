@@ -17,6 +17,7 @@ import {
   listHistory,
   listReels,
   reelDownloadUrl,
+  scheduleReel,
   thumbnailUrl,
   type HistoryPost,
   type Reel,
@@ -325,12 +326,20 @@ export default function ReelTab({ postId, post }: Props) {
         >
           <div style={{ fontSize: 13, fontWeight: 500 }}>Reel ready</div>
           <div style={{ fontSize: 11 }}>
-            Download the MP4 and upload to <strong>Instagram Reels</strong> (drag into
-            instagram.com) or <strong>TikTok</strong> (via the mobile app). Same file
-            works for both. Hashtag conventions differ — IG likes a long block, TikTok
-            prefers 3-5 trending ones.
+            Schedule it and the worker publishes it to <strong>Instagram</strong> for
+            you — performers in any frame are invited as collaborators, same as a photo
+            post. The MP4 is still there if you want it for <strong>TikTok</strong>,
+            which has no API here.
           </div>
-          <a className="fp-btn" href={reelDownloadUrl(reel.id)} download>
+
+          <ReelSchedule reel={reel} />
+
+          <a
+            className="fp-btn-ghost"
+            href={reelDownloadUrl(reel.id)}
+            download
+            style={{ textAlign: "center", textDecoration: "none" }}
+          >
             Download MP4
           </a>
           {caption && (
@@ -751,6 +760,98 @@ function PhotoPicker({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+
+/**
+ * Hand a finished reel to the worker, or take it back.
+ *
+ * Deliberately a datetime field and two buttons rather than the full ScheduleDialog:
+ * a reel is made and queued in one sitting, and the dialog's slot-finding is about
+ * spacing a photo queue this does not belong to.
+ *
+ * Publishing is irreversible and Meta transcodes for minutes, so the states worth
+ * showing are distinct: queued (and for when), published (with the link), and failed
+ * (with Meta's reason, because "it didn't work" is not actionable).
+ */
+function ReelSchedule({ reel }: { reel: Reel }) {
+  const qc = useQueryClient();
+  // datetime-local wants naive local time; the API wants the same shape the rest of
+  // the scheduler uses, so the value is passed through untouched.
+  const [when, setWhen] = useState("");
+
+  const mutation = useMutation({
+    mutationFn: (iso: string | null) => scheduleReel(reel.id, iso),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["reel", reel.id] });
+      void qc.invalidateQueries({ queryKey: ["reels"] });
+    },
+  });
+
+  if (reel.posted_at) {
+    return (
+      <div style={{ fontSize: 12 }}>
+        Published {new Date(reel.posted_at).toLocaleString()}
+        {reel.remote_url && (
+          <>
+            {" · "}
+            <a href={reel.remote_url} target="_blank" rel="noreferrer" className="fp-link">
+              View on Instagram
+            </a>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  if (reel.scheduled_at) {
+    return (
+      <div style={{ display: "grid", gap: 6 }}>
+        <div style={{ fontSize: 12 }}>
+          Queued for {new Date(reel.scheduled_at).toLocaleString()} — the worker publishes
+          it and invites the performers.
+        </div>
+        {reel.publish_error && (
+          <div style={{ fontSize: 11, color: "var(--danger)" }}>
+            Last attempt failed: {reel.publish_error}
+          </div>
+        )}
+        <button
+          className="fp-btn-ghost"
+          onClick={() => mutation.mutate(null)}
+          disabled={mutation.isPending}
+          style={{ justifySelf: "start", padding: "5px 12px", fontSize: 12 }}
+        >
+          Unschedule
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      <input
+        type="datetime-local"
+        className="fp-input"
+        value={when}
+        onChange={(e) => setWhen(e.target.value)}
+        style={{ padding: "6px 10px", fontSize: 12, width: 210 }}
+      />
+      <button
+        className="fp-btn"
+        disabled={!when || mutation.isPending}
+        onClick={() => mutation.mutate(when)}
+        style={{ padding: "6px 14px", fontSize: 12 }}
+      >
+        {mutation.isPending ? "Scheduling…" : "Schedule to Instagram"}
+      </button>
+      {mutation.isError && (
+        <span style={{ fontSize: 11, color: "var(--danger)" }}>
+          {(mutation.error as Error).message}
+        </span>
+      )}
     </div>
   );
 }
