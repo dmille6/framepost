@@ -408,6 +408,13 @@ def fire_due_posts() -> None:
             except Exception:
                 log.exception("post %s: platform fanout failed", post.id[:8])
                 db.rollback()
+
+            # Only now is it known whether anything was delivered.
+            try:
+                _reconcile_post_status(db, post, fired_at=now)
+            except Exception:
+                log.exception("post %s: status reconcile failed", post.id[:8])
+                db.rollback()
     except Exception:
         log.exception("fire_due_posts failed")
         db.rollback()
@@ -1179,6 +1186,51 @@ def _parse_target_platforms(post: Post) -> list[str] | None:
     return None
 
 
+def _reconcile_post_status(db, post: Post, *, fired_at: datetime) -> None:
+    """A post is failed only when nothing reached anywhere.
+
+    post.status is set by Flickr's outcome alone -- it is really the Flickr delivery's
+    state wearing the post's name. So a photo Flickr rejected as a duplicate read as
+    `failed` even after Instagram published it: the post was live, the queue said it had
+    failed, and the only way to tell was to open the platform rows.
+
+    Runs after the fanout because that is the first moment the answer is known. When
+    _record_failure decides Flickr is exhausted, nothing else has been attempted yet.
+
+    Flickr's own failure is not hidden by this -- error_message and the timeline events
+    stay exactly as they were. What changes is that the post stops claiming it never went
+    out when it did.
+    """
+    if post.status != "failed":
+        return
+    delivered = db.execute(
+        select(PostPlatform.post_id)
+        .where(PostPlatform.post_id == post.id, PostPlatform.status == "posted")
+        .limit(1)
+    ).first()
+    if not delivered:
+        return
+
+    late = post.scheduled_at is not None and post.scheduled_at < (fired_at - LATE_THRESHOLD)
+    post.status = "late" if late else "posted"
+    post.posted_at = post.posted_at or fired_at
+    post.updated_at = fired_at
+    events.log_event(
+        db,
+        post_id=post.id,
+        event_type="status_reconciled",
+        actor="worker",
+        details={
+            "from": "failed",
+            "to": post.status,
+            "reason": "flickr failed but another destination published",
+        },
+    )
+    db.commit()
+    log.info("post %s: flickr failed but it published elsewhere — status now %s",
+             post.id[:8], post.status)
+
+
 def fanout_to_platforms(
     db,
     post: Post,
@@ -1348,8 +1400,13 @@ def retry_due_platform_posts() -> None:
     """Pick up post_platforms rows whose retry timer has elapsed and try them again.
 
     Mirrors the Flickr retry logic: each tick scans for status='pending' rows on already-fired
-    posts (post.status in posted/late) where next_retry_at <= now. Backoff schedule is the
-    same retry.next_retry_at curve used for Flickr, so users see consistent behavior.
+    posts where next_retry_at <= now. Backoff schedule is the same retry.next_retry_at curve
+    used for Flickr, so users see consistent behavior.
+
+    'failed' counts as already-fired. It means Flickr gave up, which says nothing about
+    whether Instagram deserves another attempt -- and excluding it stranded those rows
+    permanently: the post could never leave 'failed' precisely because the retry that
+    would have rescued it was filtered out by being 'failed'.
     """
     db = SessionLocal()
     try:
@@ -1362,7 +1419,7 @@ def retry_due_platform_posts() -> None:
                 PostPlatform.status == "pending",
                 PostPlatform.next_retry_at.is_not(None),
                 PostPlatform.next_retry_at <= now,
-                Post.status.in_(("posted", "late")),
+                Post.status.in_(("posted", "late", "failed")),
             )
         ).all()
         if not rows:
@@ -1374,6 +1431,8 @@ def retry_due_platform_posts() -> None:
             try:
                 _post_to_platform(db, cred, post, fired_at=now)
                 db.commit()
+                # A late success can be the first delivery this post ever had.
+                _reconcile_post_status(db, post, fired_at=now)
             except Exception as e:  # noqa: BLE001
                 db.rollback()
                 _record_platform_failure(db, post, cred, e)
