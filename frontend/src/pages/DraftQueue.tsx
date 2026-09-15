@@ -26,6 +26,7 @@ import DraftCard from "../components/DraftCard";
 import EmptyState from "../components/EmptyState";
 import MetadataEditor, { editorChangesToPatch } from "../components/MetadataEditor";
 import PageHeader from "../components/PageHeader";
+import QueueTabs from "../components/QueueTabs";
 import ScheduleDialog from "../components/ScheduleDialog";
 import { SkeletonGrid } from "../components/Skeleton";
 import SmartFillDialog from "../components/SmartFillDialog";
@@ -340,6 +341,8 @@ export default function DraftQueue() {
           title="Draft Queue"
           subtitle="Lightroom export → import pipeline → review → schedule. The pipeline pre-fills title, description, and tags from any IPTC metadata it finds."
         />
+
+        <QueueTabs draftCount={drafts.length} scheduledCount={scheduledPending.length} />
 
         <StatsRow stats={stats} />
         <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 16, alignItems: "start", marginBottom: 24 }}>

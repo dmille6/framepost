@@ -10,6 +10,7 @@ import {
 } from "../api/client";
 import Calendar from "../components/Calendar";
 import PageHeader from "../components/PageHeader";
+import QueueTabs from "../components/QueueTabs";
 import RescheduleSidebar from "../components/RescheduleSidebar";
 import ScheduledList from "../components/ScheduledList";
 import ScheduleDialog from "../components/ScheduleDialog";
@@ -118,6 +119,8 @@ export default function Scheduled() {
             </div>
           }
         />
+
+        <QueueTabs scheduledCount={items.length} />
 
         {view === "calendar" ? (
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 320px", gap: 16, alignItems: "start" }}>

@@ -1,11 +1,25 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link, NavLink } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 
 import { fetchActivityUnreadCount, fetchFlickrStatus, listHistory } from "../api/client";
 import { useAuth } from "../auth";
 import StatusBanner from "./StatusBanner";
 
+/** A nav entry; `also` lists further paths that should keep it lit. */
+type NavItem = { to: string; label: string; also?: string[] };
+
+const NAV: NavItem[] = [
+  // Drafts and Scheduled are two stages of one pile of work, so they share a nav
+  // entry and separate via the tab strip on the pages themselves.
+  { to: "/drafts", label: "Queue", also: ["/scheduled"] },
+  { to: "/published", label: "Published" },
+  { to: "/activity", label: "Activity" },
+  { to: "/analytics", label: "Analytics" },
+  { to: "/settings", label: "Settings" },
+];
+
 export default function Topbar() {
+  const { pathname } = useLocation();
   const { user, logout } = useAuth();
   const { data: flickr } = useQuery({
     queryKey: ["flickr-status"],
@@ -102,30 +116,30 @@ export default function Topbar() {
         </Link>
 
         <nav style={{ display: "flex", gap: 4, marginLeft: 4 }}>
-          {[
-            { to: "/drafts", label: "Drafts" },
-            { to: "/scheduled", label: "Scheduled" },
-            { to: "/published", label: "Published" },
-            { to: "/activity", label: "Activity" },
-            { to: "/analytics", label: "Analytics" },
-            { to: "/settings", label: "Settings" },
-          ].map((l) => (
+          {NAV.map((l) => (
             <NavLink
               key={l.to}
               to={l.to}
-              style={({ isActive }) => ({
-                fontSize: 13,
-                color: isActive ? "var(--text)" : "var(--text-dim)",
-                fontWeight: isActive ? 500 : 400,
-                textDecoration: "none",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "6px 10px",
-                borderRadius: 6,
-                background: isActive ? "var(--hover)" : "transparent",
-                transition: "background 120ms ease, color 120ms ease",
-              })}
+              style={({ isActive: selfActive }) => {
+                const isActive =
+                  selfActive ||
+                  (l.also ?? []).some(
+                    (p) => pathname === p || pathname.startsWith(`${p}/`),
+                  );
+                return {
+                  fontSize: 13,
+                  color: isActive ? "var(--text)" : "var(--text-dim)",
+                  fontWeight: isActive ? 500 : 400,
+                  textDecoration: "none",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  background: isActive ? "var(--hover)" : "transparent",
+                  transition: "background 120ms ease, color 120ms ease",
+                };
+              }}
             >
               {l.label}
               {l.to === "/published" && missedCount > 0 && (
