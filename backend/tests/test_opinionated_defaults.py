@@ -1,10 +1,14 @@
 """Defaults that stop the editor asking a question whose answer never changes.
 
-Three fields were re-answered on every photo for no reason: `city` (IPTC carries
-none, so it was always blank and the Analytics city breakdown was always empty),
-tags (an empty global profile meant every post started from nothing), and the
-group checklist (routing had decided it since services/group_routing.py landed,
-but the editor still rendered 25 checkboxes capped at five).
+Two fields were re-answered on every photo for no reason: `city` (IPTC carries
+none, so it was always blank and the Analytics city breakdown was always empty)
+and the group checklist (routing had decided it since services/group_routing.py
+landed, but the editor still rendered 25 checkboxes capped at five).
+
+Tags are deliberately not defaulted -- this install has a working per-subject
+profile system and seeding the always-on profile would both duplicate it and
+mis-tag the circus and drag work. The profile tests below cover the merge
+machinery, not any particular content.
 
 What these tests actually guard is the *opt-out*. A default that cannot be
 declined is not a default, it is a behaviour change -- so each one here is paired
@@ -46,10 +50,12 @@ def test_default_city_can_be_switched_off_with_a_blank(db):
 # default tags
 # --------------------------------------------------------------------------
 
-def test_first_run_seeds_the_default_profile_with_tags(db):
+def test_first_run_creates_an_empty_default_profile(db):
+    """Empty on purpose: whatever belongs on every photo is the photographer's call,
+    and anything seeded here reaches all of them at publish time."""
     p = tags_svc.ensure_default_profile(db)
     assert p.is_default == 1
-    assert "burlesque" in p.tags
+    assert p.tags == ""
 
 
 def test_existing_default_profile_is_never_overwritten(db):
@@ -63,23 +69,29 @@ def test_existing_default_profile_is_never_overwritten(db):
 
 
 def test_default_profile_tags_reach_a_post(db):
-    tags_svc.ensure_default_profile(db)
+    """Whatever the photographer puts in the always-on profile ships with every post."""
+    p = tags_svc.ensure_default_profile(db)
+    p.tags = "darrellmiller, neworleans"
+    db.flush()
     post = Post(id=uuid.uuid4().hex, status="pending", tags="xenazeitgeist")
     db.add(post)
     db.flush()
     merged = tags_svc.merged_tags_for_post(db, post)
     assert "xenazeitgeist" in merged
-    assert "burlesque" in merged
+    assert "darrellmiller" in merged
 
 
 def test_post_tags_are_not_duplicated_by_the_default_profile(db):
-    """A photo already tagged 'burlesque' must not ship it twice."""
-    tags_svc.ensure_default_profile(db)
-    post = Post(id=uuid.uuid4().hex, status="pending", tags="Burlesque")
+    """A photo already carrying a profile tag must not ship it twice, whatever the
+    casing -- the profile system's whole job is merging, not concatenating."""
+    p = tags_svc.ensure_default_profile(db)
+    p.tags = "neworleans"
+    db.flush()
+    post = Post(id=uuid.uuid4().hex, status="pending", tags="NewOrleans")
     db.add(post)
     db.flush()
     merged = [t.strip().lower() for t in tags_svc.merged_tags_for_post(db, post).split(",")]
-    assert merged.count("burlesque") == 1
+    assert merged.count("neworleans") == 1
 
 
 # --------------------------------------------------------------------------
