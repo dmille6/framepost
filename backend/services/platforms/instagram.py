@@ -612,12 +612,45 @@ def post_carousel(
     _await_container(parent_id, token, describing=f"carousel of {len(child_ids)}")
     media_id, permalink = _publish_container(ig_user_id, parent_id, token)
 
+    published = _count_children(media_id, token)
+    if published is not None and published != len(child_ids):
+        # Meta accepted the parent, published it, and returned 200 while quietly
+        # producing fewer frames than the children list named. It happened on
+        # 2026-09-14: seven children sent, six live, retry_count 0, no error anywhere.
+        # Nothing downstream noticed, because nothing was looking.
+        #
+        # Not raised. The post is already public; raising here would retry it and put a
+        # second copy on the profile, which is worse than a short one. Reported instead,
+        # loudly, so the caller can record it against the post.
+        log.error(
+            "instagram: carousel %s published %d of %d frames — Meta dropped %d",
+            media_id, published, len(child_ids), len(child_ids) - published,
+        )
+
     return {
         "remote_id": str(media_id),
         "url": permalink,
         "collaborators": used_collabs,
         "collaborators_rejected": rejected,
+        "frames_sent": len(child_ids),
+        "frames_published": published,
     }
+
+
+def _count_children(media_id: str, token: str) -> int | None:
+    """How many frames the published carousel actually has, or None if unreadable.
+
+    Best-effort by design: this runs after a successful publish, and a failure to count
+    is not a reason to report the publish as failed.
+    """
+    try:
+        with _client() as c:
+            r = c.get(f"/{media_id}", params={"fields": "children{id}", "access_token": token})
+        if r.status_code >= 400:
+            return None
+        return len(((r.json().get("children") or {}).get("data")) or [])
+    except Exception:  # noqa: BLE001 — a verification step must not fail the publish
+        return None
 
 
 def _await_container(

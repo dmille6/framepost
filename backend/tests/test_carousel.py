@@ -511,3 +511,58 @@ def test_a_carousels_own_frames_are_not_an_hour_conflict(db):
     db.commit()
     hit = _slot_taken(db, when, exclude_post_id=lead.id, exclude_carousel_id=cid)
     assert hit is not None and hit.id == other.id
+
+
+# --- Meta silently dropping frames ---------------------------------------------------
+# On 2026-09-14 a seven-frame carousel published with six. retry_count was 0, no error
+# was recorded anywhere, and the children list sent to Meta named all seven. Nothing
+# downstream compared what was sent against what went live, so the loss was invisible
+# until someone counted the frames on Instagram a day later.
+
+def test_count_children_reports_what_meta_published(monkeypatch):
+    from services.platforms import instagram as ig
+
+    class _R:
+        status_code = 200
+        @staticmethod
+        def json():
+            return {"children": {"data": [{"id": "1"}, {"id": "2"}, {"id": "3"}]}}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **k): return _R()
+
+    monkeypatch.setattr(ig, "_client", lambda: _C())
+    assert ig._count_children("m1", "tok") == 3
+
+
+def test_count_children_is_none_when_unreadable(monkeypatch):
+    """A failed count must not be mistaken for zero frames — that would report every
+    publish as having dropped everything."""
+    from services.platforms import instagram as ig
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **k): raise RuntimeError("network gone")
+
+    monkeypatch.setattr(ig, "_client", lambda: _C())
+    assert ig._count_children("m1", "tok") is None
+
+
+def test_count_children_is_none_on_an_api_error(monkeypatch):
+    from services.platforms import instagram as ig
+
+    class _R:
+        status_code = 400
+        @staticmethod
+        def json(): return {"error": {"message": "nope"}}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **k): return _R()
+
+    monkeypatch.setattr(ig, "_client", lambda: _C())
+    assert ig._count_children("m1", "tok") is None

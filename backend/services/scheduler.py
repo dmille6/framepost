@@ -973,8 +973,22 @@ def _post_instagram_carousel(
     # and would never have reaped them either.
     for frame in frames:
         ig_variant.cleanup_staged(db, db.get(PostPlatform, (frame.id, cred.id)))
-    log.info("carousel %s published as %s (%d frames)",
-             post.carousel_id[:8], result["remote_id"], len(frames))
+    sent = result.get("frames_sent")
+    live = result.get("frames_published")
+    if live is not None and sent is not None and live != sent:
+        # Meta published fewer frames than it was given, without an error. Recorded
+        # against the lead so it shows in the post's timeline -- a log line on a box
+        # nobody reads is how the 2026-09-14 carousel lost a frame unnoticed for a day.
+        log.error("carousel %s: %d of %d frames live", post.carousel_id[:8], live, sent)
+        events.log_event(
+            db, post_id=post.id, event_type="instagram_frames_dropped", actor="scheduler",
+            details={"sent": sent, "published": live,
+                     "remote_id": result["remote_id"], "url": result["url"]},
+        )
+        db.commit()
+    log.info("carousel %s published as %s (%d frames sent, %s live)",
+             post.carousel_id[:8], result["remote_id"], len(frames),
+             live if live is not None else "?")
     return result["remote_id"], result["url"]
 
 
