@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
-from services import caption_text, events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, reddit, storage, tags as tags_svc
+from services import caption_text, events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, r2, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -787,11 +787,20 @@ def instagram_post_now(
             "Post hasn't been published yet — Instagram fires automatically as part of "
             "the scheduled fan-out.",
         )
-    if not post.flickr_photo_id:
+    # Meta ingests from a public URL rather than an upload, so the photo has to be
+    # somewhere public. That used to mean Flickr, and this check said so. Since R2
+    # staging shipped it means our own bucket, and Flickr is not in the Instagram path
+    # at all — the scheduler's copy of this rule was updated then and this one was not,
+    # which left the manual recovery refusing to run in the situation it exists for:
+    # Flickr unavailable or deliberately skipped for this post.
+    #
+    # Nothing publishes here. The row is queued and the worker runs the same fanout
+    # path, which does its own R2-aware check before uploading.
+    if not post.flickr_photo_id and not r2.configured():
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Instagram needs the photo on Flickr first (Meta ingests the image from the "
-            "Flickr rendition), and this post never made it there.",
+            "Instagram needs the photo on a public URL — configure R2 staging "
+            "(Settings → Platforms) or publish this post to Flickr first.",
         )
     pp = db.get(PostPlatform, (post_id, cred.id))
     if pp and pp.status == "posted":
