@@ -891,6 +891,38 @@ def _post_instagram_carousel(
     return result["remote_id"], result["url"]
 
 
+def _record_published(
+    db, post: Post, cred: PlatformCredential, remote_id, remote_url, fired_at: datetime
+) -> None:
+    """Commit "this is live" the moment the platform says so, before anything else.
+
+    By the time a publish call returns, the post is public. Every line after it is
+    bookkeeping -- collaborator outcomes, staged-image cleanup, timeline events -- and
+    all of it is recoverable if lost. The publish is not.
+
+    The old order did that bookkeeping first and committed once at the end, so a crash
+    in between (a restart, a deploy, a hung network call to delete the staged image)
+    left the post live on the platform with no local record of it. The retry then read
+    its own empty table, saw nothing, and published a second copy.
+
+    This does not make publishing exactly-once -- no API here can promise that, and a
+    crash between the platform's reply and this commit still loses the record. It
+    shrinks the window from "several operations including a network round-trip" to one
+    insert.
+    """
+    pp = db.get(PostPlatform, (post.id, cred.id))
+    if not pp:
+        pp = PostPlatform(post_id=post.id, platform_id=cred.id)
+        db.add(pp)
+    pp.status = "posted"
+    pp.remote_id = remote_id
+    pp.remote_url = remote_url
+    pp.posted_at = fired_at
+    pp.error_message = None
+    pp.next_retry_at = None
+    db.commit()
+
+
 def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: datetime) -> None:
     """Attempt one platform fanout; persist outcome to post_platforms + activity timeline."""
     # Also catches an original_path pointing at a file that is no longer there: the old
@@ -905,6 +937,12 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
     alt = (post.alt_text or "").strip() or (
         (post.title or "") + ("\n\n" + post.description if post.description else "")
     )
+
+    # Set by the Instagram branch; read by the bookkeeping that now runs after the
+    # publish has been recorded.
+    staging_id: str | None = None
+    collab_sent: list[str] = []
+    collab_refused: list[str] = []
 
     if cred.platform == "bluesky":
         if carousel_svc.is_lead(post):
@@ -964,7 +1002,6 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         ratio = (post.width / post.height) if post.width and post.height else None
         fit = post.ig_fit or "crop"
         pp0 = db.get(PostPlatform, (post.id, cred.id))
-        staging_id: str | None = None
 
         # With R2 configured every photo is staged in our own bucket, reshaped or not:
         # Meta could not fetch from Flickr at all on 2026-09-11 while reading the same
@@ -1020,40 +1057,36 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 ig_variant.record_floor(db, "3:4")
 
         remote_id, remote_url = result["remote_id"], result["url"]
-        sent = result.get("collaborators") or []
-        refused = result.get("collaborators_rejected") or []
-        if sent or refused:
-            events.log_event(
-                db, post_id=post.id, event_type="instagram_collab", actor="worker",
-                details={"invited": sent, "rejected": refused},
-            )
-            performers_svc.record_collab_outcome(
-                db, post_id=post.id, sent=sent, rejected=refused,
-            )
-            if refused:
-                log.warning(
-                    "post %s: IG collab handles refused (private/invalid): %s",
-                    post.id[:8], refused,
-                )
-        # Feeds the manual engagement tracker + the assist tab's "already posted" state.
-        post.posted_to_instagram_at = fired_at
-        # Staging variant served its purpose — pull it off Flickr (sweep catches stragglers).
-        if staging_id:
-            ig_variant.cleanup_staged(db, db.get(PostPlatform, (post.id, cred.id)))
+        collab_sent = result.get("collaborators") or []
+        collab_refused = result.get("collaborators_rejected") or []
     else:
         raise RuntimeError(f"unsupported platform: {cred.platform}")
 
-    # Upsert post_platforms row.
-    pp = db.get(PostPlatform, (post.id, cred.id))
-    if not pp:
-        pp = PostPlatform(post_id=post.id, platform_id=cred.id)
-        db.add(pp)
-    pp.status = "posted"
-    pp.remote_id = remote_id
-    pp.remote_url = remote_url
-    pp.posted_at = fired_at
-    pp.error_message = None
-    pp.next_retry_at = None
+    # The post is public from here. Make that durable before anything that could fail.
+    _record_published(db, post, cred, remote_id, remote_url, fired_at)
+
+    if cred.platform == "instagram":
+        if collab_sent or collab_refused:
+            events.log_event(
+                db, post_id=post.id, event_type="instagram_collab", actor="worker",
+                details={"invited": collab_sent, "rejected": collab_refused},
+            )
+            performers_svc.record_collab_outcome(
+                db, post_id=post.id, sent=collab_sent, rejected=collab_refused,
+            )
+            if collab_refused:
+                log.warning(
+                    "post %s: IG collab handles refused (private/invalid): %s",
+                    post.id[:8], collab_refused,
+                )
+        # Feeds the manual engagement tracker + the assist tab's "already posted" state.
+        post.posted_to_instagram_at = fired_at
+        # Staging variant served its purpose — pull it off Flickr (sweep catches
+        # stragglers). A network call, and the likeliest thing here to hang or throw,
+        # which is exactly why it now runs after the publish has been recorded.
+        if staging_id:
+            ig_variant.cleanup_staged(db, db.get(PostPlatform, (post.id, cred.id)))
+
     cred.last_success_at = fired_at
     # A channel that just published is demonstrably authorised again.
     cred.auth_status, cred.auth_error, cred.auth_flagged_at = "ok", None, None
@@ -1172,6 +1205,22 @@ def _record_platform_failure(
     try:
         refreshed_cred = db.get(PlatformCredential, cred.id)
         pp = db.get(PostPlatform, (post.id, cred.id))
+        if pp is not None and pp.status == "posted" and pp.remote_id:
+            # The platform published and _record_published committed it; what failed was
+            # the bookkeeping afterwards. Marking this failed would schedule a retry, and
+            # the retry would publish a second copy of a post that is already live --
+            # which is the exact failure the early commit exists to prevent.
+            log.warning(
+                "post %s: %s published as %s but post-publish bookkeeping failed: %s",
+                post.id[:8], cred.platform, pp.remote_id, err,
+            )
+            events.log_event(
+                db, post_id=post.id, event_type=f"{cred.platform}_bookkeeping_failed",
+                actor="worker",
+                details={"remote_id": pp.remote_id, "error": str(err)[:400]},
+            )
+            db.commit()
+            return
         if not pp:
             pp = PostPlatform(post_id=post.id, platform_id=cred.id)
             db.add(pp)
