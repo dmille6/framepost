@@ -190,7 +190,7 @@ export default function DraftQueue() {
       const body = editorChangesToPatch(changes);
       const saved = await updatePost(id, body);
       await setPostAlbums(id, changes.album_ids);
-      await setPostGroups(id, changes.group_ids);
+      await setPostGroups(id, changes.group_ids, changes.use_routing);
       await setPostProfiles(id, changes.profile_ids);
       await setPostPerformers(id, changes.performer_ids);
       return saved;

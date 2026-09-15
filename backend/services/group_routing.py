@@ -35,8 +35,18 @@ def _norm(tag: str) -> str:
     return tags_svc.normalize_tag(tag).lower()
 
 
+def tags_from_csv(raw: str | None) -> set[str]:
+    """Normalised tag set from stored tag text.
+
+    The routing rule and the editor's preview of that rule both go through here, so
+    "Burlesque, a7rIII" splits and folds identically on the publish path and on the
+    screen that predicts it.
+    """
+    return {_norm(t) for t in tags_svc.parse_csv(raw) if t.strip()}
+
+
 def post_tags(post: Post) -> set[str]:
-    return {_norm(t) for t in tags_svc.parse_csv(post.tags) if t.strip()}
+    return tags_from_csv(post.tags)
 
 
 def group_rule(group: Group) -> set[str]:

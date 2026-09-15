@@ -105,8 +105,21 @@ def merged_tags_for_post(db: Session, post: Post) -> str:
     return ", ".join(merge_unique(user, from_profiles))
 
 
+# The floor every photo in this catalogue sits on, applied through the global default
+# profile. Kept here so a fresh install and an upgraded one agree; migration
+# 0030_opinionated_defaults carries its own frozen copy for existing databases.
+DEFAULT_PROFILE_TAGS = (
+    "burlesque, burlesqueperformer, stagephotography, liveperformance, "
+    "performancephotography, stagelighting, neworleans, nola"
+)
+
+
 def ensure_default_profile(db: Session) -> TagProfile:
-    """First-run bootstrap: a global-default profile that's always applied. Empty by default."""
+    """First-run bootstrap: a global-default profile that's always applied.
+
+    Seeded with DEFAULT_PROFILE_TAGS rather than empty. An empty default made every
+    new post start from nothing, so the same eight tags got retyped per photo or, more
+    often, skipped -- and a post with no tags is a post nothing finds."""
     existing = db.execute(
         select(TagProfile).where(TagProfile.is_default == 1)
     ).scalar_one_or_none()
@@ -117,7 +130,7 @@ def ensure_default_profile(db: Session) -> TagProfile:
     p = TagProfile(
         id=uuid.uuid4().hex,
         name="Global default",
-        tags="",
+        tags=DEFAULT_PROFILE_TAGS,
         is_default=1,
         sort_order=0,
     )

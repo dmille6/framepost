@@ -86,6 +86,19 @@ def _include_exif_default(db: Session) -> int:
     return 1 if (row.value if row and row.value else "true").lower() == "true" else 0
 
 
+def _default_city(db: Session) -> str | None:
+    """Settings -> General -> 'Default city'. Every shoot is local until it isn't, so a
+    blank city on import means the photographer's home city rather than "unknown" -- it
+    feeds alt text, captions and the Analytics city breakdown, all of which were losing
+    the field simply because nothing filled it in. IPTC carries no city, so this is the
+    only thing that ever would. Set it empty to opt out."""
+    row = db.execute(
+        select(AppConfig).where(AppConfig.key == "default_city")
+    ).scalar_one_or_none()
+    value = (row.value if row else None) or ""
+    return value.strip() or None
+
+
 def import_image(
     src_path: Path,
     *,
@@ -170,6 +183,7 @@ def import_image(
         gps_lng=exif_fields["gps_lng"],
         exif_raw=exif_fields["exif_raw"],
         iptc_raw=iptc_fields["iptc_raw"],
+        city=_default_city(db),
         include_exif=_include_exif_default(db),
         created_at=now,
         updated_at=now,

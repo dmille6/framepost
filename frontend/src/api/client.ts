@@ -130,6 +130,7 @@ export type Post = {
   posted_to_instagram_at: string | null;
   reddit_posted_at: string | null;
   target_platforms: string[] | null;
+  groups_overridden?: boolean;
   // Structured context (migration 0014). venue_id references venues.id; show/city are
   // free text typeahead'd from past values; alt_text is AI-generated.
   venue_id: string | null;
@@ -949,6 +950,22 @@ export type Group = {
 export type GroupInput = Omit<Group, "id">;
 
 export const listGroups = () => apiFetch<Group[]>("/api/groups");
+
+export type RoutedGroup = {
+  id: string;
+  name: string;
+  category: string | null;
+  /** Tags on the post that satisfied this group's rule; empty for an unconditional group. */
+  matched: string[];
+};
+
+/** Groups a post carrying `tags` would be submitted to. Server-side so the preview
+ *  cannot drift from services/group_routing.py, which decides it for real at publish. */
+export const previewGroupRouting = (tags: string) =>
+  apiFetch<RoutedGroup[]>("/api/groups/route-preview", {
+    method: "POST",
+    body: JSON.stringify({ tags }),
+  });
 export const createGroup = (body: GroupInput) =>
   apiFetch<Group>("/api/groups", { method: "POST", body: JSON.stringify(body) });
 export const updateGroup = (id: string, body: GroupInput) =>
@@ -957,10 +974,12 @@ export const deleteGroup = (id: string) =>
   apiFetch<{ ok: true }>(`/api/groups/${id}`, { method: "DELETE" });
 export const getPostGroups = (postId: string) =>
   apiFetch<string[]>(`/api/groups/post/${postId}`);
-export const setPostGroups = (postId: string, groupIds: string[]) =>
+/** `useRouting` hands the post back to automatic routing; the id list is then ignored.
+ *  Without it an empty list means "no groups", which is a different thing. */
+export const setPostGroups = (postId: string, groupIds: string[], useRouting = false) =>
   apiFetch<string[]>(`/api/groups/post/${postId}`, {
     method: "PUT",
-    body: JSON.stringify({ group_ids: groupIds }),
+    body: JSON.stringify({ group_ids: groupIds, use_routing: useRouting }),
   });
 
 export type AppConfigMap = Record<string, string | null>;

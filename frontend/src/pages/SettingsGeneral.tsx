@@ -20,6 +20,7 @@ type FormState = {
   default_safety_level: string;
   default_content_type: string;
   default_include_exif: string;
+  default_city: string;
   max_groups_default: string;
   warn_groups_threshold: string;
   schedule_fuzz_minutes: string;
@@ -36,6 +37,7 @@ const FIELDS: (keyof FormState)[] = [
   "default_safety_level",
   "default_content_type",
   "default_include_exif",
+  "default_city",
   "max_groups_default",
   "warn_groups_threshold",
   "schedule_fuzz_minutes",
@@ -167,6 +169,14 @@ export default function SettingsGeneral() {
             <option value="screenshot">Screenshot</option>
             <option value="other">Other</option>
           </select>
+        </ConfigField>
+        <ConfigField label="Default city" hint="applied to new imports; blank to leave empty">
+          <input
+            className="fp-input"
+            value={form.default_city}
+            onChange={(e) => set("default_city", e.target.value)}
+            placeholder="New Orleans"
+          />
         </ConfigField>
         <ConfigField label="Camera info">
           <select className="fp-select" value={form.default_include_exif} onChange={(e) => set("default_include_exif", e.target.value)}>

@@ -230,6 +230,7 @@ _EDITABLE: dict[str, Any] = {
     "default_safety_level": _v_enum(_SAFETY),
     "default_content_type": _v_enum(_CONTENT),
     "default_include_exif": _v_bool,
+    "default_city": _v_str(max_len=80),
     "original_retention_days": _v_int(1, 3650),
     "storage_warning_percent": _v_int(50, 99),
     "storage_hardstop_gb": _v_int(1, 1000),

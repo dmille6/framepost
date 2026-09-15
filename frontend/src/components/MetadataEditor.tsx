@@ -29,6 +29,8 @@ import IgCropStudio, { type CropRect, type FocalPoint } from "./IgCropStudio";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
 import Lightbox from "./Lightbox";
 import MultiSelectChips from "./MultiSelectChips";
+import PreflightPanel from "./PreflightPanel";
+import RoutedGroups from "./RoutedGroups";
 import PerformersField from "./PerformersField";
 import TagsInput from "./TagsInput";
 import TrendingPanel from "./TrendingPanel";
@@ -43,6 +45,8 @@ export type EditorChanges = {
   content_type: string;
   album_ids: string[];
   group_ids: string[];
+  /** Hand groups back to automatic routing; group_ids is then ignored. */
+  use_routing: boolean;
   profile_ids: string[];
   performer_ids: string[];
   target_platforms: string[] | null;
@@ -105,8 +109,17 @@ type Props = {
   saving: boolean;
 };
 
-const MAX_GROUPS = 5;
-const WARN_GROUPS = 8;
+// Fallbacks only. The live values come from Settings -> General
+// (max_groups_default / warn_groups_threshold), which the editor ignored until now --
+// editing either setting changed nothing, because these constants were used directly.
+const MAX_GROUPS_FALLBACK = 12;
+const WARN_GROUPS_FALLBACK = 8;
+
+/** A positive integer from app_config, or the fallback when unset or unparseable. */
+export function configInt(raw: string | null | undefined, fallback: number): number {
+  const n = Number.parseInt((raw ?? "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 /** "Bebe Bardeaux - @bebe.bardeaux" when the performer has a real name AND a handle;
  *  just "@handle" when the name is only the handle (auto-created from a keyword). */
@@ -156,6 +169,8 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   // The learned floor decides the target ratio; the studio mirrors the worker's rule.
   const { data: appCfg } = useQuery({ queryKey: ["config"], queryFn: fetchAppConfig });
   const igRatioKey = appCfg?.["ig_min_ratio_support"] ?? "4:5";
+  const maxGroups = configInt(appCfg?.["max_groups_default"], MAX_GROUPS_FALLBACK);
+  const warnGroups = configInt(appCfg?.["warn_groups_threshold"], WARN_GROUPS_FALLBACK);
 
   // Venue lookup — fetch the full venue list once, then resolve by ID. List is small
   // (typically <50 venues per user) so client-side resolution is fine.
@@ -163,6 +178,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     queryKey: ["venues", ""],
     queryFn: () => listVenues(),
   });
+  useEffect(() => {
+    setManualGroups(Boolean(post.groups_overridden));
+  }, [post.id, post.groups_overridden]);
+
   useEffect(() => {
     if (post.venue_id) {
       const v = allVenues.find((x) => x.id === post.venue_id);
@@ -214,6 +233,14 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [profileIds, setProfileIds] = useState<Set<string>>(new Set());
   const [performers, setPerformers] = useState<Performer[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  // Sixteen fields in a 380px rail asked the photographer to re-answer, per photo,
+  // questions whose answer is now a default: city, destinations, privacy, groups. What
+  // stays up top is what genuinely changes frame to frame.
+  const [showMore, setShowMore] = useState(false);
+  // Routing decides groups unless a human has taken over. `groups_overridden` is the
+  // server's record of that takeover; the local flag also flips when the photographer
+  // clicks through to the checklist in this session, before anything is saved.
+  const [manualGroups, setManualGroups] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [targetSet, setTargetSet] = useState<Set<string>>(new Set());
 
@@ -286,6 +313,31 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     (igFocal?.x ?? null) !== (post.ig_focal_x ?? null) ||
     (igFocal?.y ?? null) !== (post.ig_focal_y ?? null);
 
+  // Blockers stop scheduling; warnings never do. That split is the server's
+  // (`deliverable` vs `ready`) and is not re-derived here -- a second copy of the rules
+  // in the browser is a second copy free to disagree. Absent preflight means the caller
+  // didn't attach it, which is not evidence of a problem, so it does not block.
+  // Collapsing must not hide something the photographer set deliberately, so the
+  // toggle carries a census of what is filled in down there.
+  const moreSummary = [
+    venue ? venue.display_name : null,
+    show || null,
+    city || null,
+    albumIds.size ? `${albumIds.size} album${albumIds.size === 1 ? "" : "s"}` : null,
+    groupIds.size ? `${groupIds.size} group${groupIds.size === 1 ? "" : "s"}` : null,
+    altText.trim() ? "alt text" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const blocked = post.preflight ? !post.preflight.deliverable : false;
+  const blockedReason =
+    post.preflight && post.preflight.blockers.length
+      ? `Fix ${post.preflight.blockers.length} blocker${
+          post.preflight.blockers.length === 1 ? "" : "s"
+        } above before scheduling.`
+      : "";
+
   function handleSave() {
     // If user's selection matches what defaults would produce, send null to mean "use defaults".
     // This way newly-added platforms automatically apply to future posts.
@@ -300,6 +352,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       content_type: contentType,
       album_ids: [...albumIds],
       group_ids: [...groupIds],
+      use_routing: !manualGroups,
       profile_ids: [...profileIds],
       performer_ids: performers.map((p) => p.id),
       target_platforms: targetsToSave,
@@ -388,23 +441,6 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         </div>
       </button>
 
-      <ReadOnlyExif
-        rows={[
-          ["Filename", post.original_filename ?? "—"],
-          ["Dimensions", post.width && post.height ? `${post.width} × ${post.height}` : "—"],
-          ["File size", post.file_size_bytes ? `${(post.file_size_bytes / 1024 / 1024).toFixed(2)} MB` : "—"],
-          ["Captured", captured],
-          ["Camera", post.camera_name || "—"],
-          ["Lens", post.lens ?? "—"],
-          ["Exposure", [
-            post.focal_length ? `${post.focal_length}mm` : null,
-            post.aperture ? `f/${post.aperture}` : null,
-            post.shutter_speed,
-            post.iso ? `ISO ${post.iso}` : null,
-          ].filter(Boolean).join(" · ") || "—"],
-        ]}
-      />
-
       <Field
         label="Title"
         hint={
@@ -439,101 +475,6 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         <input className="fp-input" value={title} onChange={(e) => setTitle(e.target.value)} />
       </Field>
 
-      {/* Structured context — venue / show / city. Fill these BEFORE generating
-          description/tags/alt-text via AI; the suggester uses them as ground truth. */}
-      <VenueField selected={venue} onChange={setVenue} />
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <Field label="Show / event" hint="Auto-completes from past shows.">
-          <input
-            className="fp-input"
-            value={show}
-            onChange={(e) => setShow(e.target.value)}
-            list="show-suggestions"
-            placeholder="(no show set — type to add)"
-          />
-          <datalist id="show-suggestions">
-            {recentShows.map((s) => (
-              <option key={s} value={s} />
-            ))}
-          </datalist>
-        </Field>
-        <Field label="City" hint="Used in captions, alt text, and hashtags.">
-          <input
-            className="fp-input"
-            value={city}
-            onChange={(e) => setCity(e.target.value)}
-            list="city-suggestions"
-            placeholder="(no city set — type to add)"
-          />
-          <datalist id="city-suggestions">
-            {recentCities.map((c) => (
-              <option key={c} value={c} />
-            ))}
-          </datalist>
-        </Field>
-      </div>
-
-      <DescriptionField
-        post={post}
-        description={description}
-        setDescription={setDescription}
-        aiEnabled={aiStatus?.enabled ?? false}
-        hintTitle={title}
-        hintTags={tags}
-      />
-
-      {/* Camera/shot info, opt in per post. The line is formatted server-side
-          (PostOut.shot_info) so this previews exactly what gets published. */}
-      {post.shot_info && (
-        <label
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 8,
-            fontSize: 12,
-            color: "var(--text-dim)",
-            cursor: "pointer",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={includeExif}
-            onChange={(e) => setIncludeExif(e.target.checked)}
-            style={{ accentColor: "var(--teal)", marginTop: 2 }}
-          />
-          <span style={{ display: "grid", gap: 2 }}>
-            <span>Include camera info</span>
-            <span
-              style={{
-                fontSize: 11,
-                color: includeExif ? "var(--text)" : "var(--text-fade)",
-              }}
-            >
-              {post.shot_info}
-            </span>
-            <span style={{ fontSize: 11, color: "var(--text-fade)" }}>
-              Added to the end of the description, ahead of the hashtags.
-            </span>
-          </span>
-        </label>
-      )}
-
-      <PerformersField selected={performers} onChange={setPerformers} />
-
-      <Field
-        label="Alt text"
-        hint="Screen-reader + Google Image SEO description. AI generates from venue/show/city/performers + the image. Sent on Bluesky/Pixelfed/Pinterest automatically; copy into IG manually."
-      >
-        <textarea
-          className="fp-input"
-          value={altText}
-          onChange={(e) => setAltText(e.target.value)}
-          rows={2}
-          placeholder="(empty — will be auto-generated next time you run AI Suggest)"
-          style={{ resize: "vertical", fontFamily: "inherit" }}
-        />
-      </Field>
-
       <Field label="Tags" hint="Comma-separated · Tab to autocomplete from past tags">
         <TagsInput value={tags} onChange={setTags} />
         {merged && (
@@ -545,6 +486,8 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           />
         )}
       </Field>
+
+      <PerformersField selected={performers} onChange={setPerformers} />
 
       <AISuggestPanel
         postId={post.id}
@@ -563,116 +506,26 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         onUseAltText={(text) => setAltText(text)}
       />
 
-      <TrendingPanel
-        currentTags={tags}
-        onAddTag={addTagInline}
-        onAddTags={addTagsInline}
-      />
-
-      <MultiSelectChips
-        label="Tag profiles"
-        options={togglableProfiles.map((p) => ({
-          id: p.id,
-          label: p.name,
-          sublabel: p.tags ? `${p.tags.split(",").length} tags` : "no tags",
-        }))}
-        selected={profileIds}
-        onChange={setProfileIds}
-        emptyMessage="No additional profiles. Add some in Settings → Tag Profiles."
-      />
-
-      <MultiSelectChips
-        label="Albums"
-        options={albums.map((a) => ({ id: a.id, label: a.name, sublabel: `${a.photo_count} photos` }))}
-        selected={albumIds}
-        onChange={setAlbumIds}
-        emptyMessage="Sync albums in Settings → Albums first."
-      />
-
-      <MultiSelectChips
-        label="Groups"
-        options={groups.map((g) => ({ id: g.id, label: g.name, sublabel: g.category ?? undefined }))}
-        selected={groupIds}
-        onChange={setGroupIds}
-        maxSelected={MAX_GROUPS}
-        warnThreshold={WARN_GROUPS}
-        emptyMessage="Add groups in Settings → Groups."
-      />
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-        <Field label="Privacy">
-          <select className="fp-select" value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
-            <option value="private">Private</option>
-            <option value="friends_family">Friends &amp; Family</option>
-            <option value="public">Public</option>
-          </select>
-        </Field>
-        <Field label="Safety">
-          <select className="fp-select" value={safety} onChange={(e) => setSafety(e.target.value)}>
-            <option value="safe">Safe</option>
-            <option value="moderate">Moderate</option>
-            <option value="restricted">Restricted</option>
-          </select>
-        </Field>
-        <Field label="Type">
-          <select className="fp-select" value={contentType} onChange={(e) => setContentType(e.target.value)}>
-            <option value="photo">Photo</option>
-            <option value="screenshot">Screenshot</option>
-            <option value="other">Other</option>
-          </select>
-        </Field>
-      </div>
-
+      {/* Where this is going, as a sentence rather than a row of checkboxes. The
+          checkboxes still exist under More; almost every post goes everywhere, so the
+          control earned its place far less often than the answer did. */}
       {connectedPlatforms.length > 0 && (
-        <Field
-          label="Publish targets"
-          hint={
-            targetSet.size === 0
-              ? "Nothing checked — this post won't be published anywhere."
-              : `Posts to: ${[...targetSet]
-                  .map((p) => connectedPlatforms.find((c) => c.platform === p)?.label || p)
-                  .join(" + ")}`
-          }
-        >
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {connectedPlatforms.map((p) => {
-              const checked = targetSet.has(p.platform);
-              return (
-                <label
-                  key={p.platform}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: "6px 12px",
-                    border: `0.5px solid ${checked ? "rgba(93,202,165,0.3)" : "var(--border-strong)"}`,
-                    background: checked ? "var(--teal-tint)" : "transparent",
-                    color: checked ? "var(--text)" : "var(--text-dim)",
-                    borderRadius: 999,
-                    fontSize: 12,
-                    fontWeight: checked ? 500 : 400,
-                    cursor: "pointer",
-                    userSelect: "none",
-                    transition: "background 120ms ease, border-color 120ms ease",
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(e) => {
-                      const next = new Set(targetSet);
-                      if (e.target.checked) next.add(p.platform);
-                      else next.delete(p.platform);
-                      setTargetSet(next);
-                    }}
-                    style={{ accentColor: "var(--teal)", margin: 0 }}
-                  />
-                  {p.label}
-                </label>
-              );
-            })}
-          </div>
-        </Field>
+        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          {targetSet.size === 0 ? (
+            <span style={{ color: "var(--danger)" }}>
+              No destinations — this post won't be published anywhere.
+            </span>
+          ) : (
+            <>
+              Publishing to{" "}
+              <span style={{ color: "var(--text)" }}>
+                {[...targetSet]
+                  .map((t) => connectedPlatforms.find((c) => c.platform === t)?.label || t)
+                  .join(", ")}
+              </span>
+            </>
+          )}
+        </div>
       )}
 
       {targetSet.has("instagram") && (
@@ -700,6 +553,291 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         </Field>
       )}
 
+      <button
+        type="button"
+        onClick={() => setShowMore((v) => !v)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          background: "transparent",
+          border: 0,
+          borderTop: "0.5px solid var(--border-strong)",
+          paddingTop: 12,
+          color: "var(--text-dim)",
+          fontSize: 12,
+          fontFamily: "inherit",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        <span style={{ color: "var(--text-fade)" }}>{showMore ? "▾" : "▸"}</span>
+        <span>{showMore ? "Fewer fields" : "More fields"}</span>
+        {!showMore && moreSummary && (
+          <span style={{ color: "var(--text-fade)", marginLeft: "auto" }}>{moreSummary}</span>
+        )}
+      </button>
+
+      {showMore && (
+        <>
+        <ReadOnlyExif
+          rows={[
+            ["Filename", post.original_filename ?? "—"],
+            ["Dimensions", post.width && post.height ? `${post.width} × ${post.height}` : "—"],
+            ["File size", post.file_size_bytes ? `${(post.file_size_bytes / 1024 / 1024).toFixed(2)} MB` : "—"],
+            ["Captured", captured],
+            ["Camera", post.camera_name || "—"],
+            ["Lens", post.lens ?? "—"],
+            ["Exposure", [
+              post.focal_length ? `${post.focal_length}mm` : null,
+              post.aperture ? `f/${post.aperture}` : null,
+              post.shutter_speed,
+              post.iso ? `ISO ${post.iso}` : null,
+            ].filter(Boolean).join(" · ") || "—"],
+          ]}
+        />
+
+        {/* Structured context — venue / show / city. Fill these BEFORE generating
+            description/tags/alt-text via AI; the suggester uses them as ground truth. */}
+        <VenueField selected={venue} onChange={setVenue} />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Show / event" hint="Auto-completes from past shows.">
+            <input
+              className="fp-input"
+              value={show}
+              onChange={(e) => setShow(e.target.value)}
+              list="show-suggestions"
+              placeholder="(no show set — type to add)"
+            />
+            <datalist id="show-suggestions">
+              {recentShows.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+          </Field>
+          <Field label="City" hint="Used in captions, alt text, and hashtags.">
+            <input
+              className="fp-input"
+              value={city}
+              onChange={(e) => setCity(e.target.value)}
+              list="city-suggestions"
+              placeholder="(no city set — type to add)"
+            />
+            <datalist id="city-suggestions">
+              {recentCities.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+          </Field>
+        </div>
+
+        <DescriptionField
+          post={post}
+          description={description}
+          setDescription={setDescription}
+          aiEnabled={aiStatus?.enabled ?? false}
+          hintTitle={title}
+          hintTags={tags}
+        />
+
+        {/* Camera/shot info, opt in per post. The line is formatted server-side
+            (PostOut.shot_info) so this previews exactly what gets published. */}
+        {post.shot_info && (
+          <label
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              fontSize: 12,
+              color: "var(--text-dim)",
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={includeExif}
+              onChange={(e) => setIncludeExif(e.target.checked)}
+              style={{ accentColor: "var(--teal)", marginTop: 2 }}
+            />
+            <span style={{ display: "grid", gap: 2 }}>
+              <span>Include camera info</span>
+              <span
+                style={{
+                  fontSize: 11,
+                  color: includeExif ? "var(--text)" : "var(--text-fade)",
+                }}
+              >
+                {post.shot_info}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--text-fade)" }}>
+                Added to the end of the description, ahead of the hashtags.
+              </span>
+            </span>
+          </label>
+        )}
+
+        <Field
+          label="Alt text"
+          hint="Screen-reader + Google Image SEO description. AI generates from venue/show/city/performers + the image. Sent on Bluesky/Pixelfed/Pinterest automatically; copy into IG manually."
+        >
+          <textarea
+            className="fp-input"
+            value={altText}
+            onChange={(e) => setAltText(e.target.value)}
+            rows={2}
+            placeholder="(empty — will be auto-generated next time you run AI Suggest)"
+            style={{ resize: "vertical", fontFamily: "inherit" }}
+          />
+        </Field>
+
+        <TrendingPanel
+          currentTags={tags}
+          onAddTag={addTagInline}
+          onAddTags={addTagsInline}
+        />
+
+        <MultiSelectChips
+          label="Tag profiles"
+          options={togglableProfiles.map((p) => ({
+            id: p.id,
+            label: p.name,
+            sublabel: p.tags ? `${p.tags.split(",").length} tags` : "no tags",
+          }))}
+          selected={profileIds}
+          onChange={setProfileIds}
+          emptyMessage="No additional profiles. Add some in Settings → Tag Profiles."
+        />
+
+        <MultiSelectChips
+          label="Albums"
+          options={albums.map((a) => ({ id: a.id, label: a.name, sublabel: `${a.photo_count} photos` }))}
+          selected={albumIds}
+          onChange={setAlbumIds}
+          emptyMessage="Sync albums in Settings → Albums first."
+        />
+
+        {/* Not <Field>: that renders a <label>, and a click anywhere inside a label
+            activates its first control -- fine for one input, wrong for a group of them.
+            (The Title field already needed a preventDefault to dodge the same edge.) */}
+        <div style={{ display: "grid", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
+          <span>Groups</span>
+          {manualGroups ? (
+            <div style={{ display: "grid", gap: 8 }}>
+              <MultiSelectChips
+                label=""
+                options={groups.map((g) => ({ id: g.id, label: g.name, sublabel: g.category ?? undefined }))}
+                selected={groupIds}
+                onChange={setGroupIds}
+                maxSelected={maxGroups}
+                warnThreshold={warnGroups}
+                emptyMessage="Add groups in Settings → Groups."
+              />
+              <RoutedGroups
+                tags={tags}
+                overridden
+                manualCount={groupIds.size}
+                onOverride={() => setManualGroups(true)}
+                onUseRouting={() => {
+                  // The saved PUT carries use_routing, which clears groups_overridden
+                  // server-side and drops the pending rows. An empty list alone would not
+                  // do it -- that reads as "no groups", the very case groups_overridden
+                  // exists to tell apart from "untouched".
+                  setGroupIds(new Set());
+                  setManualGroups(false);
+                }}
+              />
+            </div>
+          ) : (
+            <RoutedGroups
+              tags={tags}
+              overridden={false}
+              manualCount={groupIds.size}
+              onOverride={() => setManualGroups(true)}
+            />
+          )}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          <Field label="Privacy">
+            <select className="fp-select" value={privacy} onChange={(e) => setPrivacy(e.target.value)}>
+              <option value="private">Private</option>
+              <option value="friends_family">Friends &amp; Family</option>
+              <option value="public">Public</option>
+            </select>
+          </Field>
+          <Field label="Safety">
+            <select className="fp-select" value={safety} onChange={(e) => setSafety(e.target.value)}>
+              <option value="safe">Safe</option>
+              <option value="moderate">Moderate</option>
+              <option value="restricted">Restricted</option>
+            </select>
+          </Field>
+          <Field label="Type">
+            <select className="fp-select" value={contentType} onChange={(e) => setContentType(e.target.value)}>
+              <option value="photo">Photo</option>
+              <option value="screenshot">Screenshot</option>
+              <option value="other">Other</option>
+            </select>
+          </Field>
+        </div>
+
+        {connectedPlatforms.length > 0 && (
+          <Field
+            label="Publish targets"
+            hint={
+              targetSet.size === 0
+                ? "Nothing checked — this post won't be published anywhere."
+                : `Posts to: ${[...targetSet]
+                    .map((p) => connectedPlatforms.find((c) => c.platform === p)?.label || p)
+                    .join(" + ")}`
+            }
+          >
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {connectedPlatforms.map((p) => {
+                const checked = targetSet.has(p.platform);
+                return (
+                  <label
+                    key={p.platform}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "6px 12px",
+                      border: `0.5px solid ${checked ? "rgba(93,202,165,0.3)" : "var(--border-strong)"}`,
+                      background: checked ? "var(--teal-tint)" : "transparent",
+                      color: checked ? "var(--text)" : "var(--text-dim)",
+                      borderRadius: 999,
+                      fontSize: 12,
+                      fontWeight: checked ? 500 : 400,
+                      cursor: "pointer",
+                      userSelect: "none",
+                      transition: "background 120ms ease, border-color 120ms ease",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        const next = new Set(targetSet);
+                        if (e.target.checked) next.add(p.platform);
+                        else next.delete(p.platform);
+                        setTargetSet(next);
+                      }}
+                      style={{ accentColor: "var(--teal)", margin: 0 }}
+                    />
+                    {p.label}
+                  </label>
+                );
+              })}
+            </div>
+          </Field>
+        )}
+
+        </>
+      )}
+
+      <PreflightPanel preflight={post.preflight} stale={dirty} />
+
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
         {onDelete && (
           <button
@@ -718,7 +856,12 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           </button>
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
-          <button className="fp-btn-ghost" onClick={onSchedule} disabled={dirty || saving}>
+          <button
+            className="fp-btn-ghost"
+            onClick={onSchedule}
+            disabled={dirty || saving || blocked}
+            title={blocked ? blockedReason : undefined}
+          >
             {scheduleLabel ?? "Schedule on Flickr"}
           </button>
           <button className="fp-btn" disabled={!dirty || saving} onClick={handleSave}>
@@ -726,9 +869,9 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           </button>
         </div>
       </div>
-      {dirty && (
+      {(dirty || blocked) && (
         <div style={{ fontSize: 11, color: "var(--text-fade)", textAlign: "right", marginTop: -8 }}>
-          Save before scheduling.
+          {dirty ? "Save before scheduling." : blockedReason}
         </div>
       )}
 

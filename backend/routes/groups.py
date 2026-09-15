@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import Group, Post, PostGroup, User
 from routes.auth import current_user
+from services import group_routing
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.groups")
@@ -83,6 +84,11 @@ class GroupIn(BaseModel):
 
 class PostGroupsUpdate(BaseModel):
     group_ids: list[str]
+    # Hand this post back to automatic routing. Without it, saving an empty selection is
+    # indistinguishable from choosing no groups -- the exact ambiguity groups_overridden
+    # was added to resolve -- so "use routing instead" needs to say so explicitly rather
+    # than be inferred from an empty list.
+    use_routing: bool = False
 
 
 @router.get("", response_model=list[GroupOut])
@@ -155,6 +161,45 @@ def delete_group(
     return {"ok": True}
 
 
+class RoutePreviewIn(BaseModel):
+    tags: str = ""
+
+
+class RoutedGroupOut(BaseModel):
+    id: str
+    name: str
+    category: str | None
+    # Why this group matched: the tags on the post that satisfied its rule, or [] for a
+    # group that takes everything. Shown so the routing is inspectable rather than magic.
+    matched: list[str]
+
+
+@router.post("/route-preview", response_model=list[RoutedGroupOut])
+def route_preview(
+    body: RoutePreviewIn,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Which groups a post carrying these tags would be submitted to.
+
+    Takes raw tag text rather than a post id so the editor can show the answer for tags
+    being typed, before any save. It calls the same group_routing.accepts() the publish
+    path calls -- the preview cannot drift from the behaviour it previews, which a
+    reimplementation in the browser would have been free to do.
+    """
+    tags = group_routing.tags_from_csv(body.tags)
+    out: list[RoutedGroupOut] = []
+    for g in db.execute(select(Group).order_by(Group.name.asc())).scalars().all():
+        if not g.flickr_group_id or not group_routing.accepts(g, tags):
+            continue
+        rule = group_routing.group_rule(g)
+        out.append(RoutedGroupOut(
+            id=g.id, name=g.name, category=g.category,
+            matched=sorted(rule & tags),
+        ))
+    return out
+
+
 @router.get("/post/{post_id}", response_model=list[str])
 def get_post_groups(
     post_id: str,
@@ -180,8 +225,19 @@ def set_post_groups(
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
     # Record that a human chose, so the publish-time seeder leaves this post alone
-    # even when the chosen set is empty.
-    post.groups_overridden = 1
+    # even when the chosen set is empty. `use_routing` is the way back: it clears the
+    # flag and drops the pending rows, restoring the state a never-edited post is in,
+    # so group_routing.ensure_assignments() fills them at publish time.
+    post.groups_overridden = 0 if body.use_routing else 1
+    if body.use_routing:
+        db.execute(
+            PostGroup.__table__.delete().where(
+                PostGroup.post_id == post_id,
+                PostGroup.status == "pending",
+            )
+        )
+        db.commit()
+        return []
     valid_ids = set(db.execute(select(Group.id)).scalars().all())
     requested = [g for g in body.group_ids if g in valid_ids]
 

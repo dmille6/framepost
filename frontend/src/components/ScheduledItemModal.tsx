@@ -55,7 +55,7 @@ export default function ScheduledItemModal({
       const body = editorChangesToPatch(changes);
       const saved = await updatePost(item.id, body);
       await setPostAlbums(item.id, changes.album_ids);
-      await setPostGroups(item.id, changes.group_ids);
+      await setPostGroups(item.id, changes.group_ids, changes.use_routing);
       await setPostProfiles(item.id, changes.profile_ids);
       await setPostPerformers(item.id, changes.performer_ids);
       return saved;

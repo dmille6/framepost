@@ -85,6 +85,10 @@ class PostOut(BaseModel):
     posted_to_instagram_at: datetime | None = None
     reddit_posted_at: datetime | None = None
     target_platforms: list[str] | None = None
+    # True once a human saved a group selection for this post; after that the
+    # publish-time router leaves it alone. The editor needs it to know whether to
+    # show routing's answer or the photographer's.
+    groups_overridden: bool = False
     venue_id: str | None = None
     show: str | None = None
     city: str | None = None
@@ -132,6 +136,14 @@ class PostOut(BaseModel):
             except (TypeError, ValueError):
                 return None
         return None
+
+    @field_validator("groups_overridden", mode="before")
+    @classmethod
+    def _coerce_groups_overridden(cls, v):
+        # Stored as INTEGER NOT NULL DEFAULT 0, but an un-flushed ORM object still holds
+        # None -- the column default is the database's, not Python's. Treat that as
+        # "nobody has chosen", which is what an unsaved post means.
+        return bool(v) if v is not None else False
 
     @classmethod
     def from_post(cls, post: Post) -> "PostOut":
