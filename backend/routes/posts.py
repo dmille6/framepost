@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostPlatform, User
 from routes.auth import current_user
-from services import caption_text, events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, r2, reddit, storage, tags as tags_svc
+from services import caption_text, events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, preflight as preflight_svc, r2, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -58,6 +58,9 @@ def _ascii_filename(text: str, suffix: str = ".jpg") -> str:
 
 
 class PostOut(BaseModel):
+    # Delivery readiness, attached only by endpoints that want it (the draft queue).
+    # Left None elsewhere so the per-post checks are not paid for on every serialisation.
+    preflight: dict | None = None
     id: str
     title: str | None
     description: str | None
@@ -251,7 +254,31 @@ def list_drafts(
         .scalars()
         .all()
     )
-    return [PostOut.from_post(r) for r in rows]
+    # One credential read for the page rather than one per post.
+    creds = preflight_svc.load_credentials(db)
+    out = []
+    for r in rows:
+        item = PostOut.from_post(r)
+        item.preflight = preflight_svc.summarize(preflight_svc.check(db, r, creds=creds))
+        out.append(item)
+    return out
+
+
+@router.get("/{post_id}/preflight")
+def post_preflight(
+    post_id: str,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """What would stop this post being delivered, and where.
+
+    Advisory: it reports, it does not refuse. Publishing validates again on its own,
+    because a token can be revoked between this call and delivery.
+    """
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    return preflight_svc.summarize(preflight_svc.check(db, post))
 
 
 class FindReplaceIn(BaseModel):

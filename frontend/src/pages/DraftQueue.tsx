@@ -51,20 +51,22 @@ function batchKey(p: Post): string | null {
   return null;
 }
 
-// "Ready to schedule" checklist (expanded 2026-08-24 per review): a draft is ready
-// when it has a title, tags, and alt text has been generated (null = the 15-min AI
-// sweep hasn't reached it yet; "" = attempted, counts as done). Venue/performers stay
-// optional — not every photo has them.
+// Readiness is decided on the server (services/preflight.py) and arrives with each
+// draft. It used to be computed here from title/tags/alt_text, which measured metadata
+// completeness rather than whether the post could actually be delivered: a draft showed
+// green while Instagram was disconnected, the original file had moved, or a carousel had
+// lost a frame. It also counted blank alt text as done, because it asked whether the AI
+// sweep had run rather than whether there was any alt text.
 function isReady(p: Post): boolean {
-  return !!p.title && !!p.tags && p.alt_text !== null;
+  return p.preflight?.ready ?? false;
 }
 
 function readyMissing(p: Post): string[] {
-  const out: string[] = [];
-  if (!p.title) out.push("title");
-  if (!p.tags) out.push("tags");
-  if (p.alt_text === null) out.push("alt text (auto — pending)");
-  return out;
+  const pf = p.preflight;
+  if (!pf) return ["checking…"];
+  return [...pf.blockers, ...pf.warnings].map((f) =>
+    f.destination ? `${f.destination}: ${f.message}` : f.message,
+  );
 }
 
 function computeBatches(drafts: Post[]): { key: string; ids: string[] }[] {
@@ -393,7 +395,7 @@ export default function DraftQueue() {
                     />
                     <button
                       onClick={() => setFilterReady((v) => !v)}
-                      title={`Show only drafts that pass the ready checklist: title, tags, alt text generated. Currently ${drafts.filter(isReady).length} of ${drafts.length}.`}
+                      title={`Show only drafts with nothing outstanding — image present, destinations connected, and title, tags and alt text written. Currently ${drafts.filter(isReady).length} of ${drafts.length}.`}
                       style={{
                         background: filterReady ? "var(--teal)" : "transparent",
                         color: filterReady ? "#0a1f17" : "var(--text-dim)",

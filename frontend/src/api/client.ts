@@ -88,7 +88,24 @@ export const login = (username: string, password: string) =>
 
 export const logout = () => apiFetch<{ ok: true }>("/api/auth/logout", { method: "POST" });
 
+export type PreflightFinding = {
+  level: "blocker" | "warning";
+  code: string;
+  message: string;
+  destination: string | null;
+};
+
+export type Preflight = {
+  ready: boolean;        // nothing wrong at all
+  deliverable: boolean;  // will publish, possibly worse than it should
+  blockers: PreflightFinding[];
+  warnings: PreflightFinding[];
+};
+
 export type Post = {
+  // Attached by the drafts list. Absent elsewhere, so treat undefined as "unknown"
+  // rather than "ready".
+  preflight?: Preflight | null;
   id: string;
   title: string | null;
   description: string | null;
