@@ -26,8 +26,15 @@ choice, but it should be made on purpose.
 Randomisation is seeded from the post id, so a dry run and the `--commit` that
 follows it produce identical assignments. Nothing is chosen twice.
 
+Scoped to a window (default 8 weeks) rather than the whole queue. The live queue is
+365 posts reaching into September 2027; retiming a year of it on a five-post hunch
+would be the same mistake as forcing everything to the evening, just slower. Eight
+weeks is ~55 posts here -- ample for the comparison -- and the rest can be retimed
+once the answer is in.
+
     docker compose exec -T backend python /tmp/retime_scheduled.py             # dry run
     docker compose exec -T backend python /tmp/retime_scheduled.py --commit
+    docker compose exec -T backend python /tmp/retime_scheduled.py --weeks 12 --commit
     docker compose exec -T backend python /tmp/retime_scheduled.py --evening --commit
 """
 import hashlib
@@ -48,6 +55,14 @@ EVENING = (time(18, 0), time(21, 0))
 MIDDAY = (time(12, 0), time(15, 0))
 
 MAX_PER_DAY = 1
+
+# How far ahead to retime. The rest of the queue keeps its existing times until the
+# experiment has actually said something.
+DEFAULT_WEEKS = 8
+
+# Hours nothing should be scheduled into. Separate from the experiment: whichever arm
+# wins, 23:00 is not it, and the live queue had 56 posts sitting in this band.
+DEAD_HOURS = range(21, 24)
 
 
 def _rand(post_id: str, salt: str) -> float:
@@ -84,9 +99,10 @@ def assign_arms(post_ids: list[str], force_evening: bool) -> dict[str, str]:
     return {pid: ("evening" if i < half else "midday") for i, pid in enumerate(ordered)}
 
 
-def main(commit: bool, force_evening: bool) -> int:
+def main(commit: bool, force_evening: bool, weeks: int) -> int:
     db = SessionLocal()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
+    horizon = now + timedelta(weeks=weeks)
 
     # Only posts still waiting. Anything already published is history, and a post
     # scheduled in the past is the worker's problem (late/retry), not a timing choice.
@@ -94,16 +110,20 @@ def main(commit: bool, force_evening: bool) -> int:
         select(Post)
         .where(Post.status == "pending",
                Post.scheduled_at.is_not(None),
-               Post.scheduled_at > now)
+               Post.scheduled_at > now,
+               Post.scheduled_at < horizon)
         .order_by(Post.scheduled_at)
     ).scalars().all()
 
     if not rows:
-        print("Nothing scheduled in the future. No changes.")
+        print(f"Nothing scheduled in the next {weeks} weeks. No changes.")
         return 0
 
-    print(f"{len(rows)} scheduled post(s) from "
-          f"{rows[0].scheduled_at:%Y-%m-%d} to {rows[-1].scheduled_at:%Y-%m-%d}\n")
+    late = sum(1 for r in rows if r.scheduled_at.hour in DEAD_HOURS
+                or r.scheduled_at.hour < 6)
+    print(f"{len(rows)} scheduled post(s) in the next {weeks} weeks "
+          f"({rows[0].scheduled_at:%d %b} to {rows[-1].scheduled_at:%d %b}), "
+          f"{late} of them between 21:00 and 06:00.\n")
 
     arms = assign_arms([p.id for p in rows], force_evening)
 
@@ -162,4 +182,7 @@ def main(commit: bool, force_evening: bool) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main("--commit" in sys.argv, "--evening" in sys.argv))
+    weeks = DEFAULT_WEEKS
+    if "--weeks" in sys.argv:
+        weeks = int(sys.argv[sys.argv.index("--weeks") + 1])
+    raise SystemExit(main("--commit" in sys.argv, "--evening" in sys.argv, weeks))
