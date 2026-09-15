@@ -22,7 +22,7 @@ Three ideas drive the shape of this module:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any, Iterable
 
@@ -62,6 +62,11 @@ class Sample:
     shares: int | None
     profile_visits: int | None
     follows: int | None
+    # How old the reading actually is. Snapshots are taken daily, so a "24h" figure is
+    # sourced from whatever reading sits nearest that mark -- reporting the real age
+    # stops the label implying a precision the sampling cannot deliver. Last because a
+    # defaulted dataclass field cannot precede undefaulted ones.
+    age_hours: float | None = None
 
     @property
     def quality(self) -> float:
@@ -117,8 +122,13 @@ def collect_samples(
     """One Sample per (post, platform).
 
     window=None uses the latest snapshot (lifetime). A named window picks the snapshot
-    closest to posted_at + window, skipping posts too young or without a nearby
-    reading — so a 48h ranking never silently mixes in lifetime numbers.
+    closest to posted_at + window, skipping posts that have not yet lived through the
+    window and posts without a reading near it — so a 48h ranking never silently mixes
+    in lifetime numbers or numbers from a post published this morning.
+
+    Readings are daily, so "nearest" can be several hours off the mark. Sample.age_hours
+    carries how far, and summarize() reports the median, because a 24h figure drawn from
+    a 19h reading should say so rather than round itself into a claim.
     """
     q = select(EngagementSnapshot, Post).join(Post, Post.id == EngagementSnapshot.post_id)
     if platform:
@@ -138,17 +148,25 @@ def collect_samples(
         posted = _platform_posted_at(db, post, plat)
         if not posted:
             continue
+        age = None
         if delta is None:
             chosen = snaps[-1]
         else:
             target = posted + delta
+            # A post younger than the window has not lived through it. The tolerance
+            # alone let one in: a 6-hour-old post with a 6-hour reading sits within 18
+            # hours of the 24-hour mark, and was counted as a 24-hour figure. The
+            # docstring claimed this was excluded; nothing did it.
+            if target > _utcnow():
+                continue
             candidates = [s for s in snaps if abs(s.sampled_at - target) <= WINDOW_TOLERANCE]
             if not candidates:
                 continue
             chosen = min(candidates, key=lambda s: abs(s.sampled_at - target))
+            age = round((chosen.sampled_at - posted).total_seconds() / 3600, 1)
         out.append(
             Sample(
-                post=post, platform=plat, posted_at=posted,
+                post=post, platform=plat, posted_at=posted, age_hours=age,
                 likes=chosen.likes or 0, comments=chosen.comments_count or 0,
                 views=chosen.views or 0, reposts=chosen.reposts or 0,
                 reach=chosen.reach, saves=chosen.saves, shares=chosen.shares,
@@ -156,6 +174,11 @@ def collect_samples(
             )
         )
     return out
+
+
+def _utcnow() -> datetime:
+    """Naive UTC, matching how timestamps are stored throughout."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _median(values: Iterable[float | None]) -> float | None:
@@ -167,6 +190,7 @@ def summarize(samples: list[Sample]) -> dict[str, Any]:
     """Median-centred summary of a group of samples, plus its sample size."""
     return {
         "posts": len(samples),
+        "median_age_hours": _median(s.age_hours for s in samples),
         "median_quality": _median(s.quality for s in samples),
         "median_likes": _median(s.likes for s in samples),
         "median_comments": _median(s.comments for s in samples),

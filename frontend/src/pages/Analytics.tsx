@@ -224,7 +224,7 @@ export default function Analytics() {
           <div className="fp-card" style={{ marginBottom: 16 }}>
             <CardHeader
               title="What worked"
-              subtitle="Ranked by the platform's own quality score — saves, shares and follows outweigh likes, because they cost the viewer something."
+              subtitle="Ranked by FramePost's engagement score — our own weighting, not Instagram's ranking. Saves, shares and follows outweigh likes because they cost the viewer something."
             />
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 660 }}>
