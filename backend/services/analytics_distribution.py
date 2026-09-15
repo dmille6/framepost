@@ -176,7 +176,12 @@ def follow_conversion(
             visits.append(cur.profile_views)
 
     total_visits = sum(visits)
-    total_gain = sum(g for g in gains if g > 0)
+    # Net, including days that lost followers. Summing only the positive days would
+    # count arrivals and ignore departures, inflating the rate on any account with
+    # ordinary churn -- and the docstring above would then describe something the code
+    # does not do. Clamped at zero so a net-negative span reads as "not converting"
+    # rather than a negative percentage.
+    total_gain = max(sum(gains), 0)
     return {
         "platform": platform,
         "days": len(gains),

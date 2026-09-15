@@ -160,6 +160,27 @@ def test_conversion_divides_follower_gain_by_profile_views(db):
     assert out["conversion_pct"] == 10.0
 
 
+def test_conversion_counts_days_that_lost_followers(db):
+    """Net, not gross. Summing only the days that gained would count arrivals and
+    ignore departures, which reports a healthy conversion rate for an account that is
+    treading water."""
+    for i, (f, v) in enumerate([(1000, None), (1020, 100), (1000, 100)]):
+        _followers(db, days_ago=3 - i, followers=f, profile_views=v)
+    db.commit()
+
+    out = adist.follow_conversion(db)
+    assert out["days"] == 2
+    # +20 then -20 is no growth at all, against 200 views.
+    assert out["conversion_pct"] == 0.0
+
+
+def test_conversion_never_reports_a_negative_rate(db):
+    for i, (f, v) in enumerate([(1000, None), (990, 100), (980, 100)]):
+        _followers(db, days_ago=3 - i, followers=f, profile_views=v)
+    db.commit()
+    assert adist.follow_conversion(db)["conversion_pct"] == 0.0
+
+
 def test_conversion_does_not_difference_across_a_missing_day(db):
     """A gap in account_stats means the sync missed a day. Differencing across it
     attributes a week of growth to one day."""
