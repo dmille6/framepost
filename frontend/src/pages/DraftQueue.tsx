@@ -27,6 +27,7 @@ import EmptyState from "../components/EmptyState";
 import MetadataEditor, { editorChangesToPatch } from "../components/MetadataEditor";
 import PageHeader from "../components/PageHeader";
 import QueueTabs from "../components/QueueTabs";
+import ReelFromDraftsDialog from "../components/ReelFromDraftsDialog";
 import ScheduleDialog from "../components/ScheduleDialog";
 import { SkeletonGrid } from "../components/Skeleton";
 import SmartFillDialog from "../components/SmartFillDialog";
@@ -127,6 +128,7 @@ export default function DraftQueue() {
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
   const [filmstripOpen, setFilmstripOpen] = useState(false);
   const [carouselOpen, setCarouselOpen] = useState(false);
+  const [reelOpen, setReelOpen] = useState(false);
   const [findReplaceOpen, setFindReplaceOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<"newest" | "oldest" | "captured" | "largest" | "ready">("newest");
@@ -485,9 +487,18 @@ export default function DraftQueue() {
                       <button
                         className="fp-btn-ghost"
                         disabled={checkedIds.size < 2}
-                        onClick={() => setCarouselOpen(true)}
-                        title="Publish the selection as one Instagram post"
+                        onClick={() => setReelOpen(true)}
+                        title="Build a reel from the selection and schedule it — reels reach people who don't follow you, which a carousel cannot"
                         style={{ padding: "6px 14px", fontSize: 13 }}
+                      >
+                        Reel ({checkedIds.size})
+                      </button>
+                      <button
+                        className="fp-btn-ghost"
+                        disabled={checkedIds.size < 2}
+                        onClick={() => setCarouselOpen(true)}
+                        title="Publish the selection as one swipeable Instagram post. Best when the order tells a sequence; otherwise a reel reaches further."
+                        style={{ padding: "6px 14px", fontSize: 13, opacity: 0.75 }}
                       >
                         Carousel ({checkedIds.size})
                       </button>
@@ -604,6 +615,18 @@ export default function DraftQueue() {
           onCancel={() => setScheduling(null)}
           onSubmit={async (iso) => {
             await scheduleMutation.mutateAsync({ id: scheduling.id, iso });
+          }}
+        />
+      )}
+
+      {reelOpen && (
+        <ReelFromDraftsDialog
+          posts={drafts.filter((d) => checkedIds.has(d.id))}
+          onCancel={() => setReelOpen(false)}
+          onDone={() => {
+            setReelOpen(false);
+            exitMultiSelect();
+            void qc.invalidateQueries({ queryKey: ["reels"] });
           }}
         />
       )}
