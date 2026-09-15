@@ -507,6 +507,12 @@ export type SmartFillResponse = {
   scheduled: number;
   skipped: number;
   confirmed: boolean;
+  carousel_synced: number;
+};
+
+export type ConfirmSlot = {
+  post_id: string;
+  scheduled_at: string;
 };
 
 export type SmartFillRequest = {
@@ -517,6 +523,10 @@ export type SmartFillRequest = {
   skip_weekends: boolean;
   confirm: boolean;
   mode?: "sequential" | "random_scatter";
+  // Required when confirm is true: the exact pairs from the preview. The server
+  // regenerates a different schedule on every call, so confirming without echoing
+  // what was shown saves dates the operator never saw.
+  slots?: ConfirmSlot[];
 };
 
 export const smartFill = (body: SmartFillRequest) =>

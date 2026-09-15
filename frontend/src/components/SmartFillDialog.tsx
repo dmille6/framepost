@@ -52,6 +52,14 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
     skip_weekends: skipWeekends,
     confirm,
     mode,
+    // Confirming commits the slots on screen. Without this the server builds a fresh
+    // proposal — different random days, different jitter — and saves that instead, so
+    // the dates reviewed here were never the dates written.
+    slots: confirm
+      ? (preview?.slots ?? [])
+          .filter((s) => s.scheduled_at)
+          .map((s) => ({ post_id: s.post_id, scheduled_at: s.scheduled_at as string }))
+      : undefined,
   });
 
   const previewMutation = useMutation({

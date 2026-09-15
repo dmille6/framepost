@@ -50,14 +50,23 @@ def _schedule_fuzz_minutes(db: Session) -> int:
 
 
 def _apply_fuzz(dt: datetime, fuzz_minutes: int) -> datetime:
-    """Return dt with a random additive offset within [0, fuzz_minutes] minutes plus random
-    seconds. We always add (never subtract) to keep posts within the same clock-hour bucket
-    that Smart Fill reserved — guarantees the 1-post-per-hour rule still holds."""
+    """Return dt nudged forward by 0..fuzz_minutes minutes plus random seconds.
+
+    The offset is added to the requested minute and clamped so the result stays inside
+    the same clock-hour that Smart Fill reserved — the 1-post-per-hour rule is enforced
+    per hour bucket, so spilling into the next hour would let two posts share one.
+
+    This used to `replace(minute=...)`, which threw the requested minute away entirely:
+    a 10:30 slot with fuzz=10 came back as 10:02, not 10:37. The docstring claimed an
+    additive offset while the code overwrote, so the jitter setting silently moved posts
+    off the time the operator asked for.
+    """
     if fuzz_minutes <= 0:
         return dt
     minute_off = random.randint(0, fuzz_minutes)
     second_off = random.randint(0, 59)
-    return dt.replace(minute=minute_off, second=second_off, microsecond=0)
+    minute = min(dt.minute + minute_off, 59)
+    return dt.replace(minute=minute, second=second_off, microsecond=0)
 
 log = logging.getLogger("framepost.schedule")
 router = APIRouter()
@@ -319,9 +328,21 @@ class SmartFillRequest(BaseModel):
     start_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")  # YYYY-MM-DD, local
     skip_weekends: bool = False
     confirm: bool = False  # dry-run unless True
+    # The slots being committed, echoed back from the preview the operator reviewed.
+    # Required when confirm=True: the proposal is recomputed from scratch on every call
+    # (random day/hour choice, jitter, "now", and whatever else is on the calendar), so
+    # a second call with the same inputs produces different dates. Committing what was
+    # shown is the only way the preview can mean anything.
+    slots: list[ConfirmSlot] | None = None
     # When "random_scatter", ignore start_date/cadence/time_of_day and instead pick random
     # unoccupied days in the next 365 days at popular post times (9-11am / 6-8pm local).
     mode: str = Field(default="sequential", pattern=r"^(sequential|random_scatter)$")
+
+
+class ConfirmSlot(BaseModel):
+    """One (post, time) pair the operator actually saw and agreed to."""
+    post_id: str
+    scheduled_at: datetime
 
 
 class SmartFillSlot(BaseModel):
@@ -337,6 +358,10 @@ class SmartFillResponse(BaseModel):
     scheduled: int
     skipped: int
     confirmed: bool
+    # Carousel frames pulled onto their lead's time. They are reported as skipped slots
+    # (a carousel publishes as one post) yet they do get written, so counting them here
+    # keeps `scheduled` from understating what changed.
+    carousel_synced: int = 0
 
 
 def _next_eligible(
@@ -689,34 +714,13 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
     scheduled_n = sum(1 for s in slots if s.scheduled_at is not None)
     skipped_n = len(slots) - scheduled_n
 
-    if body.confirm and scheduled_n:
-        for s in slots:
-            if s.scheduled_at is None:
-                continue
-            post = db.get(Post, s.post_id)
-            if not post or post.status != "pending" or post.scheduled_at is not None:
-                continue
-            post.scheduled_at = s.scheduled_at
-            post.updated_at = datetime.utcnow()
-            events.log_event(
-                db,
-                post_id=post.id,
-                event_type="scheduled",
-                actor=user.username,
-                details={
-                    "scheduled_at": s.scheduled_at.isoformat(),
-                    "previous": None,
-                    "via": "smart_fill_random_scatter",
-                },
-            )
-        _sync_carousel_members(db)
-        db.commit()
-
+    # Preview only. Committing goes through _persist_slots with the slots echoed back,
+    # so nothing here writes and the caller must send these pairs to confirm them.
     return SmartFillResponse(
         slots=slots,
         scheduled=scheduled_n,
         skipped=skipped_n,
-        confirmed=body.confirm and scheduled_n > 0,
+        confirmed=False,
     )
 
 
@@ -740,12 +744,98 @@ def _sync_carousel_members(db: Session) -> int:
     return moved
 
 
+def _persist_slots(
+    db: Session, user: User, requested: list[ConfirmSlot], *, via: str
+) -> SmartFillResponse:
+    """Write exactly the slots the operator confirmed, re-validating each one.
+
+    This is the only place Smart Fill writes, and it cannot invent a time: it is handed
+    the pairs and either commits them or explains why it did not. Previously each mode
+    recomputed the whole proposal under `confirm=True` and saved that instead, so the
+    dates reviewed and the dates written were unrelated.
+
+    Re-validation matters because the calendar can move between preview and confirm.
+    A conflict is reported against the specific slot rather than silently resolved by
+    choosing some other day, which is what made the old behaviour so hard to notice.
+    """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    out: list[SmartFillSlot] = []
+    written = 0
+    claimed: set[datetime] = set()
+
+    for item in requested:
+        when = _to_utc(item.scheduled_at)
+        post = db.get(Post, item.post_id)
+        title = post.title if post else None
+        fname = post.original_filename if post else None
+
+        reason: str | None = None
+        if not post:
+            reason = "post not found"
+        elif post.status != "pending":
+            reason = f"post is {post.status}, only pending posts can be scheduled"
+        elif post.scheduled_at is not None:
+            reason = "scheduled by something else since the preview"
+        elif when <= now:
+            reason = "slot is in the past now"
+        elif when in claimed:
+            reason = "duplicate slot in this request"
+        else:
+            conflict = _slot_taken(
+                db, when, exclude_post_id=post.id, exclude_carousel_id=post.carousel_id
+            )
+            if conflict:
+                reason = f"hour taken by '{conflict.title or conflict.id[:8]}' since the preview"
+
+        if reason:
+            out.append(SmartFillSlot(
+                post_id=item.post_id, title=title, original_filename=fname,
+                scheduled_at=None, skipped_reason=reason,
+            ))
+            continue
+
+        post.scheduled_at = when
+        post.updated_at = datetime.now(timezone.utc)
+        claimed.add(when)
+        written += 1
+        events.log_event(
+            db, post_id=post.id, event_type="scheduled", actor=user.username,
+            details={"scheduled_at": when.isoformat(), "previous": None, "via": via},
+        )
+        out.append(SmartFillSlot(
+            post_id=item.post_id, title=title, original_filename=fname,
+            scheduled_at=when, skipped_reason=None,
+        ))
+
+    synced = _sync_carousel_members(db) if written else 0
+    db.commit()
+    return SmartFillResponse(
+        slots=out,
+        scheduled=written,
+        skipped=len(out) - written,
+        confirmed=written > 0,
+        carousel_synced=synced,
+    )
+
+
 @router.post("/smart-fill", response_model=SmartFillResponse)
 def smart_fill(
     body: SmartFillRequest,
     db: Session = Depends(get_session),
     user: User = Depends(current_user),
 ):
+    # Committing is mode-independent: it writes the pairs it was given. Only the
+    # proposal differs between sequential and scatter, and a proposal is a preview.
+    if body.confirm:
+        if not body.slots:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "confirm requires the slots from the preview — Smart Fill commits the "
+                "schedule that was reviewed, not a freshly generated one.",
+            )
+        via = "smart_fill_random_scatter" if body.mode == "random_scatter" else "smart_fill"
+        return _persist_slots(db, user, body.slots, via=via)
+
     if body.mode == "random_scatter":
         return _random_scatter(db, body, user)
 
@@ -840,32 +930,11 @@ def smart_fill(
     scheduled_n = sum(1 for s in slots if s.scheduled_at is not None)
     skipped_n = len(slots) - scheduled_n
 
-    if body.confirm and scheduled_n:
-        for s in slots:
-            if s.scheduled_at is None:
-                continue
-            post = db.get(Post, s.post_id)
-            if not post or post.status != "pending" or post.scheduled_at is not None:
-                continue
-            post.scheduled_at = s.scheduled_at
-            post.updated_at = datetime.utcnow()
-            events.log_event(
-                db,
-                post_id=post.id,
-                event_type="scheduled",
-                actor=user.username,
-                details={
-                    "scheduled_at": s.scheduled_at.isoformat(),
-                    "previous": None,
-                    "via": "smart_fill",
-                },
-            )
-        _sync_carousel_members(db)
-        db.commit()
-
+    # Preview only. Committing goes through _persist_slots with the slots echoed back,
+    # so nothing here writes and the caller must send these pairs to confirm them.
     return SmartFillResponse(
         slots=slots,
         scheduled=scheduled_n,
         skipped=skipped_n,
-        confirmed=body.confirm and scheduled_n > 0,
+        confirmed=False,
     )
