@@ -366,3 +366,88 @@ def test_other_permanent_errors_still_fail(db, monkeypatch):
     row = db.query(PostGroup).one()
     assert row.status == "failed"
     assert "Group not found" in (row.error_message or "")
+
+
+# --------------------------------------------------------------------------
+# a throttle rejection is evidence, not a failure
+# --------------------------------------------------------------------------
+
+def _raise_throttled(*_a, **_k):
+    from services.platforms import flickr as flickr_mod
+    raise flickr_mod.FlickrError("flickr error 5: Photo limit reached",
+                                 code=5, permanent=True)
+
+
+def test_a_throttle_rejection_does_not_spend_the_retry_budget(db, monkeypatch):
+    """The bug this closes. remaining() counts only successes, so a rejection left the
+    window looking open; the worker retried straight back into the exhausted quota and
+    the attempt budget ran out before the window reopened, losing the submission for
+    good -- the exact outcome per-group pacing exists to prevent."""
+    g = _group(db, limit=1)
+    _pending(db, g, _post(db, photo_id="p1"))
+    db.commit()
+
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(scheduler.flickr, "rest_call", _raise_throttled)
+    scheduler.submit_due_groups()
+
+    row = db.query(PostGroup).one()
+    assert row.status == "pending", "a spent quota is not a failed submission"
+    assert row.retry_count == 0, "waiting must not consume an attempt"
+    assert row.next_retry_at is not None
+    assert row.error_message is None
+
+
+def test_a_throttle_rejection_survives_repeated_passes(db, monkeypatch):
+    """Ten refusals in a row must still leave the row alive; previously five were
+    enough to mark it permanently failed."""
+    g = _group(db, limit=1)
+    _pending(db, g, _post(db, photo_id="p1"))
+    db.commit()
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(scheduler.flickr, "rest_call", _raise_throttled)
+
+    for _ in range(10):
+        row = db.query(PostGroup).one()
+        row.next_retry_at = None          # pretend the timer elapsed
+        db.commit()
+        scheduler.submit_due_groups()
+
+    row = db.query(PostGroup).one()
+    assert row.status == "pending"
+    assert row.retry_count == 0
+
+
+def test_other_permanent_flickr_errors_still_fail(db, monkeypatch):
+    """The exemption is code 5 only; a genuine refusal must still be recorded."""
+    from services.platforms import flickr as flickr_mod
+    g = _group(db, limit=None)
+    _pending(db, g, _post(db, photo_id="p1"))
+    db.commit()
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(scheduler, "SessionLocal", lambda: db)
+    monkeypatch.setattr(scheduler.flickr, "rest_call",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            flickr_mod.FlickrError("flickr error 2: Group not found",
+                                                   code=2, permanent=True)))
+    scheduler.submit_due_groups()
+    assert db.query(PostGroup).one().status == "failed"
+
+
+@pytest.mark.parametrize("limit,period,hours", [
+    (1, "day", 24.0),
+    (2, "day", 12.0),
+    (10, "week", 16.8),
+    (30, "month", 24.0),
+])
+def test_deferral_is_one_slots_worth_of_the_window(db, limit, period, hours):
+    g = _group(db, limit=limit, period=period)
+    out = group_throttle.throttled_until(g, NOW)
+    assert abs((out - NOW).total_seconds() / 3600 - hours) < 0.1
+
+
+def test_a_lifetime_cap_backs_off_rather_than_retrying_forever(db):
+    g = _group(db, limit=3, period="ever")
+    assert group_throttle.throttled_until(g, NOW) == NOW + timedelta(days=1)

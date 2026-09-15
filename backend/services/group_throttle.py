@@ -73,6 +73,28 @@ def remaining(db: Session, group: Group, now: datetime) -> int | None:
     return max(0, limit - len(_submitted_in_window(db, group, now)))
 
 
+def throttled_until(group: Group, now: datetime) -> datetime:
+    """When to try again after Flickr itself says the quota is spent.
+
+    remaining() counts only successful submissions, so a rejection leaves our window
+    looking open. That is how the worker came to retry straight back into an exhausted
+    quota: each attempt was refused, each refusal was recorded as a failure rather than
+    as evidence, and the attempt budget ran out before the window ever reopened -- the
+    submission then being lost for good, which is the exact outcome this module exists
+    to prevent.
+
+    When Flickr disagrees with our count, Flickr is right. Wait out one slot's worth of
+    the window rather than guessing when it opened.
+    """
+    delta = period_delta(group)
+    if delta is None:
+        # A lifetime cap never reopens; back off a day so the row stays visible as
+        # pending rather than being retried into the ground.
+        return now + PERIODS["day"]
+    limit = group.daily_limit or 1
+    return now + delta / max(limit, 1)
+
+
 def next_slot_at(db: Session, group: Group, now: datetime) -> datetime:
     """When the oldest submission in the window ages out, freeing one slot.
 

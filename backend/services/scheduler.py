@@ -447,6 +447,12 @@ CAROUSEL_RESUME_SECONDS = 360
 # a success, and burns the retry budget a real refusal needs.
 FLICKR_SUBMISSION_ALREADY_DONE = {3, 6}
 
+# "Photo limit reached" -- the group's quota is spent. Not a failure and not permanent,
+# though flickr.py classes every 1-9 code as permanent: the submission is fine, the
+# timing is wrong. Treating it as a failure is what lost submissions to the two
+# tightest-throttled groups even after per-group pacing was added.
+FLICKR_GROUP_THROTTLED = 5
+
 HASHTAG_CAP = {"instagram": 5}
 DEFAULT_HASHTAG_CAP = 30
 
@@ -1540,6 +1546,26 @@ def submit_due_groups() -> None:
                     log.info("post %s already handled by group %s (%s)",
                              post.id[:8], group.name, msg)
                     continue
+
+                if getattr(e, "code", None) == FLICKR_GROUP_THROTTLED:
+                    # Flickr says the quota is spent while our own window thought there
+                    # was room -- remaining() counts successes, so refusals leave it
+                    # looking open. Believe Flickr, wait out a slot, and spend no part
+                    # of the retry budget: waiting is not failing.
+                    pg.next_retry_at = group_throttle.throttled_until(group, now)
+                    pg.error_message = None
+                    events.log_event(
+                        db,
+                        post_id=post.id,
+                        event_type="group_throttled",
+                        actor="worker",
+                        details={"group": group.name,
+                                 "retry_at": pg.next_retry_at.isoformat()},
+                    )
+                    log.info("post %s: %s quota spent, deferring to %s",
+                             post.id[:8], group.name, pg.next_retry_at)
+                    continue
+
                 permanent = isinstance(e, flickr.FlickrError) and e.permanent
                 pg.retry_count = (pg.retry_count or 0) + 1
                 pg.error_message = msg
