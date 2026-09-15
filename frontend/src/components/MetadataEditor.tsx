@@ -178,6 +178,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     queryKey: ["venues", ""],
     queryFn: () => listVenues(),
   });
+  // Routing decides groups unless a human has taken over. `groups_overridden` is the
+  // server's record of that takeover; the local flag also flips when the photographer
+  // clicks through to the checklist in this session, before anything is saved.
+  const [manualGroups, setManualGroups] = useState(false);
   useEffect(() => {
     setManualGroups(Boolean(post.groups_overridden));
   }, [post.id, post.groups_overridden]);
@@ -237,10 +241,6 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   // questions whose answer is now a default: city, destinations, privacy, groups. What
   // stays up top is what genuinely changes frame to frame.
   const [showMore, setShowMore] = useState(false);
-  // Routing decides groups unless a human has taken over. `groups_overridden` is the
-  // server's record of that takeover; the local flag also flips when the photographer
-  // clicks through to the checklist in this session, before anything is saved.
-  const [manualGroups, setManualGroups] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [targetSet, setTargetSet] = useState<Set<string>>(new Set());
 
