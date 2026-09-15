@@ -361,12 +361,27 @@ def fire_due_posts() -> None:
                     # Fresh transaction for the failure record so the prior partial state isn't
                     # written. Reload post to get current state.
                     refreshed = db.get(Post, post.id)
-                    if refreshed:
-                        _record_failure(db, refreshed, e, fired_at=now)
-                        db.commit()
-                    else:
+                    if not refreshed:
                         log.exception("post %s vanished mid-fire", post.id[:8])
-                    continue
+                        continue
+                    # `refreshed` is the same identity-mapped instance as `post` --
+                    # rollback expires attributes but does not detach -- so the fanout
+                    # below already sees the recorded failure. The reload exists for the
+                    # existence check above, not to swap objects.
+                    _record_failure(db, refreshed, e, fired_at=now)
+                    db.commit()
+                    # Deliberately not `continue`. The other destinations do not need
+                    # Flickr: Instagram ingests from R2, and Bluesky and Pixelfed upload
+                    # the local file. Skipping them here meant a Flickr outage delayed
+                    # every other platform, and a PERMANENT Flickr failure lost them
+                    # outright -- _record_failure marks the post failed, and
+                    # fire_due_posts only ever revisits pending ones, so the fanout
+                    # never ran again. A photo rejected as a Flickr duplicate was dead
+                    # for Instagram too, for a reason that had nothing to do with it.
+                    log.warning(
+                        "post %s: flickr failed (%s) — continuing to the other "
+                        "destinations", post.id[:8], type(e).__name__,
+                    )
             else:
                 # User opted out of Flickr for this post. Transition state directly so the post
                 # leaves the queue and fanout can proceed to non-Flickr platforms.
@@ -1008,6 +1023,14 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         # the hashtag tokens (performers + venue + show + city) belong in description —
         # we prepend them to the tags string so pinterest.post_pin's existing hashtag
         # builder dedupes against post.tags naturally.
+        if not post.flickr_url:
+            # The link is the reason to pin at all — it sends Pinterest traffic to the
+            # photo's permanent page for years. Pinning without it is still worth doing,
+            # but it cannot be added later, so say so rather than lose it quietly.
+            log.warning(
+                "post %s: pinning without a Flickr link (flickr has not landed)",
+                post.id[:8],
+            )
         pin_ctx = performers_svc.caption_context_for_post(db, post)
         merged_tags = " ".join(
             [t.lstrip("#") for t in pin_ctx.hashtag_tokens] + ((post.tags or "").split())
@@ -1168,8 +1191,14 @@ def fanout_to_platforms(
     which is handled in the main fire path).
 
     Per-platform failures are isolated — they record into post_platforms with status='failed'
-    but don't raise upward. Flickr already succeeded (or was skipped); we don't undo that on a
-    Bluesky 500.
+    but don't raise upward. Flickr is not a precondition: it may have succeeded, been
+    skipped, or failed. Each destination stands on its own, so one platform being down
+    neither delays nor cancels the rest.
+
+    The one thing Flickr contributes here is Pinterest's `link`, which points at the
+    Flickr page. When Flickr has not landed the pin is still created, without the link,
+    and that is logged — a degraded pin beats no pin, and a pin cannot be given its link
+    afterwards.
     """
     if targets is None:
         creds = db.execute(
