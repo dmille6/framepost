@@ -20,19 +20,26 @@ list precisely because it isn't a feature.
 protects against a bad migration and nothing else. restic or borg to anywhere else.
 The drill matters more than the backup — an untested restore isn't a backup.
 
-### Pre-flight validation at schedule time
-**2–4 days.** Validate a post when it's *scheduled*, not when it fires: caption length,
-aspect ratio, missing Pinterest board, absent alt text. Adapters expose
-`validate_post(post) -> list[Issue]`, surfaced through the ready-to-schedule checklist
-that already exists.
+### Pre-flight validation — SHIPPED (server side)
+`services/preflight.py` answers it for any post: blockers (image missing, destination
+disconnected or needing reauth, Instagram with no public URL, a one-frame carousel)
+and warnings (no title, tags or alt text, a pin with no link). It rides along with the
+drafts list and is also available per post at `GET /posts/{id}/preflight`.
 
-This matters far more here than in the tools it's borrowed from. Postiz validates at
+This mattered more here than in the tools it was borrowed from. Postiz validates at
 create time and its window between mistake and discovery is minutes. With a 12-month
-scatter, ours is seasons — an invalid post sits quietly until 9pm on a Tuesday in March.
+scatter, ours is seasons — an invalid post sat quietly until 9pm on a Tuesday in March.
+
+**Still to do:** surfacing each finding in the UI with the repair action beside it,
+rather than one badge and a tooltip. See Interface, below.
 
 ---
 
-## Instagram carousels (multi-image posts)
+## Instagram carousels (multi-image posts) — SHIPPED
+
+Shipped 2026-09-11 (migrations 0023/0024, `_post_instagram_carousel`, durable child
+resume). The findings below stay because they are what the build was based on and
+nobody should have to re-probe Meta to recover them.
 
 **Verified working against the live account, September 2026** — recorded here so nobody
 has to re-probe Meta to find this out.

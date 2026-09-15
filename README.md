@@ -182,11 +182,16 @@ documented step-by-step in [docs/instagram.md](docs/instagram.md).
 ## Status
 
 Production single-user deployment since early 2026. All five platforms post
-fully automatically and the scheduler learns posting hours from realized
-engagement. The pytest suite (133 tests) guards the scheduling, caption,
-tag-normalisation, image-geometry, crop-rect, collaborator fail-soft, and
-find & replace logic, plus a route-inventory check that fails if a literal path
-is ever declared behind the `/{post_id}` catch-all again.
+fully automatically. The scheduler can rank posting hours from realized Instagram
+engagement measured at a fixed age, and says so plainly when there are not yet
+enough posts to rank — defaults are labelled as defaults rather than shown as a
+measurement.
+
+The pytest suite (387 tests) guards scheduling, captions, tag normalisation,
+image geometry, crop rects, collaborator fail-soft, find & replace, carousel
+recovery, per-group Flickr throttles, Bluesky mention facets, publish durability
+and delivery preflight — plus a route-inventory check that fails if a literal
+path is ever declared behind the `/{post_id}` catch-all again.
 
 ## Roadmap
 
