@@ -86,6 +86,14 @@ MAX_ALT_TEXT = 1000
 STATUS_POLL_TRIES = 10
 STATUS_POLL_INTERVAL = 3.0
 
+# Video is not an image with a longer download. Meta transcodes a reel server-side, and
+# a 60-second 1080x1920 file routinely sits in IN_PROGRESS for two to three minutes --
+# well past the 30s budget that is generous for a JPEG. Polling for up to eight minutes
+# costs nothing when the container finishes early, and a worker that gives up too soon
+# republishes a reel Meta was still busy accepting.
+REEL_POLL_TRIES = 96
+REEL_POLL_INTERVAL = 5.0
+
 
 class InstagramError(Exception):
     def __init__(self, message: str, *, permanent: bool = False):
@@ -450,6 +458,70 @@ def post_photo(
     }
 
 
+def post_reel(
+    db: Session,
+    *,
+    video_url: str,
+    caption: str,
+    collaborators: list[str] | None = None,
+    share_to_feed: bool = True,
+) -> dict:
+    """Publish a reel from a publicly fetchable MP4. Returns {remote_id, url, ...}.
+
+    Same container -> poll -> publish shape as post_photo, with three differences that
+    matter:
+
+    - `media_type=REELS` and `video_url`. Meta downloads and transcodes during the
+      container step, so a file it cannot read fails here rather than at publish.
+    - No alt_text. Meta documents the field as unsupported on reels and stories; sending
+      it anyway is a 400 on a post that would otherwise have shipped.
+    - A much longer poll (see REEL_POLL_TRIES) because transcoding is not instant.
+
+    `share_to_feed` also puts the reel in the main grid. Left on: a reel that appears
+    only under the Reels tab is invisible to the followers who browse the profile, and
+    reach is the entire reason for posting one.
+    """
+    row = _load_credential(db)
+    _maybe_refresh(db, row)
+    token = decrypt_token(row.access_token)
+    ig_user_id = json.loads(row.extra_json or "{}").get("ig_user_id")
+    if not ig_user_id:
+        raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
+
+    data = {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": (caption or "")[:MAX_CAPTION],
+        "share_to_feed": "true" if share_to_feed else "false",
+        "access_token": token,
+    }
+
+    wanted_collabs = [
+        h.lstrip("@").strip()
+        for h in (collaborators or [])
+        if h and h.strip()
+    ][:MAX_COLLABORATORS]
+
+    container_id, used_collabs, rejected = _create_container(
+        ig_user_id, data, wanted_collabs
+    )
+    if rejected:
+        log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
+
+    _await_container(
+        container_id, token, describing=f"reel url={video_url}",
+        tries=REEL_POLL_TRIES, interval=REEL_POLL_INTERVAL,
+    )
+    media_id, permalink = _publish_container(ig_user_id, container_id, token)
+
+    return {
+        "remote_id": str(media_id),
+        "url": permalink,
+        "collaborators": used_collabs,
+        "collaborators_rejected": rejected,
+    }
+
+
 def post_carousel(
     db: Session,
     *,
@@ -548,11 +620,14 @@ def post_carousel(
     }
 
 
-def _await_container(container_id: str, token: str, *, describing: str) -> None:
+def _await_container(
+    container_id: str, token: str, *, describing: str,
+    tries: int = STATUS_POLL_TRIES, interval: float = STATUS_POLL_INTERVAL,
+) -> None:
     """Block until Meta says the container is ready. Image containers usually come back
-    FINISHED on the first check."""
+    FINISHED on the first check; reels pass a much longer budget (see post_reel)."""
     status_code = None
-    for _attempt in range(STATUS_POLL_TRIES):
+    for _attempt in range(tries):
         with _client() as c:
             r = c.get(f"/{container_id}", params={
                 "fields": "status_code",
@@ -565,14 +640,14 @@ def _await_container(container_id: str, token: str, *, describing: str) -> None:
             return
         if status_code in ("ERROR", "EXPIRED"):
             raise InstagramError(
-                f"media container ended in {status_code} — Meta couldn't ingest the image "
+                f"media container ended in {status_code} — Meta couldn't ingest the media "
                 f"({describing})",
                 permanent=True,
             )
-        time.sleep(STATUS_POLL_INTERVAL)
+        time.sleep(interval)
     raise InstagramError(
         f"media container still {status_code!r} after "
-        f"{STATUS_POLL_TRIES * STATUS_POLL_INTERVAL:.0f}s ({describing}) — will retry"
+        f"{tries * interval:.0f}s ({describing}) — will retry"
     )
 
 

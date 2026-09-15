@@ -304,6 +304,26 @@ def _record_failure(db, post: Post, err: Exception, fired_at: datetime) -> None:
                     post.next_retry_at, msg)
 
 
+def publish_due_reels() -> None:
+    """Send any reel whose scheduled time has arrived.
+
+    Thin on purpose -- the work is in services/reel_publish, which owns the staging,
+    the collaborator list and the retry accounting. This exists so the worker has
+    something to call and so a failure here cannot take the pass down with it.
+    """
+    db = SessionLocal()
+    try:
+        from services import reel_publish
+
+        n = reel_publish.run_due(db)
+        if n:
+            log.info("published %d reel(s)", n)
+    except Exception:  # noqa: BLE001 — one bad pass must not stop the scheduler
+        log.exception("publish_due_reels failed")
+    finally:
+        db.close()
+
+
 def fire_due_posts() -> None:
     """Phase 3 implementation. Real Flickr upload + retry policy.
 
@@ -1747,6 +1767,9 @@ def main() -> int:
     scheduler.add_job(fire_due_posts, "interval", minutes=1, id="fire_due_posts")
     scheduler.add_job(submit_due_groups, "interval", minutes=1, id="submit_due_groups")
     scheduler.add_job(retry_due_platform_posts, "interval", minutes=1, id="retry_platform_posts")
+    # Every 5 minutes, not every 1: a reel publish can occupy the worker for minutes
+    # while Meta transcodes, and there is no value in queueing up passes behind it.
+    scheduler.add_job(publish_due_reels, "interval", minutes=5, id="publish_due_reels")
     scheduler.add_job(daily_flickr_sync, "cron", hour=flickr_h, minute=flickr_m, id="daily_flickr_sync")
     scheduler.add_job(daily_instagram_token_refresh, "cron", hour=5, minute=30,
                       id="instagram_token_refresh")

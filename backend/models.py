@@ -403,6 +403,15 @@ class Reel(Base):
     mp4_path = Column(Text)
     status = Column(String, nullable=False, server_default="pending")
     error_message = Column(Text)
+    # Publishing lifecycle. A reel with scheduled_at set and posted_at NULL is what the
+    # worker looks for; staged_key is the R2 object to delete once Meta has ingested it.
+    scheduled_at = Column(DateTime, index=True)
+    posted_at = Column(DateTime)
+    remote_id = Column(Text)
+    remote_url = Column(Text)
+    publish_error = Column(Text)
+    publish_attempts = Column(Integer, nullable=False, server_default="0")
+    staged_key = Column(Text)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp(), index=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 

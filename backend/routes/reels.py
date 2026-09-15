@@ -67,6 +67,10 @@ class ReelOut(BaseModel):
     status: str
     error_message: str | None
     mp4_available: bool
+    scheduled_at: datetime | None
+    posted_at: datetime | None
+    remote_url: str | None
+    publish_error: str | None
     photos: list[ReelPhotoOut]
     created_at: datetime
     updated_at: datetime
@@ -81,6 +85,10 @@ class ReelOut(BaseModel):
             status=reel.status,
             error_message=reel.error_message,
             mp4_available=bool(reel.mp4_path) and Path(reel.mp4_path).exists(),
+            scheduled_at=reel.scheduled_at,
+            posted_at=reel.posted_at,
+            remote_url=reel.remote_url,
+            publish_error=reel.publish_error,
             photos=[
                 ReelPhotoOut(
                     post_id=p.post_id,
@@ -328,3 +336,48 @@ def delete_reel(
     db.delete(reel)
     db.commit()
     return {"ok": True}
+
+
+class ReelSchedule(BaseModel):
+    # None clears the schedule, which is how a reel is taken back out of the queue.
+    scheduled_at: datetime | None = None
+
+
+@router.post("/{reel_id}/schedule", response_model=ReelOut)
+def schedule_reel(
+    reel_id: str,
+    body: ReelSchedule,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Queue a rendered reel for automatic publishing, or take it back out.
+
+    Refuses a reel that has not finished rendering: scheduling one would put a row in
+    front of the worker with no file behind it, and the failure would surface minutes
+    later in a log rather than here, where it can be acted on.
+
+    Re-scheduling a reel that previously failed clears the error and the attempt count.
+    The photographer has presumably fixed whatever it was, and leaving a spent counter
+    in place would mean the retry budget was silently already gone.
+    """
+    reel = db.get(Reel, reel_id)
+    if not reel:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "reel not found")
+    if reel.posted_at:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This reel has already been published to Instagram.",
+        )
+    if body.scheduled_at is not None and reel.status != "ready":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"This reel is {reel.status}, not ready — generate it before scheduling.",
+        )
+
+    reel.scheduled_at = body.scheduled_at
+    reel.publish_error = None
+    reel.publish_attempts = 0
+    reel.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    db.refresh(reel)
+    return ReelOut.from_reel(reel, _load_photos(db, reel_id))
