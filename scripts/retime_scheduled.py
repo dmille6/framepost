@@ -43,16 +43,26 @@ That is what makes it safe to run across a queue with an experiment already in i
 the retimed posts are no longer in the dead hours, so they are never selected.
 
     docker compose exec -T backend python /tmp/retime_scheduled.py --weeks 52 --late-only
+
+`--decrowd` fixes days carrying more than one post, and changes only the date --
+the hour each post already has was set deliberately by one of the passes above.
+It cannot be done by moving posts into gaps: the live queue is 364 posts over 357
+days, so 21 overflow posts chase 15 free days and six of them have nowhere to go.
+So it cascades instead, walking each movable post forward to the first free date
+and letting the tail extend. Posts carrying a `retimed` event inside the
+experiment window are anchors and never move.
+
+    docker compose exec -T backend python /tmp/retime_scheduled.py --weeks 52 --decrowd
 """
 import hashlib
 import sys
 from collections import defaultdict
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 sys.path.insert(0, "/app")
 
 from database import SessionLocal  # noqa: E402
-from models import Post  # noqa: E402
+from models import Post, PostEvent  # noqa: E402
 from services import events  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
@@ -66,6 +76,11 @@ MAX_PER_DAY = 1
 # How far ahead to retime. The rest of the queue keeps its existing times until the
 # experiment has actually said something.
 DEFAULT_WEEKS = 8
+
+# Last day of the timing experiment placed on 2026-09-15. Posts retimed on or before
+# this date are anchors for --decrowd: moving one changes the day its arm was measured
+# on, which is the comparison the experiment exists to make.
+EXPERIMENT_LAST_DAY = date(2026, 11, 10)
 
 # Hours nothing should be scheduled into. Separate from the experiment: whichever arm
 # wins, 23:00 is not it, and the live queue had 56 posts sitting in this band.
@@ -108,7 +123,65 @@ def assign_arms(post_ids: list[str], force_evening: bool) -> dict[str, str]:
     return {pid: ("evening" if i < half else "midday") for i, pid in enumerate(ordered)}
 
 
-def main(commit: bool, force_evening: bool, weeks: int, late_only: bool) -> int:
+def decrowd(db, rows: list[Post], anchors: set[str], commit: bool) -> int:
+    """One post per day, by moving dates only and never an anchor.
+
+    Filling the gaps is not an option on a queue this dense -- 21 overflow posts
+    against 15 free days, six with nowhere to go, and the nearest gap for the later
+    ones is 30-130 days away. A cascade keeps every move small instead: each post
+    goes to the first free date at or after the one it already has, so the queue
+    absorbs the 15 gaps as it goes and only the tail extends.
+
+    Times of day are untouched. They were set deliberately -- by the experiment, or
+    by the late-night pass -- and a post being moved off a crowded day is not a
+    reason to re-open that decision.
+    """
+    occupied = {r.scheduled_at.date() for r in rows if r.id in anchors}
+    cursor = min(r.scheduled_at.date() for r in rows)
+    planned: list[tuple[Post, datetime]] = []
+
+    for post in rows:
+        if post.id in anchors:
+            continue
+        day = max(post.scheduled_at.date(), cursor)
+        while day in occupied:
+            day += timedelta(days=1)
+        occupied.add(day)
+        cursor = day + timedelta(days=1)
+        if day != post.scheduled_at.date():
+            planned.append((post, datetime.combine(day, post.scheduled_at.time())))
+
+    if not planned:
+        print("Every day already carries at most one post. No changes.")
+        return 0
+
+    shifts = [(w.date() - p.scheduled_at.date()).days for p, w in planned]
+    for post, when in planned:
+        moved_by = (when.date() - post.scheduled_at.date()).days
+        print(f"  {(post.title or post.id)[:38]:<38} "
+              f"{post.scheduled_at:%a %d %b} -> {when:%a %d %b}  ({moved_by:+d}d)")
+    print(f"\n{len(planned)} post(s) would move. "
+          f"shift: median {sorted(shifts)[len(shifts) // 2]:+d}d, max {max(shifts):+d}d. "
+          f"{len(anchors)} experiment post(s) held fixed.")
+
+    if not commit:
+        print("\nDry run. Re-run with --commit to apply.")
+        return 0
+
+    for post, when in planned:
+        before = post.scheduled_at
+        post.scheduled_at = when
+        events.log_event(
+            db, post_id=post.id, event_type="decrowded", actor="retime_scheduled",
+            details={"from": before.isoformat(), "to": when.isoformat()},
+        )
+    db.commit()
+    print(f"\nApplied. {len(planned)} post(s) moved.")
+    return 0
+
+
+def main(commit: bool, force_evening: bool, weeks: int, late_only: bool,
+         do_decrowd: bool = False) -> int:
     db = SessionLocal()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     horizon = now + timedelta(weeks=weeks)
@@ -129,6 +202,19 @@ def main(commit: bool, force_evening: bool, weeks: int, late_only: bool) -> int:
     day_counts: dict[object, int] = defaultdict(int)
     for r in rows:
         day_counts[r.scheduled_at.date()] += 1
+
+    if do_decrowd:
+        # Anchors: everything an earlier pass placed deliberately inside the
+        # experiment window. Moving one would change which day its arm was measured
+        # on, which is the comparison the whole thing exists to make.
+        anchors = {
+            r.id for r in rows
+            if r.id in {e for e in db.execute(
+                select(PostEvent.post_id).where(PostEvent.event_type == "retimed")
+            ).scalars()}
+            and r.scheduled_at.date() <= EXPERIMENT_LAST_DAY
+        }
+        return decrowd(db, rows, anchors, commit)
 
     if late_only:
         # Touch only the posts sitting in the dead hours, and leave every other post
@@ -218,4 +304,4 @@ if __name__ == "__main__":
     if "--weeks" in sys.argv:
         weeks = int(sys.argv[sys.argv.index("--weeks") + 1])
     raise SystemExit(main("--commit" in sys.argv, "--evening" in sys.argv, weeks,
-                          "--late-only" in sys.argv))
+                          "--late-only" in sys.argv, "--decrowd" in sys.argv))
