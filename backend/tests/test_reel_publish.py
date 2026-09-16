@@ -277,3 +277,49 @@ def test_one_bad_reel_does_not_stop_the_next(db, r2_stub, tmp_path, monkeypatch)
     db.refresh(bad)
     assert good.posted_at is not None
     assert bad.posted_at is None
+
+
+# --------------------------------------------------------------------------
+# engagement collection
+# --------------------------------------------------------------------------
+# Reels publish through reels.remote_id, not post_platforms, and the engagement sync
+# iterates post_platforms. The first reel published through the API therefore collected
+# nothing for 7.5 hours. Engagement not sampled on the day is gone, not merely late.
+
+def test_reel_snapshots_do_not_pollute_the_cover_posts_analytics(db):
+    """A cover photo can have both its own Instagram post and a reel it appears in.
+    Merging the two series would silently average two different pieces of media."""
+    from models import EngagementSnapshot as ES
+    from services import analytics_core as core
+
+    r = _reel(db, posted_at=_now() - timedelta(days=10))
+    cover = db.get(Post, r.cover_post_id)
+    cover.posted_at = _now() - timedelta(days=10)
+    # The cover's own post engagement...
+    db.add(ES(post_id=cover.id, platform="instagram",
+              sampled_at=cover.posted_at + timedelta(days=7),
+              likes=10, comments_count=0, views=0, reposts=0, reach=100))
+    # ...and the reel's, which happens to be much larger.
+    db.add(ES(post_id=cover.id, platform="instagram", reel_id=r.id,
+              sampled_at=cover.posted_at + timedelta(days=7),
+              likes=999, comments_count=0, views=0, reposts=0, reach=9999))
+    db.commit()
+
+    samples = core.collect_samples(db, platform="instagram", window="7d")
+    mine = [s for s in samples if s.post.id == cover.id]
+    assert len(mine) == 1
+    assert mine[0].reach == 100, "the reel's reach must not be read as the photo's"
+
+
+def test_reel_engagement_sync_is_wired_into_sync_all(db):
+    """A collector nothing calls collects nothing."""
+    import inspect
+    from services import comments as comments_svc
+
+    assert "instagram_reels" in inspect.getsource(comments_svc.sync_all)
+
+
+def test_reel_engagement_sync_without_a_credential_is_not_an_error(db):
+    from services import comments as comments_svc
+
+    assert comments_svc.sync_instagram_reels(db) == {"sampled": 0, "errors": 0}

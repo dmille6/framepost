@@ -130,7 +130,16 @@ def collect_samples(
     carries how far, and summarize() reports the median, because a 24h figure drawn from
     a 19h reading should say so rather than round itself into a claim.
     """
-    q = select(EngagementSnapshot, Post).join(Post, Post.id == EngagementSnapshot.post_id)
+    # Reel snapshots hang off the reel's COVER post with reel_id set. Without this
+    # filter a cover photo that also has its own Instagram post would have both series
+    # collapsed into one, and the "latest snapshot" for it could be either -- which is
+    # the kind of wrong that never announces itself. Reel analytics reads them by
+    # reel_id instead; see services/comments.sync_instagram_reels.
+    q = (
+        select(EngagementSnapshot, Post)
+        .join(Post, Post.id == EngagementSnapshot.post_id)
+        .where(EngagementSnapshot.reel_id.is_(None))
+    )
     if platform:
         q = q.where(EngagementSnapshot.platform == platform)
     rows = db.execute(q.order_by(EngagementSnapshot.sampled_at)).all()

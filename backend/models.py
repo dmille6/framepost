@@ -160,6 +160,10 @@ class EngagementSnapshot(Base):
     shares = Column(Integer)
     profile_visits = Column(Integer)
     follows = Column(Integer)
+    # Set when these numbers came from a reel rather than the post's own media.
+    # post_id still points at the reel's cover, so a cover photo can carry two
+    # series -- its own post and any reel it appears in -- without them merging.
+    reel_id = Column(String, ForeignKey("reels.id", ondelete="CASCADE"), index=True)
 
 
 class AccountStat(Base):

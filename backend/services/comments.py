@@ -105,6 +105,7 @@ def _snapshot(
     likes: int = 0,
     comments_count: int = 0,
     reposts: int = 0,
+    reel_id: str | None = None,
     **extra: int | None,
 ) -> None:
     """Append one sample. `extra` carries the richer per-platform metrics added in
@@ -118,6 +119,7 @@ def _snapshot(
             likes=likes,
             comments_count=comments_count,
             reposts=reposts,
+            reel_id=reel_id,
             **{k: v for k, v in extra.items() if v is not None},
         )
     )
@@ -700,8 +702,81 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
         "bluesky": _sync_bluesky(db, bluesky_targets),
         "pixelfed": _sync_pixelfed(db, pixelfed_targets),
         "instagram": _sync_instagram(db, instagram_targets),
+        # Reels carry their own remote_id and never appear in instagram_targets, so
+        # they need their own pass or they are sampled by nothing at all.
+        "instagram_reels": sync_instagram_reels(db, lookback_days=lookback_days),
         "instagram_account": sync_instagram_account_stats(db),
     }
     db.commit()
     log.info("comments+engagement sync: %s", json.dumps(out))
     return out
+
+
+def sync_instagram_reels(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict[str, int]:
+    """Engagement for published reels.
+
+    Reels do not go through post_platforms -- they carry their own `remote_id` -- so
+    _sync_instagram never sees them and the first reel published through the API sat
+    for hours accumulating nothing. That matters more now reels are the default for a
+    group of photographs: engagement not sampled on the day is gone, not merely late.
+
+    Snapshots are written against the reel's cover post with `reel_id` set, so a cover
+    that also has its own Instagram post keeps two distinguishable series instead of one
+    averaged mess.
+    """
+    from models import Reel  # local: keeps the module's import list about posts
+
+    cred = db.execute(
+        select(PlatformCredential).where(PlatformCredential.platform == "instagram")
+    ).scalar_one_or_none()
+    summary = {"sampled": 0, "errors": 0}
+    if not cred or not cred.access_token:
+        return summary
+
+    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+    reels = db.execute(
+        select(Reel).where(
+            Reel.remote_id.is_not(None),
+            Reel.posted_at.is_not(None),
+            Reel.posted_at >= cutoff,
+        )
+    ).scalars().all()
+
+    token = decrypt_token(cred.access_token)
+    headers = {"Authorization": f"Bearer {token}"}
+    for reel in reels:
+        try:
+            with http_client.client(timeout=30.0) as c:
+                r = c.get(
+                    f"{_IG_GRAPH}/{reel.remote_id}",
+                    headers=headers,
+                    params={"fields": "like_count,comments_count"},
+                )
+                if r.status_code >= 400:
+                    if "does not exist" in r.text:
+                        # Deleted on Instagram. Keep the row -- it records that we did
+                        # publish -- but stop asking about it every day.
+                        log.info("instagram reel %s gone — skipping", reel.remote_id)
+                        continue
+                    raise RuntimeError(f"reel fetch HTTP {r.status_code}: {r.text[:200]}")
+                media = r.json()
+                insights = _fetch_ig_media_insights(c, headers, reel.remote_id)
+            _snapshot(
+                db, post_id=reel.cover_post_id, platform="instagram",
+                reel_id=reel.id,
+                likes=int(media.get("like_count") or 0),
+                comments_count=int(media.get("comments_count") or 0),
+                views=insights.get("views") or 0,
+                reach=insights.get("reach"),
+                saves=insights.get("saved"),
+                shares=insights.get("shares"),
+                profile_visits=insights.get("profile_visits"),
+                follows=insights.get("follows"),
+            )
+            summary["sampled"] += 1
+        except Exception as e:  # noqa: BLE001 — one bad reel must not stop the rest
+            log.warning("reel engagement sync failed for %s: %s", reel.id[:8], e)
+            summary["errors"] += 1
+
+    db.commit()
+    return summary
