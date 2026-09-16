@@ -252,6 +252,31 @@ def current_status(db: Session) -> dict[str, Any]:
 MAX_IMAGES = 4
 
 
+def _decode(r, what: str) -> dict:
+    """Parse a Pixelfed response body, or say something useful about why it won't.
+
+    The status-code guards at each call site catch 4xx and 5xx. This catches the other
+    failure: a 2xx carrying a body that is not JSON at all. pixelfed.social sits behind
+    a proxy that has served HTML maintenance and rate-limit pages with a 200, and
+    `r.json()` then raises `Expecting value: line 1 column 1 (char 0)` -- a parser
+    complaining about byte zero, which says nothing about Pixelfed, the request, or what
+    to do next. Four posts failed exactly this way in May and June 2026, retried six
+    times each, and the only reason ever recorded was that sentence.
+
+    Transient: a proxy serving the wrong page is precisely the case worth retrying.
+    """
+    try:
+        return r.json()
+    except ValueError:
+        body = (r.text or "").strip()
+        looks_html = body[:1] == "<"
+        raise PixelfedError(
+            f"{what}: Pixelfed returned HTTP {r.status_code} with "
+            f"{'an HTML page' if looks_html else 'a non-JSON body'} instead of JSON "
+            f"({len(body)} bytes): {body[:200]!r}"
+        ) from None
+
+
 def _load_credential(db: Session) -> PlatformCredential:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
@@ -337,7 +362,7 @@ def post_photos(
                 f"media upload failed (HTTP {r.status_code}): {r.text[:300]}",
                 permanent=(r.status_code in (400, 401, 403, 422)),
             )
-        media_ids.append(r.json()["id"])
+        media_ids.append(_decode(r, "media upload")["id"])
 
     # Step 2: status post. A list value is how httpx repeats a form key, which is what
     # media_ids[] needs for more than one attachment — a list of (key, value) TUPLES is
@@ -356,7 +381,7 @@ def post_photos(
             f"status post failed (HTTP {r.status_code}): {r.text[:300]}",
             permanent=(r.status_code in (400, 401, 403, 422)),
         )
-    status = r.json()
+    status = _decode(r, "status post")
     return {
         "remote_id": status["id"],
         "url": status.get("url") or status.get("uri"),
