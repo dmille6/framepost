@@ -94,6 +94,16 @@ STATUS_POLL_INTERVAL = 3.0
 REEL_POLL_TRIES = 96
 REEL_POLL_INTERVAL = 5.0
 
+# FINISHED is not the same promise as publishable. Meta can answer the status check with
+# FINISHED and then reject media_publish a few hundred milliseconds later because the
+# media has not replicated yet — observed 2026-09-19, where container creation, the
+# FINISHED reply and the 400 all landed inside 400ms. The message asks for a wait, so
+# wait here rather than handing the post to the worker's minutes-long backoff: this is
+# the difference between a post landing on time and landing late.
+PUBLISH_RETRY_TRIES = 6
+PUBLISH_RETRY_INTERVAL = 5.0
+_NOT_READY_RE = re.compile(r"not ready for publishing|media is not ready", re.I)
+
 
 class InstagramError(Exception):
     def __init__(self, message: str, *, permanent: bool = False):
@@ -685,14 +695,27 @@ def _await_container(
 
 
 def _publish_container(ig_user_id: str, container_id: str, token: str) -> tuple[str, str | None]:
-    """Publish a finished container. Returns (media_id, permalink)."""
-    with _client() as c:
-        r = c.post(f"/{ig_user_id}/media_publish", data={
-            "creation_id": container_id,
-            "access_token": token,
-        })
-    if r.status_code >= 400:
-        _raise_api_error(r, "media publish")
+    """Publish a finished container. Returns (media_id, permalink).
+
+    Retries only the "media is not ready" race (see PUBLISH_RETRY_TRIES). Every other
+    4xx is raised on the first answer, because re-posting the same creation_id against
+    a genuine rejection just burns attempts.
+    """
+    for attempt in range(1, PUBLISH_RETRY_TRIES + 1):
+        with _client() as c:
+            r = c.post(f"/{ig_user_id}/media_publish", data={
+                "creation_id": container_id,
+                "access_token": token,
+            })
+        if r.status_code < 400:
+            break
+        if attempt == PUBLISH_RETRY_TRIES or not _NOT_READY_RE.search(_error_text(r)):
+            _raise_api_error(r, "media publish")
+        log.info(
+            "instagram: container %s not ready to publish, waiting %.0fs (attempt %d/%d)",
+            container_id, PUBLISH_RETRY_INTERVAL, attempt, PUBLISH_RETRY_TRIES,
+        )
+        time.sleep(PUBLISH_RETRY_INTERVAL)
     media_id = r.json().get("id")
     if not media_id:
         raise InstagramError(f"media_publish returned no id: {r.text[:200]}")

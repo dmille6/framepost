@@ -95,6 +95,16 @@ _RULES: dict[str, list[tuple[str, FailureCategory, str]]] = {
          r"|only photo or video can be accepted|2207052",
          FailureCategory.RETRY,
          "Instagram couldn't fetch the image yet; it will retry shortly."),
+        # The other half of the same story, on the publish call rather than the fetch.
+        # Meta answers the container status check with FINISHED and then rejects
+        # media_publish because the media is not actually replicated yet. Observed
+        # 2026-09-19: container, FINISHED and the 400 all landed inside 400ms, and the
+        # message itself asks for a wait. A container that genuinely failed comes back
+        # ERROR or EXPIRED from the status poll instead, so this text is always the
+        # race. Must stay ABOVE the BAD_CONTENT rule — first match wins.
+        (r"not ready for publishing|media is not ready",
+         FailureCategory.RETRY,
+         "Instagram wasn't ready to publish yet; it will retry shortly."),
         (r"aspect ratio|caption.*too long|unsupported format"
          r"|invalid image|2207",
          FailureCategory.BAD_CONTENT,

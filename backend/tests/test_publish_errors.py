@@ -165,3 +165,33 @@ def test_genuine_content_rejections_stay_terminal():
         f = classify("instagram", Exception(msg))
         assert f.category is FailureCategory.BAD_CONTENT, msg
         assert f.retryable is False, msg
+
+
+def test_media_not_ready_is_retryable_not_bad_content():
+    """The 2026-09-19 stuck post. Meta reported the container FINISHED and then rejected
+    media_publish because it wasn't. No rule matched, so it fell through to the adapter's
+    blanket permanent=True on any 400 and was filed BAD_CONTENT — terminal, so the post
+    never retried and never went out, while Flickr/Bluesky/Pixelfed all published fine."""
+    err = InstagramError(
+        "media publish failed (HTTP 400): Cannot Publish: The media is not ready "
+        "for publishing, please wait for a moment",
+        permanent=True,
+    )
+    f = classify("instagram", err)
+    assert f.category is FailureCategory.RETRY
+    assert f.retryable is True
+    assert f.requires_reauth is False
+
+
+def test_media_not_ready_wins_over_the_permanent_flag():
+    """The adapter marks every 400 permanent. A matched rule has to outrank that, or the
+    fix above is dead on arrival."""
+    err = InstagramError("The media is not ready for publishing", permanent=True)
+    assert classify("instagram", err).retryable is True
+
+
+def test_aspect_ratio_still_beats_the_not_ready_rule():
+    """The new rule sits above BAD_CONTENT. Guard that it didn't swallow real rejections."""
+    f = classify("instagram", InstagramError("Invalid aspect ratio", permanent=True))
+    assert f.category is FailureCategory.BAD_CONTENT
+    assert f.retryable is False
