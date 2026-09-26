@@ -697,17 +697,30 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
         elif cred.platform == "instagram":
             instagram_targets.append((pp, cred))
 
-    out = {
-        "flickr": _sync_flickr(db, flickr_posts),
-        "bluesky": _sync_bluesky(db, bluesky_targets),
-        "pixelfed": _sync_pixelfed(db, pixelfed_targets),
-        "instagram": _sync_instagram(db, instagram_targets),
+    # Commit after each platform rather than once at the end. One trailing commit meant a
+    # single write transaction stayed open across every HTTP call in the whole sync --
+    # minutes of it -- which is what starved the heartbeat and the disk sampler. Shorter
+    # spans also mean a platform that throws keeps the readings taken before it, which for
+    # engagement snapshots is strictly better than discarding the lot.
+    out: dict[str, Any] = {}
+    stages: list[tuple[str, Any]] = [
+        ("flickr", lambda: _sync_flickr(db, flickr_posts)),
+        ("bluesky", lambda: _sync_bluesky(db, bluesky_targets)),
+        ("pixelfed", lambda: _sync_pixelfed(db, pixelfed_targets)),
+        ("instagram", lambda: _sync_instagram(db, instagram_targets)),
         # Reels carry their own remote_id and never appear in instagram_targets, so
         # they need their own pass or they are sampled by nothing at all.
-        "instagram_reels": sync_instagram_reels(db, lookback_days=lookback_days),
-        "instagram_account": sync_instagram_account_stats(db),
-    }
-    db.commit()
+        ("instagram_reels", lambda: sync_instagram_reels(db, lookback_days=lookback_days)),
+        ("instagram_account", lambda: sync_instagram_account_stats(db)),
+    ]
+    for name, run in stages:
+        try:
+            out[name] = run()
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            log.exception("comments+engagement sync stage %s failed", name)
+            out[name] = {"errors": 1, "failed": str(e)[:200]}
     log.info("comments+engagement sync: %s", json.dumps(out))
     return out
 

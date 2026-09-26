@@ -63,7 +63,15 @@ MAX_ASPECT = 1.91
 # Long-lived tokens last ~60 days. Dashboard-generated tokens don't tell us their exact
 # expiry, so we assume the full window on connect and let refresh correct it.
 TOKEN_LIFETIME = timedelta(days=60)
-REFRESH_LEEWAY = timedelta(days=7)
+# How early the daily job starts trying. This is a retry budget, not a deadline: the job
+# runs once a day, so a 7-day leeway gave the whole Instagram pipeline exactly seven
+# chances and, in practice, one meaningful one -- if that window were missed (box down,
+# Meta wobbling, a transient 500) posting would simply stop on expiry day with nothing
+# having looked wrong beforehand. 25 days costs nothing, since a refresh on a healthy
+# token is idempotent and just re-stamps the expiry, and it turns a single point of
+# failure into three and a half weeks of daily attempts. Meta requires the token be at
+# least 24h old to refresh, which a 60-day token inside this window always is.
+REFRESH_LEEWAY = timedelta(days=25)
 
 # Meta accepts at most 3 co-authors per media.
 MAX_COLLABORATORS = 3
