@@ -1,0 +1,11 @@
+# FramePost: ship DB backups off this box to mediastack:/srv/staging.
+#
+# Install with:  crontab /opt/framepost/scripts/framepost.cron
+#
+# 22:30 America/Chicago, NOT 03:30. backup.py stamps its filename in UTC and runs at
+# 03:00 UTC, which is 22:00 the previous evening in this box's local zone — and cron
+# reads local time. A literal "30 3" here fires at 08:30 UTC, 5.5 hours after the
+# backup it is meant to follow. This is 30 minutes after it, as intended.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 22 * * * /opt/framepost/scripts/push-backups.sh >> /opt/framepost/logs/backup-push.log 2>&1
