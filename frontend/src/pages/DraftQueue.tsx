@@ -36,22 +36,11 @@ import Topbar from "../components/Topbar";
 import UploadZone, { type UploadItem } from "../components/UploadZone";
 import WatchFolderStatus from "../components/WatchFolderStatus";
 import { usePageTitle } from "../hooks/usePageTitle";
+import { batchKey } from "../lib/shoots";
 
 // --- Show/batch grouping -----------------------------------------------------
-// Lightroom exports land named like "2026-Jan-NoRingCircus-Show (4 of 277).jpg" —
-// stripping the sequence counter + extension yields a natural per-show batch key.
-// Files without the counter pattern group by capture date instead. One chip click
-// selects the whole show for the Bulk Edit → Smart Fill flow.
-function batchKey(p: Post): string | null {
-  const base = (p.original_filename || "").replace(/\.[A-Za-z0-9]+$/, "").trim();
-  const stripped = base.replace(/\s*[(\[]?\d+\s+of\s+\d+[)\]]?\s*$/i, "").replace(/[-_\s]+$/, "").trim();
-  if (stripped && stripped !== base) return stripped;
-  if (p.captured_at) {
-    const d = new Date(p.captured_at);
-    return `Shot ${d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}`;
-  }
-  return null;
-}
+// batchKey now lives in lib/shoots.ts, shared with the Scheduled page's Shoots view so
+// both pages group the same photos into the same shoots. The derivation is unchanged.
 
 // Readiness is decided on the server (services/preflight.py) and arrives with each
 // draft. It used to be computed here from title/tags/alt_text, which measured metadata

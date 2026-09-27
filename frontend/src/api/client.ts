@@ -479,6 +479,10 @@ export type ScheduledItem = {
   error_message: string | null;
   carousel_id: string | null;
   carousel_position: number | null;
+  // Labelling for the Shoots view. The grouping key comes from original_filename above;
+  // these two only name the group. See lib/shoots.ts for why `show` is not the key.
+  captured_at: string | null;
+  show: string | null;
 };
 
 export const listScheduled = (fromIso?: string, toIso?: string) => {

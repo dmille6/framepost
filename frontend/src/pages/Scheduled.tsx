@@ -13,12 +13,13 @@ import PageHeader from "../components/PageHeader";
 import QueueTabs from "../components/QueueTabs";
 import RescheduleSidebar from "../components/RescheduleSidebar";
 import ScheduledList from "../components/ScheduledList";
+import ScheduledShoots from "../components/ScheduledShoots";
 import ScheduleDialog from "../components/ScheduleDialog";
 import ScheduledItemModal from "../components/ScheduledItemModal";
 import Topbar from "../components/Topbar";
 import { usePageTitle } from "../hooks/usePageTitle";
 
-type View = "calendar" | "list";
+type View = "calendar" | "list" | "shoots";
 
 type DragSchedule = { postId: string; date: Date };
 
@@ -27,7 +28,7 @@ export default function Scheduled() {
   const qc = useQueryClient();
   const [view, setView] = useState<View>(() => {
     const saved = localStorage.getItem("framepost.scheduled.view");
-    return saved === "list" ? "list" : "calendar";
+    return saved === "list" || saved === "shoots" ? saved : "calendar";
   });
   const [month, setMonth] = useState(() => firstOfMonth(new Date()));
   const [selected, setSelected] = useState<ScheduledItem | null>(null);
@@ -40,9 +41,11 @@ export default function Scheduled() {
   }
 
   const range = useMemo(() => {
-    if (view === "list") {
-      // List = the whole remaining queue from right now, soonest first — "what fires
-      // next", not a month page. 400 days comfortably covers the 365-day scatter horizon.
+    if (view === "list" || view === "shoots") {
+      // List and Shoots both need the whole remaining queue, not a month page: a single
+      // shoot's frames are scattered across the full horizon (one 50-frame shoot spans
+      // Sep 2026 to Aug 2027), so a month window would show a few frames of each and
+      // misrepresent every group's size. 400 days covers the 365-day scatter horizon.
       const start = new Date();
       const end = new Date(start);
       end.setDate(end.getDate() + 400);
@@ -95,9 +98,9 @@ export default function Scheduled() {
         <PageHeader
           title="Scheduled"
           subtitle={
-            view === "list"
-              ? `${items.length} post${items.length === 1 ? "" : "s"} in the queue`
-              : `${items.length} post${items.length === 1 ? "" : "s"} scheduled in this window`
+            view === "calendar"
+              ? `${items.length} post${items.length === 1 ? "" : "s"} scheduled in this window`
+              : `${items.length} post${items.length === 1 ? "" : "s"} in the queue`
           }
           actions={
             <div
@@ -115,6 +118,9 @@ export default function Scheduled() {
               </ToggleButton>
               <ToggleButton active={view === "list"} onClick={() => setViewPersistent("list")}>
                 List
+              </ToggleButton>
+              <ToggleButton active={view === "shoots"} onClick={() => setViewPersistent("shoots")}>
+                Shoots
               </ToggleButton>
             </div>
           }
@@ -137,6 +143,8 @@ export default function Scheduled() {
               <RescheduleSidebar />
             </div>
           </div>
+        ) : view === "shoots" ? (
+          <ScheduledShoots items={items} onPick={(it) => setSelected(it)} />
         ) : (
           <ScheduledList items={items} onPick={(it) => setSelected(it)} />
         )}

@@ -93,6 +93,15 @@ class ScheduledItem(BaseModel):
     # window and the count can be worked out client-side.
     carousel_id: str | None = None
     carousel_position: int | None = None
+    # For the Shoots view, which groups the queue by the shoot a frame came from rather
+    # than by publish date. `original_filename` above carries the "(N of M)" batch
+    # pattern that does the grouping; these two only label it. captured_at is the
+    # fallback key for exports without the counter, and `show` supplies a human name for
+    # a group whose members agree on one -- it is NOT the grouping key, because the field
+    # is inconsistently typed in practice (three spellings of one show name, and both
+    # "Teaser Fest" and "Teaser Fest 2026", which would split coherent shoots).
+    captured_at: datetime | None = None
+    show: str | None = None
 
     class Config:
         from_attributes = True
