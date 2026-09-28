@@ -254,9 +254,11 @@ def test_a_single_landscape_post_is_not_cropped_by_the_publish_path(db, tmp_path
     real_put = r2.put
     monkeypatch.setattr(r2, "put", lambda k, body, **kw: (uploaded.append(body),
                                                           real_put(k, body, **kw))[1])
+    # The URL is deferred until a container is created; a real publish resolves it.
     monkeypatch.setattr(scheduler.instagram, "post_photo",
-                        lambda **kw: {"remote_id": "1", "url": "https://instagram.com/p/x/",
-                                      "collaborators": [], "collaborators_rejected": []})
+                        lambda **kw: (scheduler.instagram._resolve(kw["image_url"]),
+                                      {"remote_id": "1", "url": "https://instagram.com/p/x/",
+                                       "collaborators": [], "collaborators_rejected": []})[1])
     monkeypatch.setattr(scheduler.flickr, "get_display_image_url",
                         lambda db, pid, **kw: "https://flickr/x.jpg")
 

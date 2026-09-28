@@ -556,3 +556,63 @@ def test_the_submitted_caption_is_stored_in_the_checkpoint(db, meta):
     store = Store()
     _photo(db, on_checkpoint=store)
     assert store.saved[0].caption == "Roxie at the Allways"
+
+
+
+# --- GPT review: a resumable container must not depend on staging or the source ------
+
+def test_a_published_container_is_recorded_even_with_the_source_gone(db, meta, monkeypatch):
+    """Original purged, R2 and Flickr both failing: none of it matters to a post that is
+    already live — recovery must not even try them."""
+    post, cred = _ig_post(db)
+    cp = ig.ContainerCheckpoint("c9", datetime.utcnow() - timedelta(minutes=5),
+                                publish_sent_at=datetime.utcnow() - timedelta(minutes=5),
+                                caption="whatever")
+    db.add(PostPlatform(post_id=post.id, platform_id=cred.id, status="pending",
+                        ig_container=cp.to_json()))
+    db.commit()
+    meta.containers["c9"] = {"status": "PUBLISHED", "caption": "x", "type": "IMAGE"}
+
+    def boom(*a, **k):
+        raise AssertionError("touched staging/source/URL lookup on a resumed container")
+    monkeypatch.setattr(scheduler, "_source_for", boom)
+    monkeypatch.setattr(scheduler.ig_variant, "ensure_staged", boom)
+    monkeypatch.setattr(scheduler.flickr, "get_display_image_url", boom)
+
+    scheduler._post_to_platform(db, cred, post, datetime.utcnow())
+    db.commit()
+
+    assert db.get(PostPlatform, (post.id, cred.id)).status == "posted"
+    assert meta.publishes == [] and meta.creates == []
+
+
+def test_a_resumed_carousel_parent_stages_no_frame(db, meta, monkeypatch, tmp_path):
+    from services import carousel
+
+    posts = []
+    for _ in range(3):
+        p = Post(id=uuid.uuid4().hex, status="posted", flickr_photo_id="1", width=1500,
+                 height=1000)
+        db.add(p)
+        posts.append(p)
+    cred = PlatformCredential(id=uuid.uuid4().hex, platform="instagram", access_token="enc",
+                              extra_json=json.dumps({"ig_user_id": "ig1"}))
+    db.add(cred)
+    db.commit()
+    cid = carousel.group(db, posts, lead_id=posts[0].id)
+    lead = carousel.lead_for(db, cid)
+    cp = ig.ContainerCheckpoint("p0", datetime.utcnow())
+    db.add(PostPlatform(post_id=lead.id, platform_id=cred.id, status="pending",
+                        ig_container=cp.to_json()))
+    db.commit()
+    meta.containers["p0"] = {"status": "FINISHED", "caption": "x", "type": "CAROUSEL_ALBUM"}
+
+    def boom(*a, **k):
+        raise AssertionError("staged a frame for a resumed parent")
+    monkeypatch.setattr(scheduler.ig_variant, "ensure_staged", boom)
+    monkeypatch.setattr(scheduler.flickr, "get_display_image_url", boom)
+
+    scheduler._post_to_platform(db, cred, lead, datetime.utcnow())
+    db.commit()
+
+    assert meta.publishes == ["p0"] and meta.creates == []

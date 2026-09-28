@@ -906,12 +906,19 @@ def _ig_wanted_ratio(db, frame: Post) -> str:
     return ig_variant.target_ratio_key(frame, ratio, floor, ratio_key)
 
 
-def _ig_fetchable(db, cred: PlatformCredential, frame: Post, url: str, *, wanted: str):
-    """Defer `url` behind a probe that runs just before Meta is asked to fetch it.
+def _ig_deferred_url(db, cred: PlatformCredential, frame: Post, *, wanted: str,
+                     member: bool = False, force_restage: bool = False):
+    """Everything needed to hand Meta a URL for this frame, deferred until a container
+    is actually about to be created.
 
-    Returned as a callable (instagram.MediaURL) so a resumed container — which Meta
-    already ingested — costs no probe at all. When the URL doesn't serve, try once to
-    route around it before spending a Meta call on a certain 2207052:
+    Returned as a callable (instagram.MediaURL). A resumed container — FINISHED or
+    PUBLISHED on Meta's side — never calls it, so recovering a post that is already live
+    cannot be blocked by anything here: the original having been purged from disk, R2
+    or Flickr being down, a staging upload failing, or the probe. Only a fresh container
+    pays for source validation, staging, URL lookup and the probe, in that order.
+
+    When the URL doesn't serve, try once to route around it before spending a Meta call
+    on a certain 2207052:
 
       * re-stage (a new object and a fresh presign, or a new Flickr staging photo),
         which covers an expired signature, a missing object and a CDN hiccup;
@@ -927,6 +934,8 @@ def _ig_fetchable(db, cred: PlatformCredential, frame: Post, url: str, *, wanted
     container is created.
     """
     def resolve() -> str:
+        url = _ig_image_url(db, cred, frame, wanted=wanted, member=member,
+                            force_restage=force_restage)
         fallbacks: list[tuple[str, object]] = []
         if r2.configured() or wanted != ig_variant.NATIVE_RATIO_KEY:
             fallbacks.append(("re-staged copy", lambda: ig_variant.ensure_staged(
@@ -953,7 +962,8 @@ def _ig_fetchable(db, cred: PlatformCredential, frame: Post, url: str, *, wanted
     return resolve
 
 
-def _ig_image_url(db, cred: PlatformCredential, frame: Post, *, force_restage: bool = False) -> str:
+def _ig_image_url(db, cred: PlatformCredential, frame: Post, *, wanted: str,
+                  member: bool = False, force_restage: bool = False) -> str:
     """The public URL Meta should fetch for one frame.
 
     Meta ingests from a URL rather than an upload, so the bytes have to be somewhere
@@ -962,24 +972,22 @@ def _ig_image_url(db, cred: PlatformCredential, frame: Post, *, force_restage: b
     on 2026-09-11 while reading the identical bytes from R2, so Flickr is no longer in
     the Instagram path. Without R2 we fall back to the Flickr rendition as before.
     """
-    floor, ratio_key, _tested = ig_variant.supported_floor(db)
-    ratio = (frame.width / frame.height) if frame.width and frame.height else None
-    wanted = ig_variant.target_ratio_key(frame, ratio, floor, ratio_key)
     if wanted == ig_variant.NATIVE_RATIO_KEY and not r2.configured():
         if not frame.flickr_photo_id:
             raise instagram.InstagramError(
                 f"frame {frame.id[:8]} isn't on Flickr yet — Meta fetches the image from a "
-                f"public URL, so the carousel can't be built until it is.",
+                f"public URL, so it can't be sent until it is.",
             )
         return flickr.get_display_image_url(db, frame.flickr_photo_id)
     pp = db.get(PostPlatform, (frame.id, cred.id))
-    if not pp:
+    if not pp and member:
         pp = _mark_carousel_member(db, frame, cred)
     _staging_id, url = ig_variant.ensure_staged(
         db, frame, pp, platform_id=cred.id,
         ratio_key=wanted,
         fit=frame.ig_fit or "crop", offset=frame.ig_crop_offset, force=force_restage,
     )
+    db.commit()
     return url
 
 
@@ -1002,16 +1010,16 @@ def _post_instagram_carousel(
         )
 
     def _build(force: bool) -> list[instagram.CarouselImage]:
-        out = [
+        # Deferred: a frame is staged and probed only when its child container is about
+        # to be built, so a resumed parent (or resumed children) touch none of it.
+        return [
             instagram.CarouselImage(
-                url=_ig_fetchable(db, cred, f, _ig_image_url(db, cred, f, force_restage=force),
-                                  wanted=_ig_wanted_ratio(db, f)),
+                url=_ig_deferred_url(db, cred, f, wanted=_ig_wanted_ratio(db, f),
+                                     member=f.id != post.id, force_restage=force),
                 alt=(f.alt_text or "").strip() or None,
             )
             for f in frames
         ]
-        db.commit()
-        return out
 
     pp = db.get(PostPlatform, (post.id, cred.id))
 
@@ -1147,11 +1155,6 @@ def _record_published(
 
 def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: datetime) -> None:
     """Attempt one platform fanout; persist outcome to post_platforms + activity timeline."""
-    # Also catches an original_path pointing at a file that is no longer there: the old
-    # inline version only fell back when original_path was unset, so a purged file with a
-    # live path slipped through to the uploader as a missing-file crash.
-    src = _source_for(post)
-
     text = _build_caption_for(cred.platform, post, db)
     # Prefer AI-generated alt_text (richer + accessibility-tuned); fall back to title +
     # description for posts that pre-date the alt_text field (migration 0014) or where
@@ -1162,7 +1165,6 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
 
     # Set by the Instagram branch; read by the bookkeeping that now runs after the
     # publish has been recorded.
-    staging_id: str | None = None
     collab_sent: list[str] = []
     collab_refused: list[str] = []
 
@@ -1172,7 +1174,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 db=db, frames=_carousel_frames(db, post), text=text
             )
         else:
-            result = bluesky.post_photo(db=db, src=src, text=text, alt_text=alt)
+            result = bluesky.post_photo(db=db, src=_source_for(post), text=text, alt_text=alt)
         remote_id, remote_url = result["at_uri"], result["url"]
     elif cred.platform == "pixelfed":
         if carousel_svc.is_lead(post):
@@ -1180,7 +1182,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 db=db, frames=_carousel_frames(db, post), text=text
             )
         else:
-            result = pixelfed.post_photo(db=db, src=src, text=text, alt_text=alt)
+            result = pixelfed.post_photo(db=db, src=_source_for(post), text=text, alt_text=alt)
         remote_id, remote_url = result["remote_id"], result["url"]
     elif cred.platform == "pinterest":
         # Pinterest has structured title/description/link rather than a blob, so we don't
@@ -1205,7 +1207,10 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         )
         result = pinterest.post_pin(
             db=db,
-            src=src,
+            # Resolved per platform, not up front: Instagram needs no local file on a
+            # resumed container, and must not fail on a purged original. _source_for
+            # also catches an original_path pointing at a file that is no longer there.
+            src=_source_for(post),
             title=post.title,
             description=caption_text.description_for("pinterest", post),
             tags=merged_tags or None,
@@ -1230,20 +1235,12 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
             )
         floor, ratio_key, floor_tested = ig_variant.supported_floor(db)
         ratio = (post.width / post.height) if post.width and post.height else None
-        fit = post.ig_fit or "crop"
-        pp0 = db.get(PostPlatform, (post.id, cred.id))
 
         # With R2 configured every photo is staged in our own bucket, reshaped or not:
         # Meta could not fetch from Flickr at all on 2026-09-11 while reading the same
-        # bytes from R2 without complaint.
+        # bytes from R2 without complaint. The staging itself happens inside the deferred
+        # URL (_ig_deferred_url) — only if a new container is actually needed.
         wanted = ig_variant.target_ratio_key(post, ratio, floor, ratio_key)
-        if wanted != ig_variant.NATIVE_RATIO_KEY or r2.configured():
-            staging_id, image_url = ig_variant.ensure_staged(
-                db, post, pp0, platform_id=cred.id,
-                ratio_key=wanted, fit=fit, offset=post.ig_crop_offset,
-            )
-        else:
-            image_url = flickr.get_display_image_url(db, post.flickr_photo_id)
 
         # Co-author the post with the performers already tagged on it (from Lightroom
         # @keywords). An accepted collab puts the photo on the performer's profile and
@@ -1260,7 +1257,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         checkpoint, save_checkpoint = _ig_checkpoint(db, post, cred)
         try:
             result = instagram.post_photo(
-                db=db, image_url=_ig_fetchable(db, cred, post, image_url, wanted=wanted),
+                db=db, image_url=_ig_deferred_url(db, cred, post, wanted=wanted),
                 caption=text, alt_text=alt, collaborators=collab_handles,
                 checkpoint=checkpoint, on_checkpoint=save_checkpoint,
                 media_identity=_ig_media_identity(post, wanted),
@@ -1274,20 +1271,19 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 log.info("post %s: Meta rejected 3:4 — recording 4:5 floor and retrying",
                          post.id[:8])
                 ig_variant.record_floor(db, "4:5")
-                staging_id, image_url = ig_variant.ensure_staged(
-                    db, post, db.get(PostPlatform, (post.id, cred.id)),
-                    platform_id=cred.id, ratio_key="4:5", fit=fit,
-                    offset=post.ig_crop_offset, force=True,
-                )
                 result = instagram.post_photo(
-                    db=db, image_url=_ig_fetchable(db, cred, post, image_url, wanted="4:5"),
+                    db=db, image_url=_ig_deferred_url(db, cred, post, wanted="4:5",
+                                                      force_restage=True),
                     caption=text, alt_text=alt, collaborators=collab_handles,
                     on_checkpoint=save_checkpoint,
                 )
             else:
                 raise
         else:
-            if staging_id and ratio_key == "3:4" and not floor_tested:
+            # Only a photo actually cropped to 3:4 proves Meta takes 3:4. (This used to
+            # key off "something was staged", which with R2 is every photo — including
+            # landscapes that say nothing about the portrait floor.)
+            if wanted == "3:4" and not floor_tested:
                 ig_variant.record_floor(db, "3:4")
 
         _note_recovered(db, post, result)
@@ -1318,9 +1314,10 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         post.posted_to_instagram_at = fired_at
         # Staging variant served its purpose — pull it off Flickr (sweep catches
         # stragglers). A network call, and the likeliest thing here to hang or throw,
-        # which is exactly why it now runs after the publish has been recorded.
-        if staging_id:
-            ig_variant.cleanup_staged(db, db.get(PostPlatform, (post.id, cred.id)))
+        # which is exactly why it now runs after the publish has been recorded. Keyed off
+        # the row rather than this attempt: staging is deferred, so a resumed container
+        # may be publishing an object an EARLIER attempt staged. A no-op when none is.
+        ig_variant.cleanup_staged(db, db.get(PostPlatform, (post.id, cred.id)))
 
     cred.last_success_at = fired_at
     # A channel that just published is demonstrably authorised again.
