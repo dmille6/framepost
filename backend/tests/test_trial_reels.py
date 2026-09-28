@@ -1037,3 +1037,49 @@ def test_a_toggle_never_retargets_a_frame_scheduled_since(db):
     db.commit()
     _patch(db, reel.id, trial_graduation=None)
     assert _ig(db, frames[0]), "unscheduling doesn't hand it back to the reel"
+
+
+# --- third review round: downgrades don't take reel_photos with them ------------------
+
+def test_downgrades_with_foreign_keys_on_keep_reel_photos(tmp_path, monkeypatch):
+    """Batch mode's default rebuilds `reels`; with foreign keys on, dropping the old
+    table cascade-deleted every reel_photos row (and reel snapshots). Every reels
+    downgrade in this chain now drops columns natively."""
+    import sqlite3
+    import sqlalchemy as sa
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.engine import Engine
+
+    import config as app_config
+
+    assert sqlite3.sqlite_version_info >= (3, 35), "native DROP COLUMN needs SQLite 3.35"
+
+    def fk_on(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys = ON")
+    sa.event.listen(Engine, "connect", fk_on)
+    try:
+        url = f"sqlite:///{tmp_path / 'fk.db'}"
+        monkeypatch.setattr(app_config.settings, "database_url", url)
+        cfg = Config("alembic.ini")
+        command.upgrade(cfg, "0033_keep_history_on_reconnect")
+        eng = sa.create_engine(url)
+        with eng.begin() as c:
+            assert c.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+            c.execute(sa.text("INSERT INTO posts (id, status) VALUES ('p1', 'posted')"))
+            c.execute(sa.text("INSERT INTO reels (id, cover_post_id) VALUES ('r1', 'p1')"))
+            c.execute(sa.text("INSERT INTO reel_photos (reel_id, position, post_id) "
+                              "VALUES ('r1', 0, 'p1')"))
+            c.execute(sa.text("INSERT INTO engagement_snapshots (post_id, platform, reel_id) "
+                              "VALUES ('p1', 'instagram', 'r1')"))
+
+        command.upgrade(cfg, "head")
+        command.downgrade(cfg, "0033_keep_history_on_reconnect")
+        with eng.connect() as c:
+            assert c.execute(sa.text("SELECT count(*) FROM reel_photos")).scalar() == 1
+            assert c.execute(sa.text(
+                "SELECT count(*) FROM engagement_snapshots WHERE reel_id = 'r1'")).scalar() == 1
+            assert c.execute(sa.text("SELECT count(*) FROM reels")).scalar() == 1
+        eng.dispose()
+    finally:
+        sa.event.remove(Engine, "connect", fk_on)

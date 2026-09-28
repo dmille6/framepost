@@ -45,7 +45,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_reels_scheduled_at", table_name="reels")
-    with op.batch_alter_table("reels") as b:
+    # recreate="never": a native ALTER TABLE DROP COLUMN (SQLite >= 3.35). Batch mode's
+    # default rebuilds the table, and rebuilding `reels` with foreign keys on
+    # cascade-deletes every reel_photos row (and reel engagement snapshots).
+    with op.batch_alter_table("reels", recreate="never") as b:
         for col in ("staged_key", "publish_attempts", "publish_error",
                     "remote_url", "remote_id", "posted_at", "scheduled_at"):
             b.drop_column(col)

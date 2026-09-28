@@ -33,7 +33,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("reels") as b:
+    # recreate="never": a native ALTER TABLE DROP COLUMN (SQLite >= 3.35). Batch mode's
+    # default rebuilds the table, and rebuilding `reels` with foreign keys on
+    # cascade-deletes every reel_photos row (and reel engagement snapshots).
+    with op.batch_alter_table("reels", recreate="never") as b:
         b.drop_column("ig_container")
     with op.batch_alter_table("post_platforms") as b:
         b.drop_column("ig_container")
