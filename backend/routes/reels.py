@@ -15,12 +15,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import FileResponse
+from typing import Literal
+
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_session
-from models import Post, Reel, ReelPhoto, User
+from models import AppConfig, Post, Reel, ReelPhoto, User
 from routes.auth import current_user
 from services import storage
 from services.reel import CropRect, PhotoSegment, ReelGenerationError, generate
@@ -45,11 +47,18 @@ class ReelPhotoIn(BaseModel):
     crop_end: CropIn | None = None
 
 
+# Meta's trial_params.graduation_strategy values; None = an ordinary reel.
+TrialGraduation = Literal["SS_PERFORMANCE", "MANUAL"]
+
+
 class ReelCreate(BaseModel):
     cover_post_id: str
     total_duration_seconds: float = Field(60.0, ge=10.0, le=90.0)
     caption: str | None = None
     photos: list[ReelPhotoIn] = Field(min_length=1, max_length=10)
+    # Omitted: the Settings default (reel_trial_default) decides. Sent, even as null:
+    # the caller has decided, and null means an ordinary reel.
+    trial_graduation: TrialGraduation | None = None
 
 
 class ReelPhotoOut(BaseModel):
@@ -71,6 +80,7 @@ class ReelOut(BaseModel):
     posted_at: datetime | None
     remote_url: str | None
     publish_error: str | None
+    trial_graduation: str | None
     photos: list[ReelPhotoOut]
     created_at: datetime
     updated_at: datetime
@@ -89,6 +99,7 @@ class ReelOut(BaseModel):
             posted_at=reel.posted_at,
             remote_url=reel.remote_url,
             publish_error=reel.publish_error,
+            trial_graduation=reel.trial_graduation,
             photos=[
                 ReelPhotoOut(
                     post_id=p.post_id,
@@ -108,9 +119,20 @@ class ReelPatch(BaseModel):
     total_duration_seconds: float | None = Field(None, ge=10.0, le=90.0)
     photos: list[ReelPhotoIn] | None = Field(None, min_length=1, max_length=10)
     cover_post_id: str | None = None
+    # Only applied when sent (null included = make it an ordinary reel); see update_reel.
+    trial_graduation: TrialGraduation | None = None
 
 
 # --- helpers ---------------------------------------------------------------
+
+def default_trial_graduation(db: Session) -> str | None:
+    """What a new reel is created as, from Settings. Anything but a known strategy —
+    missing, "off", or garbage — is an ordinary reel: the trial is opt-in."""
+    raw = db.execute(
+        select(AppConfig.value).where(AppConfig.key == "reel_trial_default")
+    ).scalar_one_or_none()
+    return raw if raw in ("SS_PERFORMANCE", "MANUAL") else None
+
 
 def _load_photos(db: Session, reel_id: str) -> list[ReelPhoto]:
     return list(db.execute(
@@ -197,6 +219,11 @@ def create_reel(
         total_duration_seconds=body.total_duration_seconds,
         caption=body.caption,
         status="pending",
+        # Resolved now, not at publish time: the reel shows what it will go out as from
+        # the moment it exists, and changing Settings later doesn't silently flip reels
+        # already sitting in the queue.
+        trial_graduation=(body.trial_graduation if "trial_graduation" in body.model_fields_set
+                          else default_trial_graduation(db)),
     )
     db.add(reel)
     for p in body.photos:
@@ -294,6 +321,18 @@ def update_reel(
     if not reel:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "reel not found")
 
+    if "trial_graduation" in body.model_fields_set \
+            and body.trial_graduation != reel.trial_graduation:
+        # Once it is live the kind of media is a fact about Instagram, not a setting, and
+        # analytics rely on it to keep trial and ordinary reels apart. (Before that, a
+        # change is safe even with a container checkpointed: the fingerprint includes
+        # the trial, so a stale container is rebuilt rather than published.)
+        if reel.posted_at:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This reel is already on Instagram — whether it is a Trial Reel can't change now.",
+            )
+        reel.trial_graduation = body.trial_graduation
     if body.caption is not None:
         reel.caption = body.caption
     if body.total_duration_seconds is not None:

@@ -509,3 +509,21 @@ def distribution(
     shown to anyone -- a different question, and on this account the binding one.
     """
     return adist.distribution(db, platform=platform, window=window)
+
+
+@router.get("/reels")
+def reel_summary(
+    window: str | None = Query("7d", pattern="^(24h|48h|7d)$"),
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Published reels, ordinary and Trial, summarised side by side and never pooled.
+
+    A Trial Reel is shown to non-followers first, so its reach answers a different
+    question from an ordinary reel's; one median over both would describe neither.
+    Feed posts are not here at all (collect_samples excludes reel snapshots).
+    """
+    return {
+        "ordinary": ac.summarize(ac.collect_reel_samples(db, trial=False, window=window)),
+        "trial": ac.summarize(ac.collect_reel_samples(db, trial=True, window=window)),
+    }

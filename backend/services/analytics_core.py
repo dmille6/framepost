@@ -157,31 +157,73 @@ def collect_samples(
         posted = _platform_posted_at(db, post, plat)
         if not posted:
             continue
-        age = None
-        if delta is None:
-            chosen = snaps[-1]
-        else:
-            target = posted + delta
-            # A post younger than the window has not lived through it. The tolerance
-            # alone let one in: a 6-hour-old post with a 6-hour reading sits within 18
-            # hours of the 24-hour mark, and was counted as a 24-hour figure. The
-            # docstring claimed this was excluded; nothing did it.
-            if target > _utcnow():
-                continue
-            candidates = [s for s in snaps if abs(s.sampled_at - target) <= WINDOW_TOLERANCE]
-            if not candidates:
-                continue
-            chosen = min(candidates, key=lambda s: abs(s.sampled_at - target))
-            age = round((chosen.sampled_at - posted).total_seconds() / 3600, 1)
-        out.append(
-            Sample(
-                post=post, platform=plat, posted_at=posted, age_hours=age,
-                likes=chosen.likes or 0, comments=chosen.comments_count or 0,
-                views=chosen.views or 0, reposts=chosen.reposts or 0,
-                reach=chosen.reach, saves=chosen.saves, shares=chosen.shares,
-                profile_visits=chosen.profile_visits, follows=chosen.follows,
-            )
-        )
+        sample = _sample_at(post, plat, posted, snaps, delta)
+        if sample is not None:
+            out.append(sample)
+    return out
+
+
+def _sample_at(post: Post, platform: str, posted: datetime,
+               snaps: list[EngagementSnapshot], delta: timedelta | None) -> Sample | None:
+    """The reading that stands for this media at `delta` after posting (latest when
+    None), or None when there is no honest one. Snapshots oldest first."""
+    age = None
+    if delta is None:
+        chosen = snaps[-1]
+    else:
+        target = posted + delta
+        # A post younger than the window has not lived through it. The tolerance
+        # alone let one in: a 6-hour-old post with a 6-hour reading sits within 18
+        # hours of the 24-hour mark, and was counted as a 24-hour figure. The
+        # docstring claimed this was excluded; nothing did it.
+        if target > _utcnow():
+            return None
+        candidates = [s for s in snaps if abs(s.sampled_at - target) <= WINDOW_TOLERANCE]
+        if not candidates:
+            return None
+        chosen = min(candidates, key=lambda s: abs(s.sampled_at - target))
+        age = round((chosen.sampled_at - posted).total_seconds() / 3600, 1)
+    return Sample(
+        post=post, platform=platform, posted_at=posted, age_hours=age,
+        likes=chosen.likes or 0, comments=chosen.comments_count or 0,
+        views=chosen.views or 0, reposts=chosen.reposts or 0,
+        reach=chosen.reach, saves=chosen.saves, shares=chosen.shares,
+        profile_visits=chosen.profile_visits, follows=chosen.follows,
+    )
+
+
+def collect_reel_samples(db: Session, *, trial: bool, window: str | None = None) -> list[Sample]:
+    """One Sample per published reel — trial reels OR ordinary ones, never both.
+
+    `trial` is required and has no default on purpose. A Trial Reel is shown to
+    non-followers first and only reaches followers if it graduates, so its reach is a
+    different quantity from an ordinary reel's; a median over both would be a number
+    about neither. Whether a trial later graduated is not exposed by Meta's API (no
+    media field for it), so a trial reel stays in the trial group for good.
+
+    Sample.post is the reel's cover (reel snapshots hang off it), posted_at the reel's.
+    """
+    from models import Reel  # local: the rest of the module is about posts
+
+    q = (
+        select(EngagementSnapshot, Reel, Post)
+        .join(Reel, Reel.id == EngagementSnapshot.reel_id)
+        .join(Post, Post.id == Reel.cover_post_id)
+        .where(Reel.posted_at.is_not(None))
+        .where(Reel.trial_graduation.is_not(None) if trial
+               else Reel.trial_graduation.is_(None))
+        .order_by(EngagementSnapshot.sampled_at)
+    )
+    by_reel: dict[str, tuple[Reel, Post, list[EngagementSnapshot]]] = {}
+    for snap, reel, post in db.execute(q).all():
+        by_reel.setdefault(reel.id, (reel, post, []))[2].append(snap)
+
+    delta = WINDOWS.get(window or "", None)
+    out: list[Sample] = []
+    for reel, post, snaps in by_reel.values():
+        sample = _sample_at(post, snaps[0].platform, reel.posted_at, snaps, delta)
+        if sample is not None:
+            out.append(sample)
     return out
 
 

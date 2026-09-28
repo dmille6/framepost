@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import Performer, PostPerformer, Reel, ReelPhoto
-from services import media_probe, r2
+from services import events, media_probe, r2
 from services.platforms import instagram as ig
 
 log = logging.getLogger("framepost.reel_publish")
@@ -202,12 +202,24 @@ def publish(db: Session, reel: Reel) -> dict:
             video_url=video_url,
             caption=reel.caption or "",
             collaborators=collaborators_for(db, reel),
+            # post_reel owns what a trial changes on the wire (no collaborators, no
+            # share_to_feed) so no caller can get those rules half right.
+            trial_graduation=reel.trial_graduation,
             checkpoint=checkpoint,
             on_checkpoint=save,
             media_identity=_media_identity(reel),
         )
     except ig.InstagramError as e:
         reel.publish_error = str(e)
+        if isinstance(e, ig.TrialReelRejected):
+            # On the cover's timeline: reels have no event log of their own, and this
+            # one needs a person — Trial off, or wait and reschedule.
+            events.log_event(db, post_id=reel.cover_post_id, event_type="reel_trial_rejected",
+                             actor="worker", details={
+                                 "reel_id": reel.id,
+                                 "graduation": reel.trial_graduation,
+                                 "error": str(e),
+                             })
         db.commit()
         raise ReelPublishError(str(e), permanent=getattr(e, "permanent", False)) from e
 

@@ -77,6 +77,11 @@ REFRESH_LEEWAY = timedelta(days=25)
 
 # Meta accepts at most 3 co-authors per media.
 MAX_COLLABORATORS = 3
+# trial_params.graduation_strategy values (IG User Media reference, "trial_params";
+# added to the Content Publishing API 2025-12-03 for Instagram Login and Facebook Login
+# alike). SS_PERFORMANCE: Instagram shares it with followers if it performs. MANUAL:
+# the account graduates it by hand in the Instagram app.
+TRIAL_GRADUATION_STRATEGIES = ("SS_PERFORMANCE", "MANUAL")
 # Meta's ceiling on carousel children. A carousel takes its aspect ratio from the FIRST
 # child and crops the rest to match, which is why grouping validates ratio up front.
 MAX_CAROUSEL = 10
@@ -170,6 +175,37 @@ class PublishUnconfirmed(InstagramError):
         super().__init__(message, permanent=False)
         # Read by the scheduler's failure recorder (same hook as carousel resume).
         self.retry_after_seconds = UNCONFIRMED_RETRY_SECONDS
+
+
+class TrialReelRejected(InstagramError):
+    """Meta refused a reel *as a trial* — the account isn't enabled for Trial Reels, or
+    has used up whatever allowance Meta gives it.
+
+    Always permanent, and never answered by quietly publishing an ordinary reel instead:
+    that would put the reel in front of followers, which is exactly what the photographer
+    chose not to do. The fix is a human decision (turn Trial off, or wait and reschedule),
+    so the message says so.
+    """
+
+    def __init__(self, meta_says: str, *, http_status: int | None = None):
+        super().__init__(
+            "Instagram refused this as a Trial Reel — nothing was published. "
+            f"Meta said: {meta_says} Trial Reels are switched on per account by "
+            "Instagram (and may be rationed); either turn Trial off for this reel or "
+            "try again later, then reschedule it.",
+            permanent=True, http_status=http_status,
+        )
+
+
+def _is_trial_rejection(text: str) -> bool:
+    """Does this refusal concern the trial itself?
+
+    Meta documents no error code for an ineligible account. Every rejection seen
+    reported names the trial ("trial reel" / "trial_params"), so that is the test —
+    deliberately narrow: an unrelated 400 (bad video, bad caption) keeps its own message
+    rather than being blamed on the trial.
+    """
+    return "trial" in (text or "").lower()
 
 
 def _utcnow() -> datetime:
@@ -614,6 +650,7 @@ def post_reel(
     caption: str,
     collaborators: list[str] | None = None,
     share_to_feed: bool = True,
+    trial_graduation: str | None = None,
     checkpoint: ContainerCheckpoint | None = None,
     on_checkpoint: Checkpoint | None = None,
     media_identity: str | None = None,
@@ -635,33 +672,70 @@ def post_reel(
 
     Checkpointed like post_photo — and it matters most here: a reel's container spends
     minutes transcoding, which is the widest window any publish has for a crash.
+
+    `trial_graduation` (SS_PERFORMANCE | MANUAL) publishes a Trial Reel: shown to
+    non-followers first, graduating to followers per the strategy. Meta documents only
+    the trial_params field itself; the two rules below are the conservative reading of
+    what it leaves unsaid, because a Meta 400 on a trial fails the whole reel:
+
+    - No share_to_feed. It asks for the reel in followers' Feed, which is the opposite of
+      a trial, and Meta says nothing about combining the two — so it is left out rather
+      than sent either way. Graduation is what decides whether followers see it.
+    - No collaborators. Meta's docs are silent; schedulers that ship Trial Reels
+      (Metricool) say collabs can't be added, and the app offers none on a trial. The
+      performers' @handles are still in the caption.
+
+    A refusal that concerns the trial raises TrialReelRejected — never a fallback to an
+    ordinary reel, which would show followers what the photographer chose not to.
     """
     token, ig_user_id = _credential_parts(db)
     caption_text = (caption or "")[:MAX_CAPTION]
+    if trial_graduation is not None and trial_graduation not in TRIAL_GRADUATION_STRATEGIES:
+        raise InstagramError(f"unknown trial graduation strategy {trial_graduation!r}",
+                             permanent=True)
+    trial = trial_graduation is not None
+    wanted = [] if trial else _wanted_collaborators(collaborators)
+    if trial and collaborators:
+        log.info("instagram: trial reel — not inviting collaborators %s", collaborators)
 
     def create() -> tuple[str, list[str], list[str]]:
         data = {
             "media_type": "REELS",
             "video_url": _resolve(video_url),
             "caption": caption_text,
-            "share_to_feed": "true" if share_to_feed else "false",
             "access_token": token,
         }
-        container_id, used, rejected = _create_container(
-            ig_user_id, data, _wanted_collaborators(collaborators)
-        )
+        if trial:
+            # Form-encoded like collaborators: the Graph API reads a JSON string as the
+            # object (Meta's own example sends the same object in a JSON body).
+            data["trial_params"] = json.dumps({"graduation_strategy": trial_graduation})
+        else:
+            data["share_to_feed"] = "true" if share_to_feed else "false"
+        container_id, used, rejected = _create_container(ig_user_id, data, wanted)
         if rejected:
             log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
         return container_id, used, rejected
 
-    return _publish_resumable(
-        db, ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
-        create=create, describing="reel", caption=caption_text,
-        media_types=("VIDEO", "REELS"),
-        tries=REEL_POLL_TRIES, interval=REEL_POLL_INTERVAL,
-        fingerprint=content_fingerprint(
-            caption_text, _wanted_collaborators(collaborators), media_identity),
-    )
+    # The trial setting is part of what the container was built from: toggling it after
+    # a failed attempt must not publish the old container as the old kind of reel.
+    # Appended only for trials, so an ordinary reel's fingerprint is what it always was
+    # and a checkpoint written before this change still resumes.
+    identity = f"{media_identity or ''}|trial:{trial_graduation}" if trial else media_identity
+    try:
+        return _publish_resumable(
+            db, ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
+            create=create, describing="trial reel" if trial else "reel", caption=caption_text,
+            media_types=("VIDEO", "REELS"),
+            tries=REEL_POLL_TRIES, interval=REEL_POLL_INTERVAL,
+            fingerprint=content_fingerprint(caption_text, wanted, identity),
+        )
+    except PublishUnconfirmed:
+        raise
+    except InstagramError as e:
+        if trial and e.http_status is not None and 400 <= e.http_status < 500 \
+                and _is_trial_rejection(str(e)):
+            raise TrialReelRejected(str(e), http_status=e.http_status) from e
+        raise
 
 
 def post_carousel(

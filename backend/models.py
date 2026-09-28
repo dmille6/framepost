@@ -437,6 +437,12 @@ class Reel(Base):
     # Same checkpoint as post_platforms.ig_container (0034). A reel sits in IN_PROGRESS
     # for minutes while Meta transcodes — the widest crash window of any publish.
     ig_container = Column(Text)
+    # Trial Reel (0036): NULL = an ordinary reel; otherwise Meta's graduation_strategy,
+    # "SS_PERFORMANCE" (Instagram shows it to followers if it does well) or "MANUAL" (the
+    # photographer graduates it in the app). One column rather than a flag plus a
+    # strategy so "trial with no strategy" cannot exist. Frozen once posted: it says what
+    # kind of media went out, which is what keeps trial numbers out of normal-reel ones.
+    trial_graduation = Column(String)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp(), index=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
