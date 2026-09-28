@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
-from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, r2, retry, storage, tags, trending, watcher
+from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, media_probe, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -887,6 +887,59 @@ def _note_recovered(db, post: Post, result: dict) -> None:
     )
 
 
+def _ig_wanted_ratio(db, frame: Post) -> str:
+    floor, ratio_key, _tested = ig_variant.supported_floor(db)
+    ratio = (frame.width / frame.height) if frame.width and frame.height else None
+    return ig_variant.target_ratio_key(frame, ratio, floor, ratio_key)
+
+
+def _ig_fetchable(db, cred: PlatformCredential, frame: Post, url: str, *, wanted: str):
+    """Defer `url` behind a probe that runs just before Meta is asked to fetch it.
+
+    Returned as a callable (instagram.MediaURL) so a resumed container — which Meta
+    already ingested — costs no probe at all. When the URL doesn't serve, try once to
+    route around it before spending a Meta call on a certain 2207052:
+
+      * re-stage (a new object and a fresh presign, or a new Flickr staging photo),
+        which covers an expired signature, a missing object and a CDN hiccup;
+      * with R2 in use and no reshaping needed, the Flickr rendition — the path this
+        install used before R2, and the one that still works when R2 is the host
+        having the bad day;
+      * with no R2 and no reshaping, another Flickr rendition size.
+
+    (The reverse of the second — falling back to R2 when a Flickr URL fails — never
+    arises: with R2 configured every frame is staged there first.)
+
+    Nothing fetchable → a RETRY-class error that names the unreachable hosts, and no
+    container is created.
+    """
+    def resolve() -> str:
+        fallbacks: list[tuple[str, object]] = []
+        if r2.configured() or wanted != ig_variant.NATIVE_RATIO_KEY:
+            fallbacks.append(("re-staged copy", lambda: ig_variant.ensure_staged(
+                db, frame, db.get(PostPlatform, (frame.id, cred.id)), platform_id=cred.id,
+                ratio_key=wanted, fit=frame.ig_fit or "crop", offset=frame.ig_crop_offset,
+                force=True,
+            )[1]))
+        if wanted == ig_variant.NATIVE_RATIO_KEY and frame.flickr_photo_id:
+            if r2.configured():
+                fallbacks.append(("Flickr rendition", lambda: flickr.get_display_image_url(
+                    db, frame.flickr_photo_id)))
+            else:
+                fallbacks.append(("another Flickr size", lambda: flickr.get_display_image_url(
+                    db, frame.flickr_photo_id, preference=("Large", "Medium 800"))))
+        try:
+            return media_probe.first_fetchable(url, fallbacks, kinds=media_probe.IMAGE)
+        except media_probe.MediaUnreachable as e:
+            raise instagram.InstagramError(
+                f"image URL unreachable for {frame.id[:8]} — nothing was sent to "
+                f"Instagram: {e}",
+                permanent=False,
+            ) from e
+
+    return resolve
+
+
 def _ig_image_url(db, cred: PlatformCredential, frame: Post, *, force_restage: bool = False) -> str:
     """The public URL Meta should fetch for one frame.
 
@@ -938,7 +991,8 @@ def _post_instagram_carousel(
     def _build(force: bool) -> list[instagram.CarouselImage]:
         out = [
             instagram.CarouselImage(
-                url=_ig_image_url(db, cred, f, force_restage=force),
+                url=_ig_fetchable(db, cred, f, _ig_image_url(db, cred, f, force_restage=force),
+                                  wanted=_ig_wanted_ratio(db, f)),
                 alt=(f.alt_text or "").strip() or None,
             )
             for f in frames
@@ -1191,8 +1245,8 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
         checkpoint, save_checkpoint = _ig_checkpoint(db, post, cred)
         try:
             result = instagram.post_photo(
-                db=db, image_url=image_url, caption=text, alt_text=alt,
-                collaborators=collab_handles,
+                db=db, image_url=_ig_fetchable(db, cred, post, image_url, wanted=wanted),
+                caption=text, alt_text=alt, collaborators=collab_handles,
                 checkpoint=checkpoint, on_checkpoint=save_checkpoint,
             )
         except instagram.InstagramError as e:
@@ -1210,8 +1264,9 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                     offset=post.ig_crop_offset, force=True,
                 )
                 result = instagram.post_photo(
-                    db=db, image_url=image_url, caption=text, alt_text=alt,
-                    collaborators=collab_handles, on_checkpoint=save_checkpoint,
+                    db=db, image_url=_ig_fetchable(db, cred, post, image_url, wanted="4:5"),
+                    caption=text, alt_text=alt, collaborators=collab_handles,
+                    on_checkpoint=save_checkpoint,
                 )
             else:
                 raise

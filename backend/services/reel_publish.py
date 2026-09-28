@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import Performer, PostPerformer, Reel, ReelPhoto
-from services import r2
+from services import media_probe, r2
 from services.platforms import instagram as ig
 
 log = logging.getLogger("framepost.reel_publish")
@@ -162,13 +162,25 @@ def publish(db: Session, reel: Reel) -> dict:
         reel.staged_key = key
     db.commit()
 
-    def video_url() -> str:
-        if staged_url is not None:
-            return staged_url
+    def restage() -> str:
         key, url = stage(reel)
         reel.staged_key = key
         db.commit()
         return url
+
+    def video_url() -> str:
+        # Probed right before Meta is asked to fetch it (see services/media_probe). A
+        # reel has no Flickr copy to fall back to, so the one alternative is a fresh
+        # upload with a fresh presign.
+        url = staged_url if staged_url is not None else restage()
+        try:
+            return media_probe.first_fetchable(
+                url, [("re-staged copy", restage)], kinds=media_probe.VIDEO)
+        except media_probe.MediaUnreachable as e:
+            raise ig.InstagramError(
+                f"video URL unreachable — nothing was sent to Instagram: {e}",
+                permanent=False,
+            ) from e
 
     def save(cp) -> None:
         reel.ig_container = cp.to_json() if cp else None

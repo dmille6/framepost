@@ -58,3 +58,21 @@ def r2_stub(monkeypatch):
     monkeypatch.setattr(r2, "list_keys", lambda prefix="": [
         k for k in store if k.startswith(prefix)])
     return store
+
+
+@pytest.fixture(autouse=True)
+def _no_network_probe(monkeypatch):
+    """The pre-flight media URL probe never leaves the machine in tests.
+
+    Every probe answers as a healthy 1-byte image/video range. Tests of the probe itself
+    replace media_probe._client with their own transport.
+    """
+    import httpx
+    from services import media_probe
+
+    def _ok(request):
+        kind = "video/mp4" if request.url.path.endswith(".mp4") else "image/jpeg"
+        return httpx.Response(206, headers={"content-type": kind}, content=b"\xff")
+
+    monkeypatch.setattr(media_probe, "_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(_ok)))

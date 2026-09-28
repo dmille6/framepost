@@ -277,7 +277,8 @@ def test_the_lead_publishes_every_frame_once(db, monkeypatch, tmp_path):
 
     assert len(seen["images"]) == 4
     # Frame order is the carousel's order, not whatever the DB felt like returning.
-    assert [i.url for i in seen["images"]] == [f"https://x/photo{n}.jpg" for n in range(4)]
+    # URLs are deferred (probed just before Meta fetches them), so resolve to compare.
+    assert [instagram._resolve(i.url) for i in seen["images"]] == [f"https://x/photo{n}.jpg" for n in range(4)]
     assert seen["collaborators"] == ["hellinheels"]
 
 

@@ -87,6 +87,14 @@ _RULES: dict[str, list[tuple[str, FailureCategory, str]]] = {
          FailureCategory.RETRY,
          "Instagram may already have published this; FramePost will confirm before "
          "trying again."),
+        # Our own pre-flight probe (services/media_probe) found the image/video URL not
+        # serving, so no container was created. Transient by construction — the URL is
+        # re-staged next attempt. Above the REAUTH rules: the probe reasons it quotes
+        # ("HTTP 403" from a stale presign) say nothing about the Instagram token.
+        (r"(image|video) url unreachable",
+         FailureCategory.RETRY,
+         "The photo's public URL wasn't reachable, so nothing was sent to Instagram; "
+         "it will retry."),
         # 190 = invalid/expired token; 10 & 200 = permission not granted.
         (r"error validating access token|session has been invalidated|code.?:?\s*190"
          r"|oauthexception|access token.*expired",
