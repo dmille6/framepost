@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from models import AppConfig, Post, Reel
@@ -170,36 +170,46 @@ def purge_expired_reels(db: Session) -> int:
     days = _reel_retention_days(db)
     cutoff = datetime.utcnow() - timedelta(days=days)
 
+    eligible = (
+        Reel.mp4_path.is_not(None),
+        Reel.status != "pending",  # regeneration may be writing the same path
+        Reel.publish_claimed_at.is_(None),
+        Reel.publish_claim_token.is_(None),
+        Reel.ig_container.is_(None),
+        or_(Reel.posted_at < cutoff,
+            and_(Reel.posted_at.is_(None), Reel.scheduled_at.is_(None),
+                 Reel.status == "failed", Reel.updated_at < cutoff)),
+    )
     candidates = db.execute(
-        select(Reel).where(
-            Reel.mp4_path.is_not(None),
-            # A render can wait months for its slot. Even a stale publish claim or
-            # checkpoint is unresolved work, not permission to destroy its input.
-            Reel.publish_claimed_at.is_(None),
-            Reel.publish_claim_token.is_(None),
-            Reel.ig_container.is_(None),
-            or_(Reel.posted_at < cutoff,
-                and_(Reel.posted_at.is_(None), Reel.scheduled_at.is_(None),
-                     Reel.status == "failed", Reel.updated_at < cutoff)),
-        )
-    ).scalars().all()
+        select(Reel.id, Reel.mp4_path, Reel.updated_at).where(*eligible)
+    ).all()
 
     purged = 0
-    for reel in candidates:
-        path = Path(reel.mp4_path)
-        if path.exists():
-            try:
-                size = path.stat().st_size
-                path.unlink()
-                log.info("purged reel mp4 %s (%d bytes freed)", reel.id[:8], size)
-            except OSError as e:
-                log.warning("reel %s: could not delete mp4: %s", reel.id[:8], e)
-                continue
-        # Clear path even if the file was already gone — keeps DB consistent with disk.
-        reel.mp4_path = None
-        purged += 1
-
-    if purged:
+    for reel_id, raw_path, version in candidates:
+        path = Path(raw_path)
+        try:
+            before = path.stat() if path.exists() else None
+        except OSError:
+            log.exception("reel %s: could not stat mp4", reel_id[:8])
+            continue
+        # The scan is only a hint. Regenerate changes status/updated_at before
+        # writing, so a concurrent regeneration invalidates this conditional clear.
+        won = db.execute(update(Reel).where(
+            Reel.id == reel_id, Reel.mp4_path == raw_path,
+            Reel.updated_at == version, *eligible,
+        ).values(mp4_path=None).execution_options(synchronize_session=False)).rowcount
         db.commit()
+        if not won:
+            continue
+        purged += 1
+        try:
+            # Do not unlink a replacement that appeared after the DB commit.
+            if before is not None and path.exists():
+                after = path.stat()
+                if (before.st_ino, before.st_size, before.st_mtime_ns) == (
+                        after.st_ino, after.st_size, after.st_mtime_ns):
+                    path.unlink()
+                    log.info("purged reel mp4 %s (%d bytes freed)", reel_id[:8], before.st_size)
+        except OSError as e:
+            log.warning("reel %s: could not delete mp4: %s", reel_id[:8], e)
     return purged
-
