@@ -45,8 +45,14 @@ def should_follow(db: Session, post: Post | None, creds: list[PlatformCredential
 
 
 def sync_frame_instagram(db: Session, reel: Reel) -> list[str]:
-    """Make each managed, unposted frame's Instagram targeting match reel.trial_graduation.
-    Returns the post ids changed. Caller commits."""
+    """Make each managed frame's Instagram targeting match reel.trial_graduation.
+    Returns the post ids changed. Caller commits.
+
+    A frame is managed only while it is still a true draft — the same test as at build
+    time. Once the photographer schedules it (or it posts), its targeting is theirs: the
+    flag is cleared for good and the frame is never touched again, by a trial toggle or
+    by the reconcile after the reel publishes.
+    """
     want_ig = reel.trial_graduation is not None
     creds = list(db.execute(select(PlatformCredential)).scalars())
     changed: list[str] = []
@@ -55,7 +61,10 @@ def sync_frame_instagram(db: Session, reel: Reel) -> list[str]:
     ).scalars().all()
     for frame in frames:
         post = db.get(Post, frame.post_id)
-        if post is None or is_posted(db, post):
+        if post is None:
+            continue
+        if not is_draft(post) or is_posted(db, post):
+            frame.ig_follows_reel = False
             continue
         targets = preflight.targets_for(post, creds)
         if want_ig == ("instagram" in targets):

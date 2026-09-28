@@ -993,3 +993,47 @@ def test_a_lost_claim_spends_no_attempt_in_the_worker_loop(two, meta, r2_stub, t
     assert reel_publish.run_due(worker) == 0
     row = _fresh(two, r.id)
     assert row.publish_attempts == 1 and row.publish_error is None
+
+
+# --- third review round: reconcile leaves scheduled frames alone ---------------------
+
+def test_publishing_never_retargets_a_frame_the_photographer_has_since_scheduled(
+        db, r2_stub, tmp_path, monkeypatch):
+    """GPT's reproduction: ordinary reel from drafts, one photo then scheduled and given
+    Instagram back by hand, reel publishes — Instagram must stay on that photo."""
+    _connect_instagram(db)
+    frames = _drafts(db)
+    built = _build_from_drafts(db, frames, trial_graduation=None)
+    frames[1].scheduled_at = datetime.utcnow() + timedelta(days=1)
+    frames[1].target_platforms = json.dumps(["flickr", "instagram"])
+    db.commit()
+
+    reel = db.get(Reel, built.id)
+    f = tmp_path / "r.mp4"
+    f.write_bytes(b"mp4")
+    reel.status, reel.mp4_path = "ready", str(f)
+    reel.trial_graduation = None
+    db.commit()
+    monkeypatch.setattr(ig, "post_reel", lambda db_, **kw: _sent(kw))
+    reel_publish.publish(db, reel)
+
+    assert _ig(db, frames[1]), "the photographer's choice stands"
+    assert not _ig(db, frames[0]), "a frame still in drafts follows the reel"
+    flags = {p.post_id: p.ig_follows_reel for p in
+             db.query(ReelPhoto).filter_by(reel_id=reel.id).all()}
+    assert flags[frames[1].id] is False, "and it is no longer the reel's to manage"
+
+
+def test_a_toggle_never_retargets_a_frame_scheduled_since(db):
+    _connect_instagram(db)
+    frames = _drafts(db)
+    reel = _build_from_drafts(db, frames, trial_graduation="MANUAL")
+    frames[0].scheduled_at = datetime.utcnow() + timedelta(days=1)
+    db.commit()
+    _patch(db, reel.id, trial_graduation=None)
+    assert _ig(db, frames[0]) and not _ig(db, frames[1])
+    _patch(db, reel.id, trial_graduation="MANUAL")      # flag cleared: stays the user's
+    frames[0].scheduled_at = None
+    db.commit()
+    _patch(db, reel.id, trial_graduation=None)
+    assert _ig(db, frames[0]), "unscheduling doesn't hand it back to the reel"
