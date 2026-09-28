@@ -29,6 +29,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import {
   createReel,
+  fetchAppConfig,
   getReel,
   listConnectedPlatforms,
   scheduleReel,
@@ -36,7 +37,9 @@ import {
   updatePost,
   type Post,
   type Reel,
+  type TrialGraduation,
 } from "../api/client";
+import { ReelTrialField, TrialBadge } from "./ReelTrialField";
 
 const ASPECT = 9 / 16;
 const MAX_FRAMES = 10;
@@ -73,6 +76,16 @@ export default function ReelFromDraftsDialog({
   const [when, setWhen] = useState("");
   const [reel, setReel] = useState<Reel | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // undefined until Settings has loaded, so the checkbox starts at the configured
+  // default rather than flashing "off" and being overwritten.
+  const [trial, setTrial] = useState<TrialGraduation | null | undefined>(undefined);
+
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: fetchAppConfig });
+  useEffect(() => {
+    if (trial !== undefined || !config) return;
+    const d = config.reel_trial_default;
+    setTrial(d === "SS_PERFORMANCE" || d === "MANUAL" ? d : null);
+  }, [config, trial]);
 
   useEffect(() => {
     if (!caption && usable[0]) setCaption(usable[0].title ?? "");
@@ -109,6 +122,9 @@ export default function ReelFromDraftsDialog({
         cover_post_id: usable[0].id,
         total_duration_seconds: seconds,
         caption,
+        // Sent explicitly (null included) so what the dialog showed is what is built;
+        // left out only if Settings never loaded, when the server applies the default.
+        ...(trial !== undefined ? { trial_graduation: trial } : {}),
         photos: usable.map((p, i) => ({
           post_id: p.id,
           position: i,
@@ -164,7 +180,8 @@ export default function ReelFromDraftsDialog({
           <h2 style={{ margin: 0, fontSize: 16 }}>Reel from {usable.length} photos</h2>
           <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
             Reels are shown to people who don't follow you; a carousel only reaches
-            existing followers. Performers in any frame are invited as collaborators.
+            existing followers. Performers in any frame are invited as collaborators
+            (except on a Trial Reel).
             These photos will stop posting to Instagram on their own — Instagram gets
             the reel instead. Flickr, Bluesky and the rest are unaffected.
           </div>
@@ -227,6 +244,11 @@ export default function ReelFromDraftsDialog({
                 style={{ resize: "vertical", fontFamily: "inherit" }}
               />
             </label>
+            <ReelTrialField
+              value={trial ?? null}
+              onChange={setTrial}
+              disabled={trial === undefined}
+            />
           </>
         ) : failed ? (
           <div style={{ fontSize: 12, color: "var(--danger)" }}>
@@ -239,7 +261,10 @@ export default function ReelFromDraftsDialog({
           </div>
         ) : (
           <label style={{ display: "grid", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
-            <span>Publish at</span>
+            <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              Publish at
+              {reel.trial_graduation && <TrialBadge />}
+            </span>
             <input
               type="datetime-local"
               className="fp-input"

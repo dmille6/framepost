@@ -1445,16 +1445,24 @@ export type Reel = {
   posted_at: string | null;
   remote_url: string | null;
   publish_error: string | null;
+  /** null = an ordinary reel; otherwise it goes out as an Instagram Trial Reel. */
+  trial_graduation: TrialGraduation | null;
   photos: ReelPhoto[];
   created_at: string;
   updated_at: string;
 };
+
+/** Meta's graduation_strategy for a Trial Reel. SS_PERFORMANCE: Instagram shares it
+ *  with followers if it performs. MANUAL: you share it yourself in the Instagram app. */
+export type TrialGraduation = "SS_PERFORMANCE" | "MANUAL";
 
 export type ReelCreate = {
   cover_post_id: string;
   total_duration_seconds: number;
   caption?: string | null;
   photos: ReelPhoto[];
+  /** Omit to take the Settings default; null for an ordinary reel. */
+  trial_graduation?: TrialGraduation | null;
 };
 
 export const createReel = (body: ReelCreate) =>

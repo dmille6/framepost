@@ -19,11 +19,14 @@ import {
   reelDownloadUrl,
   scheduleReel,
   thumbnailUrl,
+  updateReel,
   type HistoryPost,
   type Reel,
   type ReelCrop,
   type ReelPhoto,
+  type TrialGraduation,
 } from "../api/client";
+import { ReelTrialField, TrialBadge } from "./ReelTrialField";
 import { CardHeader } from "./PageHeader";
 import CopyableBox from "./CopyableBox";
 import CropModal from "./CropModal";
@@ -376,8 +379,8 @@ export default function ReelTab({ postId, post }: Props) {
           <div style={{ fontSize: 11 }}>
             Schedule it and the worker publishes it to <strong>Instagram</strong> for
             you — performers in any frame are invited as collaborators, same as a photo
-            post. The MP4 is still there if you want it for <strong>TikTok</strong>,
-            which has no API here.
+            post (not on a Trial Reel). The MP4 is still there if you want it for{" "}
+            <strong>TikTok</strong>, which has no API here.
           </div>
 
           <ReelSchedule reel={reel} />
@@ -490,6 +493,11 @@ function PastReelsForThisPhoto({ postId }: { postId: string }) {
           >
             <div style={{ display: "grid", gap: 2 }}>
               <div>
+                {r.trial_graduation && (
+                  <>
+                    <TrialBadge />{" "}
+                  </>
+                )}
                 {created.toLocaleString()} ·{" "}
                 <span style={{ color: "var(--text-dim)" }}>
                   {r.photos.length} photo{r.photos.length === 1 ? "" : "s"} ·{" "}
@@ -864,9 +872,38 @@ function ReelSchedule({ reel }: { reel: Reel }) {
     },
   });
 
+  // Until it is published the trial setting is just a setting; the server refuses the
+  // change afterwards, because by then it describes what Instagram actually has.
+  const trialMutation = useMutation({
+    mutationFn: (v: TrialGraduation | null) => updateReel(reel.id, { trial_graduation: v }),
+    onSuccess: (updated) => {
+      qc.setQueryData(["reel", reel.id], updated);
+      void qc.invalidateQueries({ queryKey: ["reels"] });
+    },
+  });
+  const trialField = (
+    <>
+      <ReelTrialField
+        value={reel.trial_graduation}
+        onChange={(v) => trialMutation.mutate(v)}
+        disabled={trialMutation.isPending}
+      />
+      {trialMutation.isError && (
+        <span style={{ fontSize: 11, color: "var(--danger)" }}>
+          {(trialMutation.error as Error).message}
+        </span>
+      )}
+    </>
+  );
+
   if (reel.posted_at) {
     return (
       <div style={{ fontSize: 12 }}>
+        {reel.trial_graduation && (
+          <>
+            <TrialBadge />{" "}
+          </>
+        )}
         Published {new Date(reel.posted_at).toLocaleString()}
         {reel.remote_url && (
           <>
@@ -885,8 +922,11 @@ function ReelSchedule({ reel }: { reel: Reel }) {
       <div style={{ display: "grid", gap: 6 }}>
         <div style={{ fontSize: 12 }}>
           Queued for {new Date(reel.scheduled_at).toLocaleString()} — the worker publishes
-          it and invites the performers.
+          it{reel.trial_graduation
+            ? " as a Trial Reel, to non-followers first."
+            : " and invites the performers."}
         </div>
+        {trialField}
         {reel.publish_error && (
           <div style={{ fontSize: 11, color: "var(--danger)" }}>
             Last attempt failed: {reel.publish_error}
@@ -905,27 +945,30 @@ function ReelSchedule({ reel }: { reel: Reel }) {
   }
 
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-      <input
-        type="datetime-local"
-        className="fp-input"
-        value={when}
-        onChange={(e) => setWhen(e.target.value)}
-        style={{ padding: "6px 10px", fontSize: 12, width: 210 }}
-      />
-      <button
-        className="fp-btn"
-        disabled={!when || mutation.isPending}
-        onClick={() => mutation.mutate(when)}
-        style={{ padding: "6px 14px", fontSize: 12 }}
-      >
-        {mutation.isPending ? "Scheduling…" : "Schedule to Instagram"}
-      </button>
-      {mutation.isError && (
-        <span style={{ fontSize: 11, color: "var(--danger)" }}>
-          {(mutation.error as Error).message}
-        </span>
-      )}
+    <div style={{ display: "grid", gap: 8 }}>
+      {trialField}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input
+          type="datetime-local"
+          className="fp-input"
+          value={when}
+          onChange={(e) => setWhen(e.target.value)}
+          style={{ padding: "6px 10px", fontSize: 12, width: 210 }}
+        />
+        <button
+          className="fp-btn"
+          disabled={!when || mutation.isPending}
+          onClick={() => mutation.mutate(when)}
+          style={{ padding: "6px 14px", fontSize: 12 }}
+        >
+          {mutation.isPending ? "Scheduling…" : "Schedule to Instagram"}
+        </button>
+        {mutation.isError && (
+          <span style={{ fontSize: 11, color: "var(--danger)" }}>
+            {(mutation.error as Error).message}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

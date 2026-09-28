@@ -25,7 +25,14 @@ type FormState = {
   warn_groups_threshold: string;
   schedule_fuzz_minutes: string;
   instagram_signature: string;
+  reel_trial_default: string;
 };
+
+// A key that is absent in app_config reads as this, not as "", so an untouched page
+// isn't "dirty". Only for keys whose absence has a meaning the select can show.
+const ABSENT_MEANS: Partial<Record<keyof FormState, string>> = { reel_trial_default: "off" };
+const saved = (c: AppConfigMap | undefined, k: keyof FormState) =>
+  c?.[k] ?? ABSENT_MEANS[k] ?? "";
 
 const FIELDS: (keyof FormState)[] = [
   "studio_name",
@@ -42,6 +49,7 @@ const FIELDS: (keyof FormState)[] = [
   "warn_groups_threshold",
   "schedule_fuzz_minutes",
   "instagram_signature",
+  "reel_trial_default",
 ];
 
 export default function SettingsGeneral() {
@@ -78,7 +86,7 @@ export default function SettingsGeneral() {
     );
   }
 
-  const dirty = data ? FIELDS.some((k) => form[k] !== (data[k] ?? "")) : false;
+  const dirty = data ? FIELDS.some((k) => form[k] !== saved(data, k)) : false;
 
   function set<K extends keyof FormState>(k: K, v: string) {
     setForm((f) => (f ? { ...f, [k]: v } : f));
@@ -88,7 +96,7 @@ export default function SettingsGeneral() {
     if (!form) return;
     const changes: Record<string, string> = {};
     for (const k of FIELDS) {
-      const original = data?.[k] ?? "";
+      const original = saved(data, k);
       if (form[k] !== original) changes[k] = form[k];
     }
     if (Object.keys(changes).length > 0) saveMutation.mutate(changes);
@@ -239,6 +247,26 @@ export default function SettingsGeneral() {
         />
         {errors.instagram_signature && <FieldError msg={errors.instagram_signature} />}
       </ConfigField>
+      <ConfigField
+        label="New reels"
+        hint="A Trial Reel is shown only to people who don't follow you, and reaches followers only once it's shared with them. Applies to reels made from now on; each reel can still be switched before it publishes."
+      >
+        <select
+          className="fp-select"
+          value={form.reel_trial_default}
+          onChange={(e) => set("reel_trial_default", e.target.value)}
+          style={{ maxWidth: 480 }}
+        >
+          <option value="off">Publish as normal reels</option>
+          <option value="SS_PERFORMANCE">
+            Publish as Trial Reels — share with followers automatically if they do well
+          </option>
+          <option value="MANUAL">
+            Publish as Trial Reels — I'll share them with followers in the Instagram app
+          </option>
+        </select>
+        {errors.reel_trial_default && <FieldError msg={errors.reel_trial_default} />}
+      </ConfigField>
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
         <button className="fp-btn-ghost" disabled={!dirty} onClick={() => data && setForm(toForm(data))}>
@@ -268,6 +296,7 @@ function toForm(c: AppConfigMap): FormState {
     warn_groups_threshold: c.warn_groups_threshold ?? "8",
     schedule_fuzz_minutes: c.schedule_fuzz_minutes ?? "5",
     instagram_signature: c.instagram_signature ?? "",
+    reel_trial_default: saved(c, "reel_trial_default"),
   };
 }
 
