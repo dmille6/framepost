@@ -100,6 +100,12 @@ MediaURL = Union[str, Callable[[], str]]
 Heartbeat = Callable[..., None]
 
 
+class StopAttempt(Exception):
+    """Base for what a heartbeat raises to stop an attempt (reel_publish.ClaimLost).
+    Never read as Meta's answer: code that turns lookup failures into "unconfirmed" or
+    "not found" lets it through."""
+
+
 def _no_heartbeat(force: bool = False) -> None:
     return None
 
@@ -996,7 +1002,10 @@ def _resume_checkpoint(
         # the window means we cannot tell which is ours, and a wrong id is worse than
         # none (engagement would be sampled from somebody else's post).
         try:
-            found = _find_published(db, ig_user_id, token, cp, sent_caption, media_types)
+            found = _find_published(db, ig_user_id, token, cp, sent_caption, media_types,
+                                    heartbeat=heartbeat)
+        except StopAttempt:
+            raise
         except Exception as e:  # noqa: BLE001 — it is live either way; the id is a nicety
             log.warning("instagram: container %s is published but its media id could not "
                         "be looked up: %s", cp.container_id, e)
@@ -1022,7 +1031,10 @@ def _resume_checkpoint(
     # stay unresolved (PublishUnconfirmed) — the retry budget then ends the row as
     # failed, where a human can look, rather than the code guessing.
     try:
-        found = _find_published(db, ig_user_id, token, cp, sent_caption, media_types)
+        found = _find_published(db, ig_user_id, token, cp, sent_caption, media_types,
+                                heartbeat=heartbeat)
+    except StopAttempt:
+        raise
     except Exception as e:  # noqa: BLE001
         raise PublishUnconfirmed(
             f"media publish outcome still unconfirmed for container {cp.container_id} "
@@ -1167,7 +1179,7 @@ def _parse_ig_time(value: str | None) -> datetime | None:
 
 def _find_published(
     db: Session, ig_user_id: str, token: str, cp: ContainerCheckpoint, caption: str,
-    media_types: tuple[str, ...],
+    media_types: tuple[str, ...], heartbeat: Heartbeat = _no_heartbeat,
 ) -> list[tuple[str, str | None]]:
     """Media the checkpointed container might have become, oldest first.
 
@@ -1197,6 +1209,8 @@ def _find_published(
     items: list[dict] = []
     after: str | None = None
     for _page in range(RECOVERY_MAX_PAGES):
+        # Up to RECOVERY_MAX_PAGES requests: long enough to need renewing a claim.
+        heartbeat()
         params = {
             "fields": "id,caption,media_type,timestamp,permalink",
             "limit": RECOVERY_PAGE_SIZE,

@@ -62,7 +62,7 @@ class ReelBusy(ReelPublishError):
     """Another attempt holds the claim. Not a failure of this reel: no attempt is spent."""
 
 
-class ClaimLost(ReelBusy):
+class ClaimLost(ReelBusy, ig.StopAttempt):
     """This attempt's claim was taken over (it went quiet long enough to look dead).
     Raised before any further write or media_publish; the checkpoint, if one was saved,
     makes the next attempt safe."""

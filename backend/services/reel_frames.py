@@ -14,9 +14,11 @@ posted one is history; neither is touched.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import exists, select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.util import identity_key
 
 from models import PlatformCredential, Post, PostPlatform, Reel, ReelPhoto
 from services import events, preflight
@@ -52,6 +54,11 @@ def sync_frame_instagram(db: Session, reel: Reel) -> list[str]:
     time. Once the photographer schedules it (or it posts), its targeting is theirs: the
     flag is cleared for good and the frame is never touched again, by a trial toggle or
     by the reconcile after the reel publishes.
+
+    Every change is one compare-and-swap UPDATE (see _swap_targets): eligibility and
+    the value this decision was based on are re-asserted in the WHERE clause, so a
+    photographer scheduling the frame, or editing its targets, between the read and the
+    write wins — the frame is left alone rather than overwritten.
     """
     want_ig = reel.trial_graduation is not None
     creds = list(db.execute(select(PlatformCredential)).scalars())
@@ -60,21 +67,71 @@ def sync_frame_instagram(db: Session, reel: Reel) -> list[str]:
         select(ReelPhoto).where(ReelPhoto.reel_id == reel.id, ReelPhoto.ig_follows_reel.is_(True))
     ).scalars().all()
     for frame in frames:
-        post = db.get(Post, frame.post_id)
-        if post is None:
+        # Read the row itself, not the session's copy of the Post: with autoflush off the
+        # identity map can be older than the database, and the swap compares against it.
+        row = db.execute(
+            select(Post.status, Post.scheduled_at, Post.posted_at, Post.target_platforms)
+            .where(Post.id == frame.post_id)
+        ).one_or_none()
+        if row is None:
             continue
-        if not is_draft(post) or is_posted(db, post):
+        if not _still_a_draft(db, frame.post_id, row):
             frame.ig_follows_reel = False
             continue
-        targets = preflight.targets_for(post, creds)
+        read = row.target_platforms
+        targets = preflight.targets_for(SimpleNamespace(target_platforms=read), creds)
         if want_ig == ("instagram" in targets):
             continue
         targets = targets + ["instagram"] if want_ig else [t for t in targets if t != "instagram"]
-        post.target_platforms = json.dumps(targets)
-        events.log_event(db, post_id=post.id, event_type="edited", actor="system", details={
+        if not _swap_targets(db, frame.post_id, read, json.dumps(targets)):
+            # Someone else wrote first. If it is no longer a draft it has left the
+            # reel's hands for good; if it is, their targeting stands for now.
+            again = db.execute(
+                select(Post.status, Post.scheduled_at, Post.posted_at)
+                .where(Post.id == frame.post_id)
+            ).one_or_none()
+            if again is None or not _still_a_draft(db, frame.post_id, again):
+                frame.ig_follows_reel = False
+            continue
+        events.log_event(db, post_id=frame.post_id, event_type="edited", actor="system", details={
             "fields": ["target_platforms"], "reel_id": reel.id,
             "reason": "trial reel: frame also posts to Instagram" if want_ig
             else "reel carries this photo to Instagram",
         })
-        changed.append(post.id)
+        changed.append(frame.post_id)
     return changed
+
+
+def _still_a_draft(db: Session, post_id: str, row) -> bool:
+    if not (row.status == "pending" and row.scheduled_at is None and row.posted_at is None):
+        return False
+    return db.execute(
+        select(PostPlatform.post_id).where(
+            PostPlatform.post_id == post_id, PostPlatform.remote_id.is_not(None))
+    ).first() is None
+
+
+def _swap_targets(db: Session, post_id: str, read: str | None, new: str) -> bool:
+    """Set target_platforms only if the post is still a true draft AND its targeting is
+    still exactly what was read (NULL-safe). One statement: SQLite serialises writers,
+    so nothing lands between the check and the write. True if it was written."""
+    won = db.execute(
+        update(Post)
+        .where(
+            Post.id == post_id,
+            Post.status == "pending",
+            Post.scheduled_at.is_(None),
+            Post.posted_at.is_(None),
+            Post.target_platforms.is_not_distinct_from(read),
+            ~exists().where(PostPlatform.post_id == Post.id, PostPlatform.remote_id.is_not(None)),
+        )
+        .values(target_platforms=new)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if won:
+        # The session's copy (if loaded) is now stale; reload it on next access rather
+        # than ever flushing the old value back.
+        cached = db.identity_map.get(identity_key(Post, post_id))
+        if cached is not None:
+            db.expire(cached, ["target_platforms"])
+    return bool(won)

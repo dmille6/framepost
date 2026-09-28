@@ -1083,3 +1083,193 @@ def test_downgrades_with_foreign_keys_on_keep_reel_photos(tmp_path, monkeypatch)
         eng.dispose()
     finally:
         sa.event.remove(Engine, "connect", fk_on)
+
+
+# --- fourth review round: frame writes are compare-and-swap ---------------------------
+# Production's sessions: WAL, autoflush=False (database.SessionLocal), two connections.
+
+@pytest.fixture()
+def prod_two(tmp_path):
+    from database import Base
+    engine = create_engine(f"sqlite:///{tmp_path / 'prod.db'}", connect_args={"timeout": 5})
+
+    @sa_event.listens_for(engine, "connect")
+    def _pragmas(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys = ON")
+        dbapi_connection.execute("PRAGMA journal_mode = WAL")
+
+    Base.metadata.create_all(engine)
+    make = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
+    worker, user = make(), make()
+    yield worker, user
+    worker.close()
+    user.close()
+    engine.dispose()
+
+
+def _trial_reel_from_drafts_published_as_ordinary(worker, tmp_path, monkeypatch):
+    """A trial reel built from drafts (frames keep Instagram) whose container went out as
+    an ordinary reel — so the post-publish reconcile wants Instagram OFF the frames."""
+    _connect_instagram(worker)
+    frames = _drafts(worker)
+    built = _build_from_drafts(worker, frames, trial_graduation="MANUAL")
+    reel = worker.get(Reel, built.id)
+    f = tmp_path / "r.mp4"
+    f.write_bytes(b"mp4")
+    reel.status, reel.mp4_path = "ready", str(f)
+    worker.commit()
+    monkeypatch.setattr(ig, "post_reel", lambda db_, **kw: _sent({"trial_graduation": None}))
+    return reel, frames
+
+
+def _between_read_and_write(monkeypatch, action):
+    """Run `action` on the other connection after reconcile has read the first frame
+    and decided, but before it writes — GPT's interleaving."""
+    from services import reel_frames
+    real = reel_frames._still_a_draft
+    done = {"n": 0}
+
+    def hooked(db_, post_id, row):
+        verdict = real(db_, post_id, row)
+        if done["n"] == 0:
+            done["n"] += 1
+            action(post_id)
+        return verdict
+    monkeypatch.setattr(reel_frames, "_still_a_draft", hooked)
+    return done
+
+
+def _targets(session, post_id):
+    return session.execute(sa.select(Post.target_platforms).where(Post.id == post_id)).scalar_one()
+
+
+import sqlalchemy as sa  # noqa: E402
+
+
+def test_a_frame_scheduled_mid_reconcile_keeps_its_instagram(prod_two, r2_stub, tmp_path, monkeypatch):
+    """GPT's reproduction: reconcile reads the frame as a draft, the photographer
+    schedules it with Instagram on, then the publish commits. Instagram must stay."""
+    worker, user = prod_two
+    reel, frames = _trial_reel_from_drafts_published_as_ordinary(worker, tmp_path, monkeypatch)
+    worker.get(Post, frames[0].id)                      # the worker's session holds a copy
+
+    def schedule(post_id):
+        user.execute(sa_update(Post).where(Post.id == post_id).values(
+            scheduled_at=datetime.utcnow() + timedelta(days=1),
+            target_platforms=json.dumps(["flickr", "instagram"])))
+        user.commit()
+    hooked = _between_read_and_write(monkeypatch, schedule)
+
+    reel_publish.publish(worker, reel)
+    assert hooked["n"] == 1
+    first, second = frames[0].id, frames[1].id
+    fresh = sessionmaker(bind=worker.get_bind())()
+    assert json.loads(_targets(fresh, first)) == ["flickr", "instagram"], "the user's write stands"
+    flags = {p.post_id: p.ig_follows_reel for p in fresh.query(ReelPhoto).filter_by(reel_id=reel.id)}
+    assert flags[first] is False, "scheduled: no longer the reel's to manage"
+    assert "instagram" not in json.loads(_targets(fresh, second)), "the untouched draft follows"
+    assert fresh.get(Reel, reel.id).posted_at is not None
+    fresh.close()
+
+
+def test_targets_edited_mid_reconcile_are_not_overwritten(prod_two, r2_stub, tmp_path, monkeypatch):
+    """Still a draft, but its targeting changed after the read: the swap misses, the
+    edit stands, and the frame stays managed for next time."""
+    worker, user = prod_two
+    reel, frames = _trial_reel_from_drafts_published_as_ordinary(worker, tmp_path, monkeypatch)
+
+    def edit(post_id):
+        user.execute(sa_update(Post).where(Post.id == post_id).values(
+            target_platforms=json.dumps(["flickr", "bluesky", "instagram"])))
+        user.commit()
+    _between_read_and_write(monkeypatch, edit)
+
+    reel_publish.publish(worker, reel)
+    fresh = sessionmaker(bind=worker.get_bind())()
+    assert json.loads(_targets(fresh, frames[0].id)) == ["flickr", "bluesky", "instagram"]
+    flags = {p.post_id: p.ig_follows_reel for p in fresh.query(ReelPhoto).filter_by(reel_id=reel.id)}
+    assert flags[frames[0].id] is True
+    fresh.close()
+
+
+def test_a_stale_session_copy_neither_blocks_nor_undoes_the_swap(prod_two, r2_stub, tmp_path, monkeypatch):
+    """With autoflush off the worker's identity map can be older than the database. The
+    decision reads the row, and a successful swap is never flushed back over."""
+    worker, user = prod_two
+    reel, frames = _trial_reel_from_drafts_published_as_ordinary(worker, tmp_path, monkeypatch)
+    cached = worker.get(Post, frames[0].id)
+    assert "instagram" in (cached.target_platforms or "flickr instagram")
+    reel_publish.publish(worker, reel)
+    user.expire_all()
+    assert "instagram" not in json.loads(_targets(user, frames[0].id))
+
+
+def test_the_toggle_cannot_be_interleaved(prod_two, monkeypatch):
+    """PATCH's flip starts with its conditional UPDATE on reels, so it holds SQLite's
+    write lock from before it reads the frames until it commits: a user write aimed
+    between its read and its write has to wait, and cannot land in the gap. (The frames
+    still go through the same compare-and-swap.)"""
+    worker, user = prod_two
+    _connect_instagram(worker)
+    frames = _drafts(worker)
+    built = _build_from_drafts(worker, frames, trial_graduation="MANUAL")
+    blocked = {}
+
+    def schedule(post_id):
+        user.execute(sa.text("PRAGMA busy_timeout = 100"))
+        try:
+            user.execute(sa_update(Post).where(Post.id == post_id).values(
+                scheduled_at=datetime.utcnow() + timedelta(days=1)))
+            user.commit()
+            blocked["result"] = False
+        except sa.exc.OperationalError as e:
+            user.rollback()
+            blocked["result"] = "locked" in str(e)
+    _between_read_and_write(monkeypatch, schedule)
+    _patch(worker, built.id, trial_graduation=None)
+
+    assert blocked["result"] is True, "the user's write could not land mid-flip"
+    user.expire_all()
+    assert all("instagram" not in json.loads(_targets(user, f.id)) for f in frames)
+    # ...and once the flip has committed, scheduling (with whatever targeting) is theirs.
+    user.execute(sa_update(Post).where(Post.id == frames[0].id).values(
+        scheduled_at=datetime.utcnow() + timedelta(days=1),
+        target_platforms=json.dumps(["flickr", "instagram"])))
+    user.commit()
+    _patch(worker, built.id, trial_graduation="MANUAL")
+    _patch(worker, built.id, trial_graduation=None)
+    user.expire_all()
+    assert json.loads(_targets(user, frames[0].id)) == ["flickr", "instagram"]
+
+
+# --- fourth review round: renewal between recovery pages -----------------------------
+
+def test_the_recovery_lookup_renews_between_pages_and_can_be_stopped(db, meta):
+    """_find_published can page through ~40 requests. It renews between pages, and a
+    lost claim stops it — as itself, not disguised as "unconfirmed"."""
+    for i in range(60):
+        meta.media.append({"id": f"old{i}", "caption": "x", "media_type": "VIDEO",
+                           "timestamp": _now_ig(), "permalink": None})
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "Roxie at the Allways",
+                             "type": "VIDEO"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow() - timedelta(minutes=2),
+                                publish_sent_at=datetime.utcnow() - timedelta(minutes=1),
+                                caption="Roxie at the Allways")
+    beats = []
+
+    class Lost(ig.StopAttempt):
+        pass
+
+    def heartbeat(force=False):
+        beats.append(force)
+        if len(beats) == 3:
+            raise Lost("claim taken over")
+
+    with pytest.raises(Lost):
+        _reel_post(db, checkpoint=cp, on_checkpoint=Store(), heartbeat=heartbeat)
+    assert len(beats) == 3 and meta.publishes == []
+
+
+def _now_ig(offset=timedelta(0)):
+    from datetime import timezone
+    return (datetime.now(timezone.utc) + offset).strftime("%Y-%m-%dT%H:%M:%S+0000")
