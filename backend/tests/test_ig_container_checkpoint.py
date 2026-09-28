@@ -94,7 +94,15 @@ class FakeMeta:
         if path.endswith("/media"):
             if self.media_lookup_fails:
                 return _Resp(500, {"error": {"message": "try later"}})
-            return _Resp(200, {"data": self.media})
+            self.media_pages = getattr(self, "media_pages", 0) + 1
+            start = int(params.get("after") or 0)
+            limit = int(params.get("limit") or 25)
+            page = self.media[start:start + limit]
+            body = {"data": page}
+            if start + limit < len(self.media):
+                body["paging"] = {"cursors": {"after": str(start + limit)},
+                                  "next": "https://graph.instagram.com/next?access_token=x"}
+            return _Resp(200, body)
         obj = path.strip("/")
         if params.get("fields") == "status_code":
             self.status_checks.append(obj)
@@ -458,3 +466,93 @@ def test_an_unconfirmed_publish_retries_after_minutes(db, meta, monkeypatch, tmp
     pp = db.get(PostPlatform, (post.id, cred.id))
     wait = (pp.next_retry_at - before).total_seconds()
     assert 5 * 60 <= wait <= 10 * 60
+
+
+
+# --- GPT review: a negative search must not authorize a re-publish --------------------
+
+def _media(mid, caption, when, kind="IMAGE"):
+    return {"id": mid, "caption": caption, "media_type": kind,
+            "timestamp": (when.replace(tzinfo=timezone.utc)).strftime("%Y-%m-%dT%H:%M:%S+0000"),
+            "permalink": f"https://www.instagram.com/p/{mid}/"}
+
+
+def _sent_cp(cid="c0", minutes_ago=40, caption="Roxie at the Allways"):
+    t = datetime.utcnow() - timedelta(minutes=minutes_ago)
+    return ig.ContainerCheckpoint(cid, t, publish_sent_at=t, caption=caption)
+
+
+@pytest.mark.parametrize("status", [None, "ERROR", "EXPIRED"])
+def test_sent_and_meta_cant_say_and_nothing_found_stays_unresolved(db, meta, status):
+    if status:
+        meta.containers["c0"] = {"status": status, "caption": "x", "type": "IMAGE"}
+    with pytest.raises(ig.PublishUnconfirmed):
+        _photo(db, checkpoint=_sent_cp(), on_checkpoint=Store())
+    assert meta.creates == [] and meta.publishes == []
+
+
+def test_sent_and_gone_but_uniquely_found_is_recovered(db, meta):
+    cp = _sent_cp()
+    meta.media.append(_media("m5", "Roxie at the Allways", cp.publish_sent_at + timedelta(seconds=3)))
+    result = _photo(db, checkpoint=cp, on_checkpoint=Store())
+    assert result["recovered"] and result["remote_id"] == "m5"
+
+
+def test_an_empty_caption_never_matches_on_time_alone(db, meta):
+    cp = _sent_cp(caption="")
+    meta.media.append(_media("m5", "", cp.publish_sent_at + timedelta(seconds=3)))
+    meta.containers["c0"] = {"status": "PUBLISHED", "caption": "", "type": "IMAGE"}
+    result = ig.post_photo(db, image_url="u", caption="", checkpoint=cp, on_checkpoint=Store())
+    assert result["recovered"] and result["remote_id"] is None
+    assert meta.publishes == []
+
+
+def test_the_submitted_caption_is_searched_not_the_current_one(db, meta):
+    cp = _sent_cp(caption="Caption as sent")
+    meta.media.append(_media("m5", "Caption as sent", cp.publish_sent_at + timedelta(seconds=3)))
+    result = ig.post_photo(db, image_url="u", caption="Caption edited since",
+                           checkpoint=cp, on_checkpoint=Store())
+    assert result["remote_id"] == "m5" and meta.publishes == []
+
+
+def test_the_search_pages_through_the_whole_interval(db, meta):
+    cp = _sent_cp(minutes_ago=40)
+    now = datetime.utcnow()
+    meta.media = [_media(f"n{i}", f"later post {i}", now - timedelta(seconds=i))
+                  for i in range(30)]
+    meta.media.append(_media("m5", "Roxie at the Allways", cp.publish_sent_at + timedelta(seconds=3)))
+    result = _photo(db, checkpoint=cp, on_checkpoint=Store())
+    assert result["remote_id"] == "m5"
+    assert meta.media_pages >= 2
+
+
+def test_finished_with_two_matches_is_unresolved(db, meta):
+    cp = _sent_cp()
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "x", "type": "IMAGE"}
+    for i in (3, 9):
+        meta.media.append(_media(f"m{i}", "Roxie at the Allways",
+                                 cp.publish_sent_at + timedelta(seconds=i)))
+    with pytest.raises(ig.PublishUnconfirmed):
+        _photo(db, checkpoint=cp, on_checkpoint=Store())
+    assert meta.publishes == []
+
+
+def test_finished_with_one_unrecorded_match_is_adopted(db, meta):
+    cp = _sent_cp()
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "x", "type": "IMAGE"}
+    meta.media.append(_media("m3", "Roxie at the Allways", cp.publish_sent_at + timedelta(seconds=3)))
+    result = _photo(db, checkpoint=cp, on_checkpoint=Store())
+    assert result["remote_id"] == "m3" and meta.publishes == []
+
+
+def test_finished_and_nothing_found_republishes_the_same_container(db, meta):
+    cp = _sent_cp()
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "x", "type": "IMAGE"}
+    _photo(db, checkpoint=cp, on_checkpoint=Store())
+    assert meta.publishes == ["c0"] and meta.creates == []
+
+
+def test_the_submitted_caption_is_stored_in_the_checkpoint(db, meta):
+    store = Store()
+    _photo(db, on_checkpoint=store)
+    assert store.saved[0].caption == "Roxie at the Allways"

@@ -82,7 +82,7 @@ def test_a_requeued_instagram_row_asks_meta_before_publishing(db, monkeypatch):
     db.commit()
     published = []
     monkeypatch.setattr(ig, "_container_status", lambda cid, tok: "PUBLISHED")
-    monkeypatch.setattr(ig, "_find_published", lambda *a, **k: ("m9", "https://ig/p/m9"))
+    monkeypatch.setattr(ig, "_find_published", lambda *a, **k: [("m9", "https://ig/p/m9")])
     monkeypatch.setattr(ig, "_publish_container", lambda *a: published.append(a))
     monkeypatch.setattr(ig, "_load_credential", lambda db: cred)
     monkeypatch.setattr(ig, "_maybe_refresh", lambda db, r: None)

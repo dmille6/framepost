@@ -132,8 +132,11 @@ CONTAINER_REUSE_WINDOW = timedelta(hours=23)
 # Clock skew allowed when matching a recovered media's timestamp against the moment we
 # created its container: Meta's clock and ours are not the same clock.
 RECOVERY_SKEW = timedelta(minutes=5)
-# How far back through the account's newest media to look for one we may have published.
-RECOVERY_LOOKBACK = 25
+# Page size, and a hard ceiling on pages, when walking the account's media back through
+# the recovery interval. 40 pages of 25 is a thousand posts — far more than this account
+# publishes in any recovery window — so the ceiling only guards against a paging loop.
+RECOVERY_PAGE_SIZE = 25
+RECOVERY_MAX_PAGES = 40
 # ...and how long after the publish request a match may appear. Unbounded, a later post
 # reusing the same caption (55 titles are reused across the queue) would be claimed as
 # this one's, and this post would be marked live without ever being published.
@@ -207,9 +210,14 @@ class ContainerCheckpoint:
     # content_fingerprint() of what the container was built from. None on checkpoints
     # written before fingerprints existed; those are resumed as before.
     fingerprint: str | None = None
+    # The caption actually SUBMITTED with the container. Recovery searches for this, not
+    # for whatever the caption is now — the post may have been edited since. None on
+    # older checkpoints, which fall back to the current caption.
+    caption: str | None = None
 
     def to_json(self) -> str:
         return json.dumps({
+            "caption": self.caption,
             "fingerprint": self.fingerprint,
             "id": self.container_id,
             "created_at": self.created_at.isoformat(),
@@ -234,6 +242,7 @@ class ContainerCheckpoint:
                 collaborators=list(d.get("collaborators") or []),
                 rejected=list(d.get("rejected") or []),
                 fingerprint=d.get("fingerprint"),
+                caption=d.get("caption"),
             )
         except (ValueError, KeyError, TypeError):
             log.warning("instagram: ignoring unreadable container checkpoint %r", raw[:200])
@@ -824,7 +833,7 @@ def _publish_resumable(
     container_id, used, rejected = create()
     cp = ContainerCheckpoint(container_id=container_id, created_at=_utcnow(),
                              collaborators=list(used), rejected=list(rejected),
-                             fingerprint=fingerprint)
+                             fingerprint=fingerprint, caption=caption)
     save(cp)
     _await_container(container_id, token, describing=describing, tries=tries, interval=interval)
     return _publish_checkpointed(ig_user_id, token, cp, save=save)
@@ -854,29 +863,67 @@ def _resume_checkpoint(
     status = _container_status(cp.container_id, token)
     log.info("instagram: resuming container %s (%s, publish %s)", cp.container_id,
              status, "sent" if cp.publish_sent_at else "not sent")
+    # Search for what was submitted, not what the post says now.
+    sent_caption = cp.caption if cp.caption is not None else caption
 
     if status == "PUBLISHED":
+        # Meta itself says it is live, so it is never published again. The media id is a
+        # nicety: take it only when exactly one candidate fits. Two same-caption posts in
+        # the window means we cannot tell which is ours, and a wrong id is worse than
+        # none (engagement would be sampled from somebody else's post).
         try:
-            found = _find_published(db, ig_user_id, token, cp, caption, media_types)
+            found = _find_published(db, ig_user_id, token, cp, sent_caption, media_types)
         except Exception as e:  # noqa: BLE001 — it is live either way; the id is a nicety
             log.warning("instagram: container %s is published but its media id could not "
                         "be looked up: %s", cp.container_id, e)
-            found = None
-        return _recovered(cp, found)
+            found = []
+        return _recovered(cp, found[0] if len(found) == 1 else None)
 
-    if cp.publish_sent_at:
-        # A publish went out last time and nobody heard back. If it landed, it is among
-        # the newest media; look before sending another. A failed lookup means we still
-        # don't know — so wait for the next attempt rather than risk a duplicate.
-        try:
-            found = _find_published(db, ig_user_id, token, cp, caption, media_types)
-        except Exception as e:  # noqa: BLE001
+    if not cp.publish_sent_at:
+        if not fresh:
+            return None
+        if status == "FINISHED":
+            return _publish_checkpointed(ig_user_id, token, cp, save=save)
+        if status == "IN_PROGRESS":
+            _await_container(cp.container_id, token, describing=f"resumed {describing}",
+                             tries=tries, interval=interval)
+            return _publish_checkpointed(ig_user_id, token, cp, save=save)
+        log.info("instagram: discarding container %s (status %r)", cp.container_id, status)
+        return None
+
+    # A publish went out last time and nobody heard back. Every branch below has to
+    # choose between "it's live" and "it isn't", and the costs are lopsided: wrongly
+    # "live" loses one post; wrongly "not live" puts a duplicate on the profile. So a
+    # failed lookup, an ambiguous match, or a container Meta can no longer describe all
+    # stay unresolved (PublishUnconfirmed) — the retry budget then ends the row as
+    # failed, where a human can look, rather than the code guessing.
+    try:
+        found = _find_published(db, ig_user_id, token, cp, sent_caption, media_types)
+    except Exception as e:  # noqa: BLE001
+        raise PublishUnconfirmed(
+            f"media publish outcome still unconfirmed for container {cp.container_id} "
+            f"(status {status}); recent-media lookup failed: {e}"
+        ) from e
+
+    if status in ("FINISHED", "IN_PROGRESS"):
+        # Meta says this container has NOT been published. A caption+time match then
+        # contradicts Meta's own answer, so it is weak evidence — it may be a different
+        # post that happens to share the caption. Adopt it only when it is unambiguous:
+        # exactly one candidate, of the right type, in the window, not recorded against
+        # any other post or reel, with the submitted caption byte-for-byte (whitespace
+        # aside). Status can lag a publish by moments; a unique match is the likelier
+        # explanation than coincidence. Several matches: we can't tell, so unresolved.
+        if len(found) == 1:
+            return _recovered(cp, found[0])
+        if len(found) > 1:
             raise PublishUnconfirmed(
-                f"media publish outcome still unconfirmed for container {cp.container_id} "
-                f"(status {status}); recent-media lookup failed: {e}"
-            ) from e
-        if found:
-            return _recovered(cp, found)
+                f"media publish outcome unconfirmed for container {cp.container_id}: "
+                f"{len(found)} same-caption posts in the window and Meta reports the "
+                f"container {status}"
+            )
+        # Meta says not published and nothing like it is live: send THIS container again
+        # (never a new one — if Meta did take the first request after all, re-sending the
+        # same creation_id is the only way it can recognise it).
         log.info("instagram: container %s was sent for publish but isn't live — "
                  "Meta didn't take it", cp.container_id)
         cp.publish_sent_at = None
@@ -885,17 +932,24 @@ def _resume_checkpoint(
             log.info("instagram: container %s was built from different content — "
                      "building a new one", cp.container_id)
             return None
+        if not fresh:
+            return None
+        if status == "IN_PROGRESS":
+            _await_container(cp.container_id, token, describing=f"resumed {describing}",
+                             tries=tries, interval=interval)
+        return _publish_checkpointed(ig_user_id, token, cp, save=save)
 
-    if not fresh:
-        return None
-    if status == "FINISHED":
-        return _publish_checkpointed(ig_user_id, token, cp, save=save)
-    if status == "IN_PROGRESS":
-        _await_container(cp.container_id, token, describing=f"resumed {describing}",
-                         tries=tries, interval=interval)
-        return _publish_checkpointed(ig_user_id, token, cp, save=save)
-    log.info("instagram: discarding container %s (status %r)", cp.container_id, status)
-    return None
+    # ERROR, EXPIRED, unknown, or gone — after a publish was sent. Meta can't say what
+    # happened, so only a unique match settles it. A negative search is not proof: the
+    # media may be outside what the listing returns, or captioned differently than
+    # recorded. Building a fresh container here is exactly how duplicates were made.
+    if len(found) == 1:
+        return _recovered(cp, found[0])
+    raise PublishUnconfirmed(
+        f"media publish outcome unconfirmed for container {cp.container_id}: Meta reports "
+        f"it {status or 'gone'} and {len(found)} matching post(s) were found — not "
+        f"publishing again"
+    )
 
 
 def _publish_checkpointed(
@@ -984,34 +1038,56 @@ def _parse_ig_time(value: str | None) -> datetime | None:
 def _find_published(
     db: Session, ig_user_id: str, token: str, cp: ContainerCheckpoint, caption: str,
     media_types: tuple[str, ...],
-) -> tuple[str, str | None] | None:
-    """The media a checkpointed container became, found among the account's newest.
+) -> list[tuple[str, str | None]]:
+    """Media the checkpointed container might have become, oldest first.
 
     Meta documents no field on a container that names the media it published as (the
     IG Container reference lists status_code values only; media_publish's response is the
-    one place the id is returned). So the only way back is to match: media of the right
-    type, published no earlier than the container was created, with the same caption.
-    The earliest match wins — if a duplicate did slip out, the original is the one to
-    track. Raises when the lookup itself fails; returns None when nothing matches.
+    one place the id is returned). So the only way back is to match. A candidate must be:
+      * of the right media type;
+      * timestamped inside the recovery interval — from container creation (minus clock
+        skew) to RECOVERY_WINDOW after the publish request (or creation);
+      * captioned with exactly the caption that was submitted. An empty submitted
+        caption matches nothing: time alone would claim any post in the window;
+      * not already recorded against any post or reel (captions are reused — 55 titles
+        across the queue — and another post's media must never be adopted).
 
-    Two guards against claiming someone else's post, which would mark this one live
-    without ever publishing it — captions are reused across the queue:
-      * a window: no later than RECOVERY_WINDOW after the publish request (or, lacking
-        one, the container's creation), since Meta publishes within seconds;
-      * media already recorded against another post or reel is never a match.
+    Pages through the account's media (newest first, `after` cursor rather than the
+    paging.next URL, which embeds the token) until it is past the interval, rather than
+    stopping at the first page: a busy hour must not turn "it's live" into "not found".
+    Raises when the lookup fails. Returns every candidate; callers decide how many is
+    too many.
     """
-    with _client() as c:
-        r = c.get(f"/{ig_user_id}/media", params={
-            "fields": "id,caption,media_type,timestamp,permalink",
-            "limit": RECOVERY_LOOKBACK,
-            "access_token": token,
-        })
-    if r.status_code >= 400:
-        _raise_api_error(r, "recent media lookup")
+    want = " ".join((caption or "").split())
+    if not want:
+        return []
     since = cp.created_at - RECOVERY_SKEW
     until = (cp.publish_sent_at or cp.created_at) + RECOVERY_WINDOW
-    want = " ".join((caption or "").split())
-    items = r.json().get("data") or []
+
+    items: list[dict] = []
+    after: str | None = None
+    for _page in range(RECOVERY_MAX_PAGES):
+        params = {
+            "fields": "id,caption,media_type,timestamp,permalink",
+            "limit": RECOVERY_PAGE_SIZE,
+            "access_token": token,
+        }
+        if after:
+            params["after"] = after
+        with _client() as c:
+            r = c.get(f"/{ig_user_id}/media", params=params)
+        if r.status_code >= 400:
+            _raise_api_error(r, "recent media lookup")
+        body = r.json()
+        page = body.get("data") or []
+        items.extend(page)
+        oldest = min((t for t in (_parse_ig_time(m.get("timestamp")) for m in page) if t),
+                     default=None)
+        after = ((body.get("paging") or {}).get("cursors") or {}).get("after")
+        has_next = bool((body.get("paging") or {}).get("next"))
+        if not page or not after or not has_next or (oldest is not None and oldest < since):
+            break
+
     ids = [str(m.get("id")) for m in items if m.get("id")]
     recorded: set[str] = set()
     if ids:
@@ -1030,13 +1106,11 @@ def _find_published(
             continue
         if media_types and m.get("media_type") not in media_types:
             continue
-        if want and " ".join((m.get("caption") or "").split()) != want:
+        if " ".join((m.get("caption") or "").split()) != want:
             continue
         matches.append((ts, str(m.get("id")), m.get("permalink")))
-    if not matches:
-        return None
     matches.sort()
-    return matches[0][1], matches[0][2]
+    return [(mid, link) for _ts, mid, link in matches]
 
 
 def _count_children(media_id: str, token: str) -> int | None:
