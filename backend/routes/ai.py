@@ -233,6 +233,7 @@ def suggest(
     except Exception as e:
         log.exception("AI suggest failed")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    result = ai_tagging.snap_suggestion(db, result)
     return Suggestion(
         tags=result.tags,
         description=result.description,

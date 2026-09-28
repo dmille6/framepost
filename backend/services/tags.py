@@ -85,6 +85,45 @@ def merge_unique(*sources: Iterable[str]) -> list[str]:
     return out
 
 
+def snap_to_vocabulary(db: Session, suggested: list[str]) -> list[str]:
+    """Keep the photographer's spelling for case and trivial trailing-s variants.
+
+    Vocabulary lives in posts.tags and tag_profiles.tags, as in tag autocomplete.
+    Prefer the most-used exact spelling (lexical tie-break for repeatable results).
+    Exact case-insensitive matches win before plural matching, so deliberately saved
+    singular and plural tags can coexist. Only ordinary +s is recognized: no stemming,
+    -es/-ies, aliases, or whitespace rules. In particular bass/basses and bus/buses
+    stay separate; a broad stemmer can change the subject of a concert photograph.
+    """
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    for column in (Post.tags, TagProfile.tags):
+        for raw in db.execute(select(column)).scalars():
+            counts.update(parse_csv(raw))
+    canonical: dict[str, str] = {}
+    for spelling in sorted(counts, key=lambda t: (-counts[t], t)):
+        canonical.setdefault(spelling.lower(), spelling)
+
+    def plural(word: str) -> str | None:
+        if len(word) < 3 or word.endswith(("s", "x", "z", "ch", "sh", "y")):
+            return None
+        return word + "s"
+
+    out: list[str] = []
+    for tag in suggested:
+        cleaned = tag.strip()
+        key = cleaned.lower()
+        match = canonical.get(key)
+        if match is None:
+            candidates = [spelling for word, spelling in canonical.items()
+                          if plural(key) == word or plural(word) == key]
+            # Ambiguous vocabulary is the photographer's decision, not ours.
+            match = candidates[0] if len(candidates) == 1 else cleaned
+        out.append(match)
+    return out
+
+
 def merged_tags_for_post(db: Session, post: Post) -> str:
     """Comma-joined merged tags ready to ship. Excludes the framepost:sha256= machine tag —
     that's appended separately in the upload path."""

@@ -36,7 +36,17 @@ AI_PREVIEW_QUALITY = 82
 ANTHROPIC_MODEL = "claude-haiku-4-5"
 OPENAI_MODEL = "gpt-4o-mini"
 
+# Shared by every caption/tag/alt-text mode, including the background alt-text
+# sweep. Recognizing a face or guessing a famous venue is not evidence of identity.
+NAME_GROUNDING_RULE = (
+    "Never name any person, band, venue, event, or place unless that name is in the "
+    "provided context/title or clearly legible in the image. Otherwise describe "
+    "generically (for example, 'a guitarist'). Apply this rule to all titles, "
+    "descriptions, tags, and alt text."
+)
+
 PROMPT = (
+    NAME_GROUNDING_RULE + "\n\n" +
     "You are a photographer's assistant. Look at this photograph and suggest tags useful "
     "for Flickr search and discovery. Cover: subject/people, setting/location, genre, "
     "lighting/mood, and salient technical details (e.g. black & white, long exposure) "
@@ -165,6 +175,7 @@ def build_prompt(
 
     return (
         "You are a photographer's assistant.\n\n"
+        + NAME_GROUNDING_RULE + "\n\n"
         + context
         + "Look at this photograph and:\n"
         + f"1. {tag_instruction}\n"
@@ -185,6 +196,33 @@ class TagSuggestion:
     # Parallel to `tags`. None for single-provider; populated by EnsembleSuggester so the UI
     # can badge each tag with which provider(s) supplied it.
     sources: list[list[str]] | None = None
+
+
+def snap_suggestion(db, result: TagSuggestion) -> TagSuggestion:
+    """Reuse saved spellings without losing ensemble provider badges when tags merge.
+
+    Run at the DB-owning boundaries (interactive and import); provider adapters stay
+    independent of the database, and the alt-text sweep discards tags altogether.
+    """
+    from services import tags as tag_helpers
+
+    snapped = tag_helpers.snap_to_vocabulary(db, result.tags)
+    tags: list[str] = []
+    sources: list[list[str]] | None = [] if result.sources is not None else None
+    positions: dict[str, int] = {}
+    for i, tag in enumerate(snapped):
+        key = tag.lower()
+        if key not in positions:
+            positions[key] = len(tags)
+            tags.append(tag)
+            if sources is not None:
+                sources.append([])
+        if sources is not None:
+            for provider in result.sources[i]:
+                if provider not in sources[positions[key]]:
+                    sources[positions[key]].append(provider)
+    result.tags, result.sources = tags, sources
+    return result
 
 
 class TagSuggesterError(Exception):
@@ -658,6 +696,7 @@ def apply_to_post(post_id: str) -> None:
             log.warning("ai auto-apply: suggester failed on %s: %s", post_id[:8], e)
             return
 
+        result = snap_suggestion(db, result)
         existing = tag_helpers.parse_csv(post.tags)
         merged = tag_helpers.merge_unique(existing, result.tags)
         added = [t for t in result.tags if t.lower() not in {e.lower() for e in existing}]
