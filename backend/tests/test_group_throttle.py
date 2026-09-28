@@ -451,3 +451,79 @@ def test_deferral_is_one_slots_worth_of_the_window(db, limit, period, hours):
 def test_a_lifetime_cap_backs_off_rather_than_retrying_forever(db):
     g = _group(db, limit=3, period="ever")
     assert group_throttle.throttled_until(g, NOW) == NOW + timedelta(days=1)
+
+
+# --------------------------------------------------------------------------
+# group audience size, captured from the same getInfo response (0035)
+# --------------------------------------------------------------------------
+
+def _rest_xml(group_xml: str):
+    """Stand in for flickr.rest_call with a literal <group> body, so the test pins the
+    wire shape rather than whatever ElementTree builds."""
+    import xml.etree.ElementTree as ET
+
+    def call(_db, _method, **_kw):
+        return ET.fromstring(f'<rsp stat="ok">{group_xml}</rsp>')
+    return call
+
+
+def test_sync_records_member_and_pool_counts(db):
+    """`members` / `pool_count` are child elements with the number as text -- the shape
+    Flickr documents for members and its API schema gives for both."""
+    g = _group(db, limit=5, period="day", name="Stage")
+    db.commit()
+    group_throttle.sync_throttles(db, rest_call=_rest_xml(
+        '<group id="1@N01"><name>Stage</name><members>12436</members>'
+        '<pool_count>310254</pool_count><throttle count="5" mode="day"/></group>'))
+    assert (g.member_count, g.pool_count) == (12436, 310254)
+    assert g.stats_synced_at is not None
+
+
+def test_sync_accepts_counts_as_attributes(db):
+    """people.getGroups returns these as attributes; accept that too rather than bet on
+    one undocumented shape."""
+    g = _group(db, name="Attr")
+    db.commit()
+    group_throttle.sync_throttles(db, rest_call=_rest_xml(
+        '<group id="1@N01" members="80" pool_count="900"><throttle mode="none"/></group>'))
+    assert (g.member_count, g.pool_count) == (80, 900)
+
+
+def test_missing_counts_stay_unknown_not_zero(db):
+    g = _group(db, name="Quiet")
+    db.commit()
+    group_throttle.sync_throttles(db, rest_call=_rest({"mode": "none"}))
+    assert g.member_count is None and g.pool_count is None
+    assert g.stats_synced_at is None, "nothing was learned, so nothing was synced"
+
+
+def test_a_thin_response_keeps_the_last_known_size(db):
+    g = _group(db, name="Kept")
+    g.member_count, g.pool_count = 500, 7000
+    db.commit()
+    group_throttle.sync_throttles(db, rest_call=_rest_xml(
+        '<group id="1@N01"><members>not-a-number</members><throttle mode="none"/></group>'))
+    assert (g.member_count, g.pool_count) == (500, 7000)
+
+
+def test_counts_are_committed_even_when_the_throttle_is_unchanged(db):
+    """sync_throttles used to commit only on a throttle change; a size-only update must
+    still reach the database."""
+    g = _group(db, limit=5, period="day", name="Same")
+    db.commit()
+    changes = group_throttle.sync_throttles(db, rest_call=_rest_xml(
+        '<group id="1@N01"><members>42</members><throttle count="5" mode="day"/></group>'))
+    assert changes == []
+    db.expire_all()
+    assert db.get(Group, g.id).member_count == 42
+
+
+def test_groups_api_exposes_the_counts(db):
+    from routes.groups import GroupOut
+
+    g = _group(db, name="Out")
+    out = GroupOut.from_row(g)
+    assert (out.member_count, out.pool_count, out.stats_synced_at) == (None, None, None)
+    g.member_count, g.pool_count = 3, 4
+    out = GroupOut.from_row(g)
+    assert (out.member_count, out.pool_count) == (3, 4)

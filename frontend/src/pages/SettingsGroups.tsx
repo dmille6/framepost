@@ -26,6 +26,11 @@ const EMPTY: GroupInput = {
 export default function SettingsGroups() {
   const qc = useQueryClient();
   const { data = [], isLoading } = useQuery({ queryKey: ["groups"], queryFn: listGroups });
+  // Biggest audience first: Flickr views follow group fan-out, so size is the routing
+  // signal worth scanning for. Sorted here, not in the API, because the post editor's
+  // pickers rely on the API's category grouping.
+  const [sortKey, setSortKey] = useState<SortKey>("members");
+  const rows = sortGroups(data, sortKey);
   const [editing, setEditing] = useState<{ form: GroupInput; id: string | null } | null>(null);
 
   const saveMutation = useMutation({
@@ -43,7 +48,7 @@ export default function SettingsGroups() {
   });
 
   return (
-    <div className="fp-card" style={{ display: "grid", gap: 16, maxWidth: 800 }}>
+    <div className="fp-card" style={{ display: "grid", gap: 16, maxWidth: 920 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 500 }}>Flickr groups</div>
@@ -68,7 +73,14 @@ export default function SettingsGroups() {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr style={{ textAlign: "left", color: "var(--text-fade)", fontSize: 11 }}>
-              <Th>Group</Th>
+              <Th>
+                <SortButton active={sortKey === "name"} ascending onClick={() => setSortKey("name")}>Group</SortButton>
+              </Th>
+              <Th>
+                <SortButton active={sortKey === "members"} onClick={() => setSortKey("members")}>Members</SortButton>
+                {" · "}
+                <SortButton active={sortKey === "photos"} onClick={() => setSortKey("photos")}>Photos</SortButton>
+              </Th>
               <Th>Category</Th>
               <Th>Limit</Th>
               <Th>Applies to</Th>
@@ -77,13 +89,21 @@ export default function SettingsGroups() {
             </tr>
           </thead>
           <tbody>
-            {data.map((g) => (
+            {rows.map((g) => (
               <tr key={g.id}>
                 <Td>
                   {g.name}
                   {g.flickr_group_id && (
                     <div style={{ fontSize: 11, color: "var(--text-fade)" }}>{g.flickr_group_id}</div>
                   )}
+                </Td>
+                <Td>
+                  <span
+                    style={{ whiteSpace: "nowrap", color: g.stats_synced_at ? undefined : "var(--text-fade)" }}
+                    title={g.stats_synced_at ? `Synced from Flickr ${g.stats_synced_at.slice(0, 10)}` : "Not synced from Flickr yet"}
+                  >
+                    {compactCount(g.member_count)} members · {compactCount(g.pool_count)} photos
+                  </span>
                 </Td>
                 <Td>{g.category ?? "—"}</Td>
                 <Td>{g.daily_limit ? `${g.daily_limit}/${g.limit_period}` : "no limit"}</Td>
@@ -129,6 +149,57 @@ export default function SettingsGroups() {
         />
       )}
     </div>
+  );
+}
+
+type SortKey = "members" | "photos" | "name";
+
+/** Largest first for the counts, with unknown sizes last so a never-synced group
+ *  can't pose as the smallest; name order breaks ties and sorts the "name" view. */
+function sortGroups(groups: Group[], key: SortKey): Group[] {
+  const byName = (a: Group, b: Group) => a.name.localeCompare(b.name);
+  if (key === "name") return [...groups].sort(byName);
+  const field = key === "members" ? "member_count" : "pool_count";
+  return [...groups].sort((a, b) => {
+    const x = a[field];
+    const y = b[field];
+    if (x === y) return byName(a, b);
+    if (x === null) return 1;
+    if (y === null) return -1;
+    return y - x;
+  });
+}
+
+/** 12436 -> "12.4k", 310254 -> "310k", null -> "?" (unknown, not zero). */
+function compactCount(n: number | null): string {
+  if (n === null) return "?";
+  if (n < 1000) return String(n);
+  const [value, unit] = n < 1_000_000 ? [n / 1000, "k"] : [n / 1_000_000, "M"];
+  return `${value < 100 ? Number(value.toFixed(1)) : Math.round(value)}${unit}`;
+}
+
+function SortButton({
+  active,
+  ascending = false,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  ascending?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="fp-link"
+      onClick={onClick}
+      style={{ fontSize: 11, color: active ? "var(--text)" : "var(--text-fade)", fontWeight: active ? 600 : undefined }}
+      aria-pressed={active}
+    >
+      {children}
+      {active && (ascending ? " ↑" : " ↓")}
+    </button>
   );
 }
 

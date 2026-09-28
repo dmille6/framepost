@@ -949,9 +949,14 @@ export type Group = {
   content_notes: string | null;
   no_watermark: boolean;
   default_enabled: boolean;
+  /** Read-only, from the daily flickr.groups.getInfo sync. null = never synced or
+   *  Flickr omitted it -- unknown, not zero. */
+  member_count: number | null;
+  pool_count: number | null;
+  stats_synced_at: string | null;
 };
 
-export type GroupInput = Omit<Group, "id">;
+export type GroupInput = Omit<Group, "id" | "member_count" | "pool_count" | "stats_synced_at">;
 
 export const listGroups = () => apiFetch<Group[]>("/api/groups");
 

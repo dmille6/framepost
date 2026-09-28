@@ -240,6 +240,13 @@ class Group(Base):
     content_notes = Column(Text)
     no_watermark = Column(Integer, nullable=False, server_default="0")
     default_enabled = Column(Integer, nullable=False, server_default="0")
+    # Audience size, read from the same flickr.groups.getInfo call the throttle sync
+    # already makes (0035). Views on this account track how widely a photo fans out to
+    # groups, so which groups are big is the routing signal worth having. NULL = never
+    # synced, or Flickr left the field out -- not "zero members".
+    member_count = Column(Integer)
+    pool_count = Column(Integer)
+    stats_synced_at = Column(DateTime)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 
 

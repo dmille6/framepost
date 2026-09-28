@@ -12,7 +12,7 @@ spam to a moderator and that Flickr's own rolling counter would reject anyway.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -110,6 +110,25 @@ def next_slot_at(db: Session, group: Group, now: datetime) -> datetime:
     return stamps[0] + delta
 
 
+def _count(node, name: str) -> int | None:
+    """One of getInfo's counts as an int, or None when Flickr didn't say.
+
+    Flickr's own API schema (flickr-api-swagger, definitions/Group) gives `members`,
+    `pool_count` and `topic_count` as `{"_content": "..."}` in JSON, which under
+    format=rest is a child element with the number as its text -- the documented
+    example shows `<members>69</members>`. pool_count is absent from that example,
+    and flickr.people.getGroups returns the same counts as attributes, so an attribute
+    on <group> is accepted too rather than trusting one undocumented shape. Anything
+    unparseable is None: an unknown size must never read as an empty group.
+    """
+    child = node.find(name)
+    raw = child.text if child is not None else node.get(name)
+    try:
+        return int(str(raw).strip().replace(",", "")) if raw is not None else None
+    except ValueError:
+        return None
+
+
 def sync_throttles(db: Session, *, rest_call) -> list[tuple[str, str, str]]:
     """Refresh every group's limit from Flickr. Returns (name, before, after) changes.
 
@@ -117,8 +136,15 @@ def sync_throttles(db: Session, *, rest_call) -> list[tuple[str, str, str]]:
     drifts out of date silently -- and drifting high is what produces permanent
     `Photo limit reached` failures. Reading them from the source keeps a large
     roster correct without anyone maintaining it.
+
+    The same response carries the group's member and pool counts, recorded here too
+    (0035) so the roster can be ranked by reach without a second call per group. A
+    count Flickr omits leaves the stored value alone: one thin response should not
+    erase a size the last sync learned.
     """
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     changes: list[tuple[str, str, str]] = []
+    touched = False
     for group in db.execute(select(Group)).scalars().all():
         if not group.flickr_group_id:
             continue
@@ -128,6 +154,16 @@ def sync_throttles(db: Session, *, rest_call) -> list[tuple[str, str, str]]:
             throttle = node.find("throttle") if node is not None else None
         except Exception:  # noqa: BLE001 — one unreachable group must not stop the sweep
             continue
+
+        if node is not None:
+            members, pool = _count(node, "members"), _count(node, "pool_count")
+            if members is not None:
+                group.member_count = members
+            if pool is not None:
+                group.pool_count = pool
+            if members is not None or pool is not None:
+                group.stats_synced_at = now
+                touched = True
 
         mode = (throttle.get("mode") if throttle is not None else None) or "none"
         raw = throttle.get("count") if throttle is not None else None
@@ -146,6 +182,6 @@ def sync_throttles(db: Session, *, rest_call) -> list[tuple[str, str, str]]:
             group.daily_limit = limit
             group.limit_period = period
             changes.append((group.name, before, after))
-    if changes:
+    if changes or touched:
         db.commit()
     return changes

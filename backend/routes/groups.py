@@ -50,6 +50,11 @@ class GroupOut(BaseModel):
     content_notes: str | None
     no_watermark: bool
     default_enabled: bool
+    # Read-only, filled by the daily getInfo sync (group_throttle.sync_throttles).
+    # None = never synced or Flickr omitted it; the UI shows that as unknown.
+    member_count: int | None = None
+    pool_count: int | None = None
+    stats_synced_at: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -67,6 +72,9 @@ class GroupOut(BaseModel):
             content_notes=g.content_notes,
             no_watermark=bool(g.no_watermark),
             default_enabled=bool(g.default_enabled),
+            member_count=g.member_count,
+            pool_count=g.pool_count,
+            stats_synced_at=g.stats_synced_at,
         )
 
 
