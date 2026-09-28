@@ -590,7 +590,9 @@ def list_connected_platforms(
 
     rows = db.execute(
         select(PlatformCredential).where(
-            PlatformCredential.platform.in_(("bluesky", "pixelfed", "mastodon", "instagram"))
+            PlatformCredential.platform.in_(
+                ("bluesky", "pixelfed", "mastodon", "instagram", "pinterest")
+            )
         )
     ).scalars().all()
     for row in rows:

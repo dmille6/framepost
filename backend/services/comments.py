@@ -1,4 +1,4 @@
-"""Comment + engagement sync across Flickr, Bluesky, and Pixelfed.
+"""Comment + engagement sync across Flickr, Bluesky, Pixelfed, Instagram and Pinterest.
 
 For each platform we (a) pull the current comment thread and (b) snapshot the aggregate
 engagement counts. Comments are deduped by (platform, remote_id) — re-syncing is idempotent;
@@ -26,6 +26,7 @@ from crypto import decrypt_token
 from models import AccountStat, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostLike, PostPlatform
 from services.platforms import bluesky as bluesky_svc
 from services.platforms import flickr
+from services.platforms import pinterest as pinterest_svc
 
 log = logging.getLogger("framepost.comments")
 
@@ -658,6 +659,65 @@ def _strip_html(s: str) -> str:
 
 
 # -----------------------------------------------------------------------------
+# Pinterest (API v5 pin analytics) — counts only; no comment text is pulled.
+# -----------------------------------------------------------------------------
+
+def _sync_pinterest(db: Session, post_platforms: list[tuple[PostPlatform, PlatformCredential]]) -> dict[str, int]:
+    """One engagement snapshot per posted pin, from GET /v5/pins/{id}/analytics.
+
+    Mapping onto the shared snapshot columns, chosen so every column keeps the meaning
+    the other platforms give it:
+
+        IMPRESSION      -> views           (times shown; Pinterest has no unique reach
+                                            per pin, so reach stays NULL)
+        SAVE            -> saves           (a repin -- the costly, spreading action)
+        TOTAL_REACTIONS -> likes
+        TOTAL_COMMENTS  -> comments_count
+        PROFILE_VISIT   -> profile_visits
+        USER_FOLLOW     -> follows
+
+    PIN_CLICK and OUTBOUND_CLICK are fetched but have no column to land in -- there is
+    no clicks field, and parking them in reposts or shares would corrupt the quality
+    score those feed. They are counted in the returned summary so the log shows them.
+
+    Every pin goes out under the one Pinterest credential, so the token is fetched
+    (and refreshed) once, not per pin. A refresh failure fails this stage only;
+    sync_all's per-stage commit keeps every other platform's readings.
+    """
+    summary = {"sampled": 0, "gone": 0, "errors": 0, "outbound_clicks": 0}
+    targets = [(pp, cred) for pp, cred in post_platforms if pp.remote_id and cred.access_token]
+    if not targets:
+        return summary
+    token = pinterest_svc.analytics_token(db)
+    today = datetime.now(timezone.utc).date()
+    for pp, _cred in targets:
+        try:
+            since = pp.posted_at.date() if pp.posted_at else today
+            totals = pinterest_svc.fetch_pin_analytics(
+                token, pp.remote_id, since=since, today=today)
+            if totals is None:
+                log.info("pinterest pin %s gone (deleted on Pinterest) — skipping %s",
+                         pp.remote_id, pp.post_id[:8])
+                summary["gone"] += 1
+                continue
+            _snapshot(
+                db, post_id=pp.post_id, platform="pinterest",
+                views=totals.get("IMPRESSION", 0),
+                likes=totals.get("TOTAL_REACTIONS", 0),
+                comments_count=totals.get("TOTAL_COMMENTS", 0),
+                saves=totals.get("SAVE"),
+                profile_visits=totals.get("PROFILE_VISIT"),
+                follows=totals.get("USER_FOLLOW"),
+            )
+            summary["outbound_clicks"] += totals.get("OUTBOUND_CLICK", 0)
+            summary["sampled"] += 1
+        except Exception as e:
+            log.warning("pinterest sync failed for %s: %s", pp.post_id[:8], e)
+            summary["errors"] += 1
+    return summary
+
+
+# -----------------------------------------------------------------------------
 # Top-level entry point — called from the daily sync job.
 # -----------------------------------------------------------------------------
 
@@ -680,6 +740,7 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
     bluesky_targets: list[tuple[PostPlatform, PlatformCredential]] = []
     pixelfed_targets: list[tuple[PostPlatform, PlatformCredential]] = []
     instagram_targets: list[tuple[PostPlatform, PlatformCredential]] = []
+    pinterest_targets: list[tuple[PostPlatform, PlatformCredential]] = []
     rows = db.execute(
         select(PostPlatform, PlatformCredential, Post)
         .join(PlatformCredential, PlatformCredential.id == PostPlatform.platform_id)
@@ -698,6 +759,8 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
             pixelfed_targets.append((pp, cred))
         elif cred.platform == "instagram":
             instagram_targets.append((pp, cred))
+        elif cred.platform == "pinterest":
+            pinterest_targets.append((pp, cred))
 
     # Commit after each platform rather than once at the end. One trailing commit meant a
     # single write transaction stayed open across every HTTP call in the whole sync --
@@ -714,6 +777,7 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
         # they need their own pass or they are sampled by nothing at all.
         ("instagram_reels", lambda: sync_instagram_reels(db, lookback_days=lookback_days)),
         ("instagram_account", lambda: sync_instagram_account_stats(db)),
+        ("pinterest", lambda: _sync_pinterest(db, pinterest_targets)),
     ]
     for name, run in stages:
         try:

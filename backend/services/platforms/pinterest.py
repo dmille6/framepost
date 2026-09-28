@@ -24,7 +24,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -387,3 +387,99 @@ def post_pin(
         "remote_id": pin_id,
         "url": f"https://www.pinterest.com/pin/{pin_id}/",
     }
+
+
+# -----------------------------------------------------------------------------
+# Pin analytics (GET /v5/pins/{pin_id}/analytics) -- read by comments.sync_all
+# -----------------------------------------------------------------------------
+
+# All eight are StandardPinMetricTypes in Pinterest's published v5 OpenAPI spec
+# (pinterest/api-description, v5.28.0). A metric the API refuses for a given pin fails
+# the whole request, so a refusal drops to the four core metrics before giving up --
+# the same two-tier ask comments.py makes of Instagram insights.
+ANALYTICS_METRICS = (
+    "IMPRESSION", "SAVE", "PIN_CLICK", "OUTBOUND_CLICK",
+    "TOTAL_COMMENTS", "TOTAL_REACTIONS", "PROFILE_VISIT", "USER_FOLLOW",
+)
+ANALYTICS_METRICS_MIN = ("IMPRESSION", "SAVE", "PIN_CLICK", "OUTBOUND_CLICK")
+# start_date "cannot be more than 90 days back from today". One day of margin so a
+# request built just before UTC midnight isn't refused just after it.
+ANALYTICS_MAX_DAYS_BACK = 89
+
+
+def analytics_token(db: Session) -> str:
+    """A usable access token for the analytics pass, refreshed if it is about to lapse.
+
+    Raises PinterestError when Pinterest isn't connected; the caller only asks when a
+    credential with a token exists, so that means the token itself has gone bad.
+    """
+    return _refresh_if_needed(db, _load_credential(db))
+
+
+def fetch_pin_analytics(
+    access_token: str, pin_id: str, *, since: date, today: date
+) -> dict[str, int] | None:
+    """Totals for one pin from `since` (its posting day) to `today`, keyed by metric.
+
+    Pinterest reports daily buckets, not running counts, so the pin's totals are the
+    summary over every day it has existed. That is only possible inside the 90-day
+    look-back the endpoint allows; an older pin gets its last 89 days, which is why the
+    sync never asks about pins older than that (comments.DEFAULT_LOOKBACK_DAYS).
+
+    Days still PROCESSING are included as Pinterest currently has them. The totals are
+    stored as a snapshot each day, so a lagging day is corrected by the next reading
+    rather than lost.
+
+    Returns None when the pin no longer exists (deleted on Pinterest); raises
+    PinterestError on any other failure.
+    """
+    start = max(since, today - timedelta(days=ANALYTICS_MAX_DAYS_BACK))
+    start = min(start, today)
+    last: httpx.Response | None = None
+    for metrics in (ANALYTICS_METRICS, ANALYTICS_METRICS_MIN):
+        with _client() as c:
+            r = c.get(
+                f"{API_BASE}/pins/{pin_id}/analytics",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={
+                    "start_date": start.isoformat(),
+                    "end_date": today.isoformat(),
+                    "metric_types": ",".join(metrics),
+                },
+            )
+        if r.status_code == 404:
+            return None
+        if r.status_code < 400:
+            return _pin_totals(r.json())
+        last = r
+        if r.status_code != 400:
+            break
+    assert last is not None
+    raise PinterestError(
+        f"pin analytics failed (HTTP {last.status_code}): {last.text[:200]}",
+        permanent=(last.status_code in (401, 403)),
+    )
+
+
+def _pin_totals(body: Any) -> dict[str, int]:
+    """Flatten the analytics response to {metric: int}.
+
+    The body is keyed by app type -- "all" when the request is not split, which is
+    the only way this module asks. The spec types it as a free-form map, so anything
+    else is read from its first entry rather than trusted to a key name. summary_metrics
+    is the period total; lifetime_metrics (comments/reactions on newer pins) fills in
+    what the summary lacks.
+    """
+    if not isinstance(body, dict) or not body:
+        return {}
+    block = body.get("all")
+    if not isinstance(block, dict):
+        block = next((v for v in body.values() if isinstance(v, dict)), {})
+    out: dict[str, int] = {}
+    for source in (block.get("lifetime_metrics"), block.get("summary_metrics")):
+        for name, value in (source or {}).items():
+            try:
+                out[name] = int(round(float(value)))
+            except (TypeError, ValueError):
+                continue
+    return out
