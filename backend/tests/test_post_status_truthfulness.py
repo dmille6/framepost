@@ -1,15 +1,7 @@
-"""post.status must not claim a post never went out when it did.
+"""Social delivery remains visible without concealing a failed Flickr archive.
 
-post.status is set by Flickr's outcome alone -- it is really the Flickr delivery's
-state wearing the post's name. A photo Flickr rejected as a duplicate was marked
-`failed` even after Instagram published it. The post was live, the queue said it had
-failed, and the only way to tell was to open the platform rows.
-
-Two things kept it stuck there. Nothing re-examined the post after the fanout, which
-is the first moment the answer is knowable -- when _record_failure decides Flickr is
-exhausted, nothing else has been attempted. And retry_due_platform_posts skipped posts
-marked failed, so a platform that could have rescued the post was filtered out by the
-very status it would have corrected.
+Pending Flickr retries remain in the queue; exhausted uploads stay failed while the
+per-platform rows record any successful social deliveries, including later retries.
 """
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -56,7 +48,7 @@ def _flickr_permanently_fails(monkeypatch):
 
 # --------------------------------------------------------------------------
 
-def test_a_post_that_published_elsewhere_is_not_marked_failed(db, worker, monkeypatch):
+def test_a_social_delivery_does_not_hide_failed_archive(db, worker, monkeypatch):
     """The reported defect, end to end."""
     post = _due_post(db)
     cred = _cred(db)
@@ -71,8 +63,7 @@ def test_a_post_that_published_elsewhere_is_not_marked_failed(db, worker, monkey
     scheduler.fire_due_posts()
 
     fresh = db.get(Post, post.id)
-    assert fresh.status in ("posted", "late"), \
-        "Instagram published it; the post must not report that it failed"
+    assert fresh.status == "failed", "a social delivery cannot replace the archive"
 
 
 def test_flickrs_failure_is_still_visible_after_reconciling(db, worker, monkeypatch):
@@ -147,7 +138,7 @@ def test_a_platform_retry_runs_for_a_failed_post(db, worker, monkeypatch):
 
     fresh = db.get(Post, post.id)
     assert db.get(PostPlatform, (post.id, cred.id)).status == "posted"
-    assert fresh.status in ("posted", "late"), "a late rescue should correct the post too"
+    assert fresh.status == "failed", "Flickr is still missing after the social retry"
 
 
 def test_a_pending_post_is_not_retried_by_the_platform_job(db, worker, monkeypatch):

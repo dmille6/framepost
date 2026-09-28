@@ -63,6 +63,10 @@ class Post(Base):
     flickr_url = Column(Text)
     retry_count = Column(Integer, nullable=False, server_default="0")
     next_retry_at = Column(DateTime)
+    # (0040) Owned delivery lease. Fire/retry jobs must win the conditional UPDATE;
+    # commits and outbound requests renew it, and crashed owners expire after 10m.
+    publish_claimed_at = Column(DateTime)
+    publish_claim_token = Column(String)
     error_message = Column(Text)
     posted_to_instagram_at = Column(DateTime)
     reddit_posted_at = Column(DateTime)
@@ -317,6 +321,10 @@ class PostPlatform(Base):
     error_message = Column(Text)
     retry_count = Column(Integer, nullable=False, server_default="0")
     next_retry_at = Column(DateTime)
+    # (0040) Owned delivery lease. Fire/retry jobs must win the conditional UPDATE;
+    # commits and outbound requests renew it, and crashed owners expire after 10m.
+    publish_claimed_at = Column(DateTime)
+    publish_claim_token = Column(String)
     # Hidden Flickr staging photo for the IG variant, "photo_id|ratio_key". Set before
     # the publish attempt (survives rollback) so retries reuse the upload and the daily
     # orphan sweep can tell live from abandoned. Cleared after successful publish.

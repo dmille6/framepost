@@ -8,18 +8,19 @@ The pipeline:
   2. Hash + size      (chunked read)
   3. Pillow validate  →  image.InvalidImage
   4. Duplicate check  →  DuplicateExists  (caller decides whether to override)
-  5. Move to /originals/<post_id>.<ext>
+  5. Copy to /originals/<post_id>.<ext> (source retained until DB commit)
   6. Best-effort EXIF + IPTC
   7. Thumbnail        →  fatal if it fails (UI can't render the card)
   8. Insert post + log 'imported' event
 
-The function consumes `src_path` on the success path (rename to /originals/...).
+The function consumes `src_path` only after the post and its event commit.
 On failure it leaves the file in place so the caller can move it to errors/ or retry.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -125,7 +126,11 @@ def import_image(
     post_id = uuid.uuid4().hex
     ext = _ext_for(original_filename, fmt)
     final_path = storage.original_path(post_id, ext)
-    src_path.rename(final_path)
+    # Moving first made thumbnail/DB failures destroy or strand the only source.
+    # Keep it until the row is durable. Failed destination copies are recoverable too:
+    # scan_orphans quarantines unowned artifacts after 24h instead of deleting them.
+    source_stat = src_path.stat()
+    shutil.copy2(src_path, final_path)
 
     exif_fields = exif.extract(str(final_path))
     iptc_fields = iptc.extract(str(final_path))
@@ -135,7 +140,6 @@ def import_image(
         image.make_thumbnail(final_path, thumb_path)
     except Exception:
         log.exception("thumbnail generation failed for %s", post_id)
-        final_path.unlink(missing_ok=True)
         thumb_path.unlink(missing_ok=True)
         raise
 
@@ -188,38 +192,57 @@ def import_image(
         created_at=now,
         updated_at=now,
     )
-    db.add(post)
-    db.flush()
+    try:
+        db.add(post)
+        db.flush()
 
-    if at_handles:
-        linked = performers_svc.autotag_from_handles(db, post_id, at_handles)
-        if linked:
-            events.log_event(
-                db,
-                post_id=post_id,
-                event_type="performer_autotagged",
-                actor=actor,
-                details={"from_keywords": at_handles, "linked": linked},
-            )
+        if at_handles:
+            linked = performers_svc.autotag_from_handles(db, post_id, at_handles)
+            if linked:
+                events.log_event(
+                    db,
+                    post_id=post_id,
+                    event_type="performer_autotagged",
+                    actor=actor,
+                    details={"from_keywords": at_handles, "linked": linked},
+                )
 
-    events.log_event(
-        db,
-        post_id=post_id,
-        event_type="imported",
-        actor=actor,
-        details={
-            "source": source,
-            "filename": original_filename,
-            "bytes": size,
-            "format": fmt,
-            "had_iptc": bool(
-                iptc_fields["title"] or iptc_fields["description"] or iptc_fields["tags"]
-            ),
-            "duplicate_of": existing.id if existing else None,
-        },
-    )
-    db.commit()
-    db.refresh(post)
+        events.log_event(
+            db,
+            post_id=post_id,
+            event_type="imported",
+            actor=actor,
+            details={
+                "source": source,
+                "filename": original_filename,
+                "bytes": size,
+                "format": fmt,
+                "had_iptc": bool(
+                    iptc_fields["title"] or iptc_fields["description"] or iptc_fields["tags"]
+                ),
+                "duplicate_of": existing.id if existing else None,
+            },
+        )
+        db.commit()
+        db.refresh(post)
+
+    except Exception:
+        # The watcher records its error using this session. A failed flush/commit
+        # must not leave that session unusable, nor authorize any file deletion.
+        db.rollback()
+        raise
+
+    try:
+        # A watch-folder writer might replace its file during import. Only consume
+        # the same version we copied; a newer file is another import, not garbage.
+        current = src_path.stat()
+        if (current.st_ino, current.st_size, current.st_mtime_ns) == (
+                source_stat.st_ino, source_stat.st_size, source_stat.st_mtime_ns):
+            src_path.unlink()
+    except OSError:
+        # The DB row and permanent copy already exist. A leftover incoming file is
+        # a recoverable duplicate, not a failed import to repeat from scratch.
+        log.warning("could not remove imported source %s", src_path, exc_info=True)
 
     # Best-effort AI auto-apply (no-ops unless ai_tagging_enabled + ai_auto_apply are both on).
     # Runs in a fresh DB session inside the helper; never raises.

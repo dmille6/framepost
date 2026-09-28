@@ -16,12 +16,12 @@ from pathlib import Path
 
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from config import settings
 from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostEvent, PostGroup, PostPlatform, Group, Venue
-from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, media_probe, r2, retry, storage, tags, trending, watcher
+from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, channel_health, feed_claim, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, media_probe, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
@@ -287,7 +287,8 @@ def _record_failure(db, post: Post, err: Exception, fired_at: datetime) -> None:
                     post.id[:8], post.flickr_photo_id, err)
         return
     msg = str(err)
-    permanent = isinstance(err, flickr.FlickrError) and err.permanent
+    failure = publish_errors.classify("flickr", err)
+    permanent = not failure.retryable
     post.retry_count = (post.retry_count or 0) + 1
     post.error_message = msg
 
@@ -296,7 +297,8 @@ def _record_failure(db, post: Post, err: Exception, fired_at: datetime) -> None:
         post_id=post.id,
         event_type="flickr_failed",
         actor="worker",
-        details={"attempt": post.retry_count, "permanent": permanent, "error": msg},
+        details={"attempt": post.retry_count, "permanent": permanent, "error": msg,
+                 "category": failure.category.value, "user_message": failure.user_message},
     )
 
     # A retry with no scheduled time is not a retry. Treat "nothing left to schedule"
@@ -314,6 +316,11 @@ def _record_failure(db, post: Post, err: Exception, fired_at: datetime) -> None:
         log.warning("post %s failed (attempt %d/%s), retry at %s: %s",
                     post.id[:8], post.retry_count, retry.max_attempts(db),
                     post.next_retry_at, msg)
+
+    if failure.requires_reauth:
+        # Flickr predates the common platform-row recorder, but its failures need the
+        # same terminal policy and health/preflight reconnect signal.
+        channel_health.flag_reauth(db, "flickr", failure.user_message)
 
 
 def publish_due_reels() -> None:
@@ -367,86 +374,100 @@ def fire_due_posts() -> None:
         due.sort(key=lambda p: (p.carousel_position or 0) == 0)
 
         for post in due:
-            sched = post.scheduled_at
-            if sched < cutoff_missed and not post.flickr_photo_id:
-                post.status = "missed"
-                post.updated_at = now
-                events.log_event(
-                    db,
-                    post_id=post.id,
-                    event_type="marked_missed",
-                    actor="worker",
-                    details={"scheduled_at": sched.isoformat(), "fired_at": now.isoformat()},
-                )
-                log.info("post %s missed (scheduled %s)", post.id[:8], sched)
-                db.commit()
+            claim = feed_claim.post_claim(db, post.id)
+            if claim is None:
                 continue
-
-            targets = _parse_target_platforms(post)
-
-            if targets is None or "flickr" in targets:
-                try:
-                    _flickr_post(db, post, fired_at=now)
-                    db.commit()
-                except Exception as e:
-                    db.rollback()
-                    # Fresh transaction for the failure record so the prior partial state isn't
-                    # written. Reload post to get current state.
-                    refreshed = db.get(Post, post.id)
-                    if not refreshed:
-                        log.exception("post %s vanished mid-fire", post.id[:8])
+            try:
+                with claim:
+                    sched = post.scheduled_at
+                    if sched < cutoff_missed and not post.flickr_photo_id:
+                        post.status = "missed"
+                        post.updated_at = now
+                        events.log_event(
+                            db,
+                            post_id=post.id,
+                            event_type="marked_missed",
+                            actor="worker",
+                            details={"scheduled_at": sched.isoformat(), "fired_at": now.isoformat()},
+                        )
+                        log.info("post %s missed (scheduled %s)", post.id[:8], sched)
+                        db.commit()
                         continue
-                    # `refreshed` is the same identity-mapped instance as `post` --
-                    # rollback expires attributes but does not detach -- so the fanout
-                    # below already sees the recorded failure. The reload exists for the
-                    # existence check above, not to swap objects.
-                    _record_failure(db, refreshed, e, fired_at=now)
-                    db.commit()
-                    # Deliberately not `continue`. The other destinations do not need
-                    # Flickr: Instagram ingests from R2, and Bluesky and Pixelfed upload
-                    # the local file. Skipping them here meant a Flickr outage delayed
-                    # every other platform, and a PERMANENT Flickr failure lost them
-                    # outright -- _record_failure marks the post failed, and
-                    # fire_due_posts only ever revisits pending ones, so the fanout
-                    # never ran again. A photo rejected as a Flickr duplicate was dead
-                    # for Instagram too, for a reason that had nothing to do with it.
-                    log.warning(
-                        "post %s: flickr failed (%s) — continuing to the other "
-                        "destinations", post.id[:8], type(e).__name__,
-                    )
-            else:
-                # User opted out of Flickr for this post. Transition state directly so the post
-                # leaves the queue and fanout can proceed to non-Flickr platforms.
-                late = post.scheduled_at < (now - LATE_THRESHOLD)
-                post.status = "late" if late else "posted"
-                post.posted_at = now
-                post.error_message = None
-                post.next_retry_at = None
-                post.updated_at = now
-                events.log_event(
-                    db,
-                    post_id=post.id,
-                    event_type="flickr_skipped",
-                    actor="worker",
-                    details={"reason": "not in target_platforms"},
-                )
-                db.commit()
-                log.info("post %s skipping flickr per target_platforms=%s", post.id[:8], targets)
 
-            # Fanout to non-Flickr platforms. Failures here are isolated per-platform.
-            try:
-                fanout_to_platforms(db, post, fired_at=now, targets=targets)
-                db.commit()
-            except Exception:
-                log.exception("post %s: platform fanout failed", post.id[:8])
-                db.rollback()
+                    targets = _parse_target_platforms(post)
 
-            # Only now is it known whether anything was delivered.
-            try:
-                _reconcile_post_status(db, post, fired_at=now)
-            except Exception:
-                log.exception("post %s: status reconcile failed", post.id[:8])
+                    if (targets is None or "flickr" in targets) and not post.flickr_photo_id:
+                        try:
+                            _flickr_post(db, post, fired_at=now)
+                            db.commit()
+                        except feed_claim.ClaimLost:
+                            raise
+                        except Exception as e:
+                            db.rollback()
+                            # Fresh transaction for the failure record so the prior partial state isn't
+                            # written. Reload post to get current state.
+                            refreshed = db.get(Post, post.id)
+                            if not refreshed:
+                                log.exception("post %s vanished mid-fire", post.id[:8])
+                                continue
+                            # `refreshed` is the same identity-mapped instance as `post` --
+                            # rollback expires attributes but does not detach -- so the fanout
+                            # below already sees the recorded failure. The reload exists for the
+                            # existence check above, not to swap objects.
+                            _record_failure(db, refreshed, e, fired_at=now)
+                            db.commit()
+                            # Deliberately not `continue`. The other destinations do not need
+                            # Flickr: Instagram ingests from R2, and Bluesky and Pixelfed upload
+                            # the local file. Skipping them here meant a Flickr outage delayed
+                            # every other platform, and a PERMANENT Flickr failure lost them
+                            # outright -- _record_failure marks the post failed, and
+                            # fire_due_posts only ever revisits pending ones, so the fanout
+                            # never ran again. A photo rejected as a Flickr duplicate was dead
+                            # for Instagram too, for a reason that had nothing to do with it.
+                            log.warning(
+                                "post %s: flickr failed (%s) — continuing to the other "
+                                "destinations", post.id[:8], type(e).__name__,
+                            )
+                    elif targets is not None and "flickr" not in targets:
+                        # User opted out of Flickr for this post. Transition state directly so the post
+                        # leaves the queue and fanout can proceed to non-Flickr platforms.
+                        late = post.scheduled_at < (now - LATE_THRESHOLD)
+                        post.status = "late" if late else "posted"
+                        post.posted_at = now
+                        post.error_message = None
+                        post.next_retry_at = None
+                        post.updated_at = now
+                        events.log_event(
+                            db,
+                            post_id=post.id,
+                            event_type="flickr_skipped",
+                            actor="worker",
+                            details={"reason": "not in target_platforms"},
+                        )
+                        db.commit()
+                        log.info("post %s skipping flickr per target_platforms=%s", post.id[:8], targets)
+
+                    # Fanout to non-Flickr platforms. Failures here are isolated per-platform.
+                    try:
+                        fanout_to_platforms(db, post, fired_at=now, targets=targets)
+                        db.commit()
+                    except feed_claim.ClaimLost:
+                        raise
+                    except Exception:
+                        log.exception("post %s: platform fanout failed", post.id[:8])
+                        db.rollback()
+
+                    # Only now is it known whether anything was delivered.
+                    try:
+                        _reconcile_post_status(db, post, fired_at=now)
+                    except feed_claim.ClaimLost:
+                        raise
+                    except Exception:
+                        log.exception("post %s: status reconcile failed", post.id[:8])
+                        db.rollback()
+            except feed_claim.ClaimLost:
                 db.rollback()
+                log.warning("post attempt lost its claim; leaving the new owner alone")
     except Exception:
         log.exception("fire_due_posts failed")
         db.rollback()
@@ -1361,20 +1382,15 @@ def _parse_target_platforms(post: Post) -> list[str] | None:
 
 
 def _reconcile_post_status(db, post: Post, *, fired_at: datetime) -> None:
-    """A post is failed only when nothing reached anywhere.
+    """Reconcile a delivery without concealing a missing Flickr archive.
 
-    post.status is set by Flickr's outcome alone -- it is really the Flickr delivery's
-    state wearing the post's name. So a photo Flickr rejected as a duplicate read as
-    `failed` even after Instagram published it: the post was live, the queue said it had
-    failed, and the only way to tell was to open the platform rows.
-
-    Runs after the fanout because that is the first moment the answer is known. When
-    _record_failure decides Flickr is exhausted, nothing else has been attempted yet.
-
-    Flickr's own failure is not hidden by this -- error_message and the timeline events
-    stay exactly as they were. What changes is that the post stops claiming it never went
-    out when it did.
+    There is no persisted 'partial' status in FramePost. Keep the existing failed
+    vocabulary for an exhausted archive upload; per-platform rows show the successful
+    destinations. Pending Flickr retries likewise stay pending so the worker finds them.
     """
+    targets = _parse_target_platforms(post)
+    if (targets is None or "flickr" in targets) and not post.flickr_photo_id:
+        return
     if post.status != "failed":
         return
     delivered = db.execute(
@@ -1478,12 +1494,42 @@ def fanout_to_platforms(
             db.commit()
             continue
 
-        try:
-            _post_to_platform(db, cred, post, fired_at)
+        _attempt_platform(db, cred, post, fired_at)
+
+
+def _attempt_platform(db, cred, post, fired_at):
+    previous = db.get(PostPlatform, (post.id, cred.id))
+    if (previous and previous.publish_claim_token and previous.next_retry_at is None
+            and previous.publish_claimed_at
+            and previous.publish_claimed_at < feed_claim.now_utc() - feed_claim.STALE_AFTER
+            and cred.platform != "instagram"):
+        # These adapters cannot ask whether an interrupted send succeeded. Preserve
+        # the sweep's manual-review rule even when Flickr's retry re-enters fanout.
+        _flag_needs_review(db, post, cred, previous)
+        db.commit()
+        return
+    claim = feed_claim.platform_claim(db, post.id, cred.id,
+                                      recoverable=cred.platform == "instagram")
+    if claim is None:
+        return
+    try:
+        with claim:
+            # A crash must go through the stranded-row recovery policy, not an old
+            # retry timer. IG resumes its checkpoint; other ambiguous sends need review.
+            pp = db.get(PostPlatform, (post.id, cred.id))
+            pp.next_retry_at = None
             db.commit()
-        except Exception as e:  # noqa: BLE001
-            db.rollback()
-            _record_platform_failure(db, post, cred, e)
+            try:
+                _post_to_platform(db, cred, post, fired_at)
+                db.commit()
+            except feed_claim.ClaimLost:
+                raise
+            except Exception as e:  # noqa: BLE001
+                db.rollback()
+                _record_platform_failure(db, post, cred, e)
+    except feed_claim.ClaimLost:
+        db.rollback()
+        log.warning("platform attempt lost its claim; leaving the new owner alone")
 
 
 def _record_platform_failure(
@@ -1602,14 +1648,8 @@ def retry_due_platform_posts() -> None:
         for pp, post, cred in rows:
             if not cred.access_token:
                 continue
-            try:
-                _post_to_platform(db, cred, post, fired_at=now)
-                db.commit()
-                # A late success can be the first delivery this post ever had.
-                _reconcile_post_status(db, post, fired_at=now)
-            except Exception as e:  # noqa: BLE001
-                db.rollback()
-                _record_platform_failure(db, post, cred, e)
+            _attempt_platform(db, cred, post, now)
+            _reconcile_post_status(db, post, fired_at=now)
     except Exception:
         log.exception("retry_due_platform_posts failed")
         db.rollback()
@@ -1653,6 +1693,8 @@ def requeue_stranded(db, *, now: datetime | None = None) -> int:
         .where(
             PostPlatform.status == "pending",
             PostPlatform.next_retry_at.is_(None),
+            feed_claim.available(PostPlatform, now),
+            feed_claim.available(Post, now),
             PostPlatform.remote_id.is_(None),
             PostPlatform.posted_at.is_(None),
             Post.status.in_(("posted", "late", "failed")),
@@ -1666,7 +1708,15 @@ def requeue_stranded(db, *, now: datetime | None = None) -> int:
         if cred.platform != "instagram":
             _flag_needs_review(db, post, cred, pp)
             continue
-        pp.next_retry_at = now
+        # Recheck at UPDATE time: an attempt can win its claim after the SELECT.
+        won = db.execute(update(PostPlatform).where(
+            PostPlatform.post_id == post.id, PostPlatform.platform_id == cred.id,
+            PostPlatform.status == "pending", PostPlatform.next_retry_at.is_(None),
+            feed_claim.available(PostPlatform, now),
+        ).values(next_retry_at=now).execution_options(synchronize_session=False)).rowcount
+        if not won:
+            continue
+        db.expire(pp)
         events.log_event(
             db, post_id=post.id, event_type=f"{cred.platform}_requeued", actor="worker",
             details={"reason": "left pending with no retry time — the attempt that owned "

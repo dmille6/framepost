@@ -11,13 +11,13 @@ from typing import Literal
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, computed_field, field_validator
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from database import get_session
-from models import AppConfig, EngagementSnapshot, FlickrEngagement, PlatformCredential, Post, PostComment, PostPlatform, User
+from models import AppConfig, EngagementSnapshot, FlickrEngagement, FlickrPhoto, PlatformCredential, Post, PostComment, PostPlatform, Reel, ReelPhoto, User
 from routes.auth import current_user
-from services import caption_text, events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, preflight as preflight_svc, r2, reddit, storage, tags as tags_svc
+from services import caption_text, delivery, events, find_replace, faces, ig_variant, image, import_pipeline, instagram, performers as performers_svc, preflight as preflight_svc, r2, reddit, storage, tags as tags_svc
 from services.platforms import flickr
 
 log = logging.getLogger("framepost.upload")
@@ -149,7 +149,18 @@ class PostOut(BaseModel):
     def from_post(cls, post: Post) -> "PostOut":
         # Kept as a thin alias so the call sites we already changed keep working.
         # The field_validator above does the real work now.
-        return cls.model_validate(post)
+        item = cls.model_validate(post)
+        item.status = delivery.status_for(post)
+        return item
+
+
+def _post_with_preflight(db: Session, post: Post) -> PostOut:
+    """Edits replace the client's cached post. Keep readiness on that replacement so
+    saving metadata cannot turn a disconnected channel into an enabled Schedule button.
+    """
+    item = PostOut.from_post(post)
+    item.preflight = preflight_svc.summarize(preflight_svc.check(db, post))
+    return item
 
 
 class UploadResponse(BaseModel):
@@ -208,8 +219,8 @@ async def upload(
         with tmp_path.open("wb") as out:
             while chunk := await file.read(CHUNK):
                 out.write(chunk)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
+    except Exception as e:
+        import_pipeline.move_to_errors(tmp_path, str(e))
         raise
 
     try:
@@ -222,7 +233,7 @@ async def upload(
             original_filename=file.filename,
         )
     except import_pipeline.DuplicateExists as e:
-        tmp_path.unlink(missing_ok=True)
+        import_pipeline.move_to_errors(tmp_path, str(e))
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             {
@@ -233,13 +244,13 @@ async def upload(
             },
         )
     except image.InvalidImage as e:
-        tmp_path.unlink(missing_ok=True)
+        import_pipeline.move_to_errors(tmp_path, str(e))
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except import_pipeline.StorageFull as e:
-        tmp_path.unlink(missing_ok=True)
+        import_pipeline.move_to_errors(tmp_path, str(e))
         raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, str(e))
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
+    except Exception as e:
+        import_pipeline.move_to_errors(tmp_path, str(e))
         raise
 
     return UploadResponse(
@@ -252,14 +263,16 @@ async def upload(
 def list_drafts(
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
-    limit: int = Query(100, le=500),
+    # The client requests all drafts and filters/sorts locally. An optional limit
+    # keeps explicit pagination available without silently truncating a large show.
+    limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
     rows = (
         db.execute(
             select(Post)
             .where(Post.status == "pending", Post.scheduled_at.is_(None))
-            .order_by(Post.created_at.desc())
+            .order_by(Post.created_at.desc(), Post.id)
             .limit(limit)
             .offset(offset)
         )
@@ -384,7 +397,7 @@ def get_post(
     post = db.get(Post, post_id)
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
-    return PostOut.from_post(post)
+    return _post_with_preflight(db, post)
 
 
 @router.patch("/{post_id}", response_model=PostOut)
@@ -399,7 +412,7 @@ def update_post(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
     changed = body.model_dump(exclude_unset=True)
     if not changed:
-        return PostOut.from_post(post)
+        return _post_with_preflight(db, post)
     for field, value in changed.items():
         if field == "target_platforms":
             # JSON-encode the list for storage; None stays None (== "use defaults").
@@ -420,7 +433,7 @@ def update_post(
     )
     db.commit()
     db.refresh(post)
-    return PostOut.from_post(post)
+    return _post_with_preflight(db, post)
 
 
 @router.delete("/{post_id}")
@@ -437,12 +450,29 @@ def delete_post(
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
 
+    # Both cover and sequence FKs restrict deletion. Name the dependants before
+    # touching disk; the DB commit below remains the final arbiter if one races us.
+    reels = db.execute(select(Reel).where(or_(
+        Reel.cover_post_id == post_id,
+        Reel.id.in_(select(ReelPhoto.reel_id).where(ReelPhoto.post_id == post_id)),
+    ))).scalars().all()
+    if reels:
+        names = ", ".join(f"{r.caption or 'Untitled reel'} ({r.id})" for r in reels)
+        raise HTTPException(409, f"Post is used by reel(s): {names}. Remove it from those reels first.")
+
     paths: list[Path] = []
     for raw in (post.original_path, post.thumbnail_path):
         if raw:
             paths.append(Path(raw))
     paths.append(storage.DERIVATIVES / f"{post_id}.jpg")  # cleanup any in-flight derivative
     paths.append(storage.preview_path(post_id))            # cleanup cached lightbox preview
+
+    # Never unlink before the restrictive FK and commit have succeeded. A failed
+    # unlink merely leaves an orphan for cleanup; a failed DB delete must keep sources.
+    was_on_flickr = bool(post.flickr_photo_id)
+    log.info("deleting post %s (status=%s) by %s", post.id[:8], post.status, user.username)
+    db.delete(post)
+    db.commit()
 
     deleted_files = []
     for p in paths:
@@ -453,20 +483,11 @@ def delete_post(
         except OSError as e:
             log.warning("could not unlink %s: %s", p, e)
 
-    # Final event before the cascading delete wipes the post_events rows. Won't survive the
-    # delete, but useful in logs.
-    log.info(
-        "deleting post %s (status=%s, was_on_flickr=%s, files=%d) by %s",
-        post.id[:8], post.status, bool(post.flickr_photo_id), len(deleted_files), user.username,
-    )
-
-    db.delete(post)
-    db.commit()
     return {
         "ok": True,
         "post_id": post_id,
         "files_unlinked": deleted_files,
-        "was_on_flickr": bool(post.flickr_photo_id),
+        "was_on_flickr": was_on_flickr,
     }
 
 
@@ -1242,18 +1263,22 @@ def repost_to_flickr(
         except Exception as e:
             # If Flickr says the photo is already gone (deleted manually), proceed anyway.
             msg = str(e)
-            if "not found" in msg.lower() or "1 " in msg.lower()[:5]:
+            if getattr(e, "code", None) == 1 or "not found" in msg.lower():
                 log.info(
                     "post %s: flickr photo %s already gone, continuing repost",
                     post_id[:8], post.flickr_photo_id,
                 )
                 flickr_deleted = True  # treat as success — end state is the same
             else:
-                flickr_delete_error = msg
-                log.warning(
-                    "post %s: flickr delete failed (%s); continuing repost anyway",
-                    post_id[:8], msg,
-                )
+                # An unconfirmed delete must retain the old archive identity. Otherwise
+                # a permission/network failure discards our only link to a still-live photo.
+                raise HTTPException(409, f"Flickr photo could not be deleted: {msg}") from e
+
+        # The remote delete cannot share SQLite's transaction, but invalidation and
+        # requeue can. A failed commit leaves the old id available for a safe retry
+        # (Flickr then answers 'not found'); never clear unrelated machine-tag matches.
+        db.execute(delete(FlickrPhoto).where(
+            FlickrPhoto.flickr_photo_id == post.flickr_photo_id))
 
     # Wipe engagement rows tied to the old flickr_photo_id; otherwise analytics will conflate
     # old-photo data with the new photo's history.

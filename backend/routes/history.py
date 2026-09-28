@@ -14,7 +14,7 @@ from database import get_session
 from models import PlatformCredential, Post, PostComment, PostEvent, PostPlatform, User
 from routes.auth import current_user
 from routes.posts import PostOut
-from services import caption_text
+from services import caption_text, delivery, preflight
 
 router = APIRouter()
 
@@ -97,7 +97,14 @@ def list_history(
     stmt = stmt.order_by(Post.posted_at.desc().nulls_last(), Post.scheduled_at.desc().nulls_last())
     stmt = stmt.limit(limit).offset(offset)
     rows = db.execute(stmt).scalars().all()
-    return [HistoryPost.model_validate(r) for r in rows]
+    out = []
+    for post in rows:
+        item = HistoryPost.model_validate(post)
+        # Legacy reconciliation may have saved 'posted' without the Flickr copy.
+        # Do not keep presenting that as success just because it predates the fix.
+        item.status = delivery.status_for(post)
+        out.append(item)
+    return out
 
 
 @router.get("/{post_id}", response_model=PostOut)
@@ -139,16 +146,18 @@ def post_platforms(
     out: list[PostPlatformOut] = []
 
     # Synthesize Flickr from Post columns since it predates the post_platforms table.
-    if post.flickr_photo_id or post.status in ("posted", "late", "failed", "missed"):
+    if post.flickr_photo_id or "flickr" in preflight.targets_for(post, []):
         out.append(
             PostPlatformOut(
                 platform="flickr",
                 account_name=None,
                 instance_url=None,
-                status=post.status if post.flickr_photo_id else "failed" if post.status == "failed" else post.status,
+                status=("posted" if post.flickr_photo_id else
+                        "pending" if post.status == "pending" else
+                        "missed" if post.status == "missed" else "failed"),
                 remote_id=post.flickr_photo_id,
                 remote_url=post.flickr_url,
-                posted_at=post.posted_at,
+                posted_at=post.posted_at if post.flickr_photo_id else None,
                 error_message=post.error_message if not post.flickr_photo_id else None,
                 retry_count=post.retry_count or 0,
             )

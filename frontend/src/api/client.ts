@@ -70,6 +70,7 @@ export type HealthPayload = {
   photo_volume_free_gb: number;
   flickr_last_success: string | null;
   last_backup: string | null;
+  backup_warnings: string[];
   platform_warnings: { platform: string; severity: string; message: string }[];
   version: string;
 };

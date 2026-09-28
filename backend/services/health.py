@@ -11,6 +11,7 @@ from sqlalchemy import select, text, func
 from config import settings
 from database import SessionLocal
 from models import AppConfig, PlatformCredential, Post
+from services import storage
 
 VERSION = "0.1.0"
 HEARTBEAT_TTL_SECONDS = 120  # brief: "last heartbeat within 2 minutes"
@@ -92,6 +93,31 @@ def _parse_iso(s: str | None) -> datetime | None:
         return None
 
 
+def _backup_warnings(last_backup: str | None) -> list[str]:
+    """The daily backup gets a two-day grace. A saved success timestamp alone is
+    insufficient if rotation/manual cleanup removed every file afterwards.
+
+    Off-box pushes currently write only a host log outside the container mounts; this
+    check cannot assert remote health from a fresh local backup.
+    """
+    try:
+        exists = any(p.is_file() and p.stat().st_size > 0
+                     for p in storage.BACKUP.glob("framepost-*.sqlite"))
+    except OSError:
+        return ["Local backups cannot be read — check the backup volume."]
+    if not exists:
+        return ["No local database backup is available. Run a backup in Settings → System."]
+    stamp = _parse_iso(last_backup)
+    if stamp is None:
+        return ["No successful backup time is recorded. Run a backup in Settings → System."]
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - stamp
+    if age > timedelta(days=2):
+        return [f"Last backup was {age.days} days ago. Check Settings → System."]
+    return []
+
+
 def collect_health() -> dict[str, Any]:
     db = SessionLocal()
     try:
@@ -118,10 +144,11 @@ def collect_health() -> dict[str, Any]:
         flickr_last_success = _read_config(db, "flickr_last_success") or None
         last_backup = _read_config(db, "last_backup") or None
         platform_warnings = _platform_warnings(db)
+        backup_warnings = _backup_warnings(last_backup)
 
         if not (db_writable and photo_writable):
             status = "down"
-        elif not worker_alive or free_gb < 5.0 or platform_warnings:
+        elif not worker_alive or free_gb < 5.0 or platform_warnings or backup_warnings:
             status = "degraded"
         else:
             status = "ok"
@@ -134,6 +161,7 @@ def collect_health() -> dict[str, Any]:
             "photo_volume_free_gb": free_gb,
             "flickr_last_success": flickr_last_success,
             "last_backup": last_backup,
+            "backup_warnings": backup_warnings,
             "platform_warnings": platform_warnings,
             "version": VERSION,
         }

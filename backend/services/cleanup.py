@@ -8,11 +8,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from models import AppConfig, Post, Reel
-from services import events, storage
+from services import events, preflight, storage
 
 log = logging.getLogger("framepost.cleanup")
 
@@ -52,6 +52,10 @@ def purge_expired_originals(db: Session) -> int:
 
     purged = 0
     for post in candidates:
+        # A social copy is not the archive. Also protects legacy rows incorrectly
+        # reconciled to posted before this guard existed. Defaults include Flickr.
+        if "flickr" in preflight.targets_for(post, []) and not post.flickr_photo_id:
+            continue
         if not post.thumbnail_path:
             continue
         thumb = Path(post.thumbnail_path)
@@ -154,7 +158,7 @@ def _reel_retention_days(db: Session) -> int:
 
 
 def purge_expired_reels(db: Session) -> int:
-    """Delete Reel MP4 files older than reel_retention_days.
+    """Expire published MP4s after retention, or abandoned failed renders.
 
     Keeps the `reels` DB row (so the user still sees the Reel in history with metadata
     + photo sequence) but clears mp4_path so the UI can show 'Expired — regenerate to
@@ -168,8 +172,15 @@ def purge_expired_reels(db: Session) -> int:
 
     candidates = db.execute(
         select(Reel).where(
-            Reel.created_at < cutoff,
             Reel.mp4_path.is_not(None),
+            # A render can wait months for its slot. Even a stale publish claim or
+            # checkpoint is unresolved work, not permission to destroy its input.
+            Reel.publish_claimed_at.is_(None),
+            Reel.publish_claim_token.is_(None),
+            Reel.ig_container.is_(None),
+            or_(Reel.posted_at < cutoff,
+                and_(Reel.posted_at.is_(None), Reel.scheduled_at.is_(None),
+                     Reel.status == "failed", Reel.updated_at < cutoff)),
         )
     ).scalars().all()
 

@@ -19,4 +19,8 @@ def client(**kwargs) -> httpx.Client:
     """httpx.Client with a real User-Agent. Caller headers win over the default."""
     headers = {"User-Agent": USER_AGENT}
     headers.update(kwargs.pop("headers", None) or {})
-    return httpx.Client(headers=headers, **kwargs)
+    from services.feed_claim import before_request
+
+    hooks = dict(kwargs.pop("event_hooks", None) or {})
+    hooks["request"] = [before_request, *hooks.get("request", [])]
+    return httpx.Client(headers=headers, event_hooks=hooks, **kwargs)

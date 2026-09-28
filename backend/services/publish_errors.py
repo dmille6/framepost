@@ -183,6 +183,15 @@ def classify(platform: str, err: BaseException) -> PublishFailure:
     low = text.lower()
     code = getattr(err, "code", None)
 
+    # Flickr's structured code survives wording changes and upload/REST formatting
+    # differences. The old text-only match missed exceptions carrying code=98/99.
+    if platform == "flickr" and str(code) in {"98", "99"}:
+        return PublishFailure(
+            platform=platform, category=FailureCategory.REAUTH,
+            user_message="Flickr needs reconnecting — the saved login or permission was refused.",
+            detail=text[:1000], code=str(code),
+        )
+
     for pattern, category, message in _RULES.get(platform, []) + _FALLBACK:
         if re.search(pattern, low):
             return PublishFailure(

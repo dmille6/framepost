@@ -17,15 +17,8 @@ function reasonsFor(h: HealthPayload): { text: string; href?: string }[] {
       href: "/settings/system",
     });
   }
-  if (h.last_backup) {
-    const last = new Date(h.last_backup).getTime();
-    const ageDays = (Date.now() - last) / (1000 * 60 * 60 * 24);
-    if (ageDays > 2) {
-      out.push({
-        text: `Last backup was ${Math.floor(ageDays)} days ago.`,
-        href: "/settings/system",
-      });
-    }
+  for (const message of h.backup_warnings ?? []) {
+    out.push({ text: message, href: "/settings/system" });
   }
   for (const w of h.platform_warnings ?? []) {
     out.push({ text: w.message, href: "/settings/platforms" });
@@ -48,6 +41,7 @@ export default function StatusBanner() {
   // Dismissal key encodes the current health "shape" so a state change re-shows the banner.
   const key = JSON.stringify({
     s: data.status,
+    b: data.backup_warnings ?? [],
     w: data.worker_alive,
     d: data.db_writable,
     p: data.photo_volume_writable,
