@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 
 from config import settings
 from database import SessionLocal
-from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostEvent, PostGroup, PostPlatform, Group
+from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostEvent, PostGroup, PostPlatform, Group, Venue
 from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, media_probe, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
@@ -93,6 +93,22 @@ def _derivative_long_edge(db) -> int:
     return DEFAULT_DERIVATIVE_LONG_EDGE
 
 
+def _flickr_tags_for_post(db, post: Post) -> str:
+    """Add searchable place names only to Flickr's tag field, never social hashtags.
+
+    Keep existing/profile tags first, then venue and city. The 75-tag budget includes
+    the duplicate-detection machine tag, which must survive trimming; newly appended
+    place tags are therefore the first to fall off the end when space runs out.
+    """
+    machine_tags = [f"framepost:sha256={post.sha256}"] if post.sha256 else []
+    ordinary = tags.parse_csv(tags.merged_tags_for_post(db, post))
+    venue = db.get(Venue, post.venue_id) if post.venue_id else None
+    places = [value.strip() for value in (venue.display_name if venue else None, post.city)
+              if value and value.strip()]
+    merged = tags.merge_unique(ordinary, places)
+    return flickr.format_tags(merged[:75 - len(machine_tags)], machine_tags=machine_tags)
+
+
 def _flickr_post(db, post: Post, fired_at: datetime) -> None:
     """Build derivative, upload, stamp machine tag, transition status. Failures bubble up."""
     src = Path(post.original_path) if post.original_path else None
@@ -142,12 +158,7 @@ def _flickr_post(db, post: Post, fired_at: datetime) -> None:
         )
         db.commit()
 
-        machine_tag = f"framepost:sha256={post.sha256}" if post.sha256 else None
-        merged = tags.merged_tags_for_post(db, post)
-        flickr_tags = flickr.format_tags(
-            merged,
-            machine_tags=[machine_tag] if machine_tag else None,
-        )
+        flickr_tags = _flickr_tags_for_post(db, post)
         photo_id = flickr.upload_photo(
             db=db,
             image_path=derivative,

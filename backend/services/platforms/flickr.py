@@ -231,11 +231,16 @@ _SAFETY = {"safe": "1", "moderate": "2", "restricted": "3"}
 _CONTENT = {"photo": "1", "screenshot": "2", "other": "3"}
 
 
-def format_tags(comma_separated: str | None, *, machine_tags: list[str] | None = None) -> str:
-    """Flickr expects space-separated tags, multi-word tags in quotes. Add machine tags raw."""
+def format_tags(comma_separated: str | list[str] | None, *, machine_tags: list[str] | None = None) -> str:
+    """Flickr expects space-separated tags, multi-word tags in quotes. Add machine tags raw.
+
+    A list preserves structured place names containing commas; CSV remains supported
+    for existing callers storing ordinary tags as comma-separated text.
+    """
     out: list[str] = []
     if comma_separated:
-        for raw in comma_separated.split(","):
+        values = comma_separated.split(",") if isinstance(comma_separated, str) else comma_separated
+        for raw in values:
             t = raw.strip()
             if not t:
                 continue
