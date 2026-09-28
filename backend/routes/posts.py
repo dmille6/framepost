@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, computed_field, field_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from database import get_session
 from models import AppConfig, EngagementSnapshot, FlickrEngagement, FlickrPhoto, PlatformCredential, Post, PostComment, PostPlatform, Reel, ReelPhoto, User
@@ -471,8 +472,15 @@ def delete_post(
     # unlink merely leaves an orphan for cleanup; a failed DB delete must keep sources.
     was_on_flickr = bool(post.flickr_photo_id)
     log.info("deleting post %s (status=%s) by %s", post.id[:8], post.status, user.username)
-    db.delete(post)
-    db.commit()
+    try:
+        db.delete(post)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Post is now used by a reel. Remove it from the reel before deleting.",
+        ) from exc
 
     deleted_files = []
     for p in paths:

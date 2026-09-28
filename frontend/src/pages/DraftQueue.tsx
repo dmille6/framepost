@@ -107,6 +107,7 @@ export default function DraftQueue() {
     refetchInterval: 60_000,
   });
 
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Selected post — prefer the matching one from the (filtered) visible list, fall back to
   // the unfiltered drafts list, then the first visible if anything remains.
@@ -231,6 +232,9 @@ export default function DraftQueue() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deletePost(id),
+    onError: (error) => {
+      setDeleteError(error instanceof Error ? error.message : "Could not delete the draft.");
+    },
     onSuccess: (_data, id) => {
       void qc.invalidateQueries({ queryKey: ["drafts"] });
       void qc.invalidateQueries({ queryKey: ["schedule"] });
@@ -248,14 +252,16 @@ export default function DraftQueue() {
     const ids = [...checkedIds];
     if (ids.length === 0) return;
     if (!confirm(`Delete ${ids.length} draft${ids.length === 1 ? "" : "s"}? This removes original + thumbnail files. Photos already on Flickr stay there.`)) return;
+    setDeleteError(null);
+    let failed = false;
     for (const id of ids) {
       try {
         await deleteMutation.mutateAsync(id);
-      } catch (e) {
-        console.error("delete failed for", id, e);
+      } catch {
+        failed = true; // onError displays the server's reason; keep failed drafts selected.
       }
     }
-    exitMultiSelect();
+    if (!failed) exitMultiSelect();
   }
 
   async function runUpload(item: UploadItem, allowDuplicate: boolean) {
@@ -350,6 +356,13 @@ export default function DraftQueue() {
           title="Draft Queue"
           subtitle="Lightroom export → import pipeline → review → schedule. The pipeline pre-fills title, description, and tags from any IPTC metadata it finds."
         />
+
+        {deleteError && (
+          <div role="alert" style={{ color: "var(--danger)", fontSize: 13, marginBottom: 16 }}>
+            {deleteError}
+            <button className="fp-btn" onClick={() => setDeleteError(null)} style={{ marginLeft: 12 }}>Dismiss</button>
+          </div>
+        )}
 
         <QueueTabs draftCount={drafts.length} scheduledCount={scheduledPending.length} />
 
@@ -630,7 +643,8 @@ export default function DraftQueue() {
                   onDelete={() => {
                     const label = selected.title || selected.original_filename || "this draft";
                     if (confirm(`Delete "${label}"? Removes original + thumbnail files. If it's already on Flickr, the Flickr photo stays.`)) {
-                      void deleteMutation.mutateAsync(selected.id);
+                      setDeleteError(null);
+                      deleteMutation.mutate(selected.id);
                     }
                   }}
                 />

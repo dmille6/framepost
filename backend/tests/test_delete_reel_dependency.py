@@ -35,3 +35,21 @@ def test_commit_failure_does_not_unlink_files(db, tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         delete_post('p', db=db, user=SimpleNamespace(username='u'))
     assert original.exists()
+
+
+def test_reel_dependency_racing_delete_returns_409_and_preserves_files(db, tmp_path, monkeypatch):
+    original = tmp_path / 'original'; original.write_bytes(b'original')
+    db.add(Post(id='p', original_path=str(original))); db.commit()
+    delete = db.delete
+    def race(post):
+        # The friendly dependency query already ran; the FK is the final arbiter.
+        db.add(Reel(id='new-reel', cover_post_id='p'))
+        db.commit()
+        delete(post)
+    monkeypatch.setattr(db, 'delete', race)
+    with pytest.raises(HTTPException) as exc:
+        delete_post('p', db=db, user=SimpleNamespace(username='u'))
+    assert exc.value.status_code == 409
+    assert 'reel' in exc.value.detail
+    assert original.read_bytes() == b'original'
+    assert db.get(Post, 'p') is not None
