@@ -26,6 +26,7 @@ def _post_with_reading(db, *, age_of_post, age_of_reading, likes=10, platform="f
     posted = _utcnow() - age_of_post
     p = Post(id=uuid.uuid4().hex, status="posted", posted_at=posted)
     db.add(p)
+    db.flush()  # parent row first: the suite now enforces foreign keys
     db.add(EngagementSnapshot(post_id=p.id, platform=platform,
                               sampled_at=posted + age_of_reading,
                               likes=likes, comments_count=0))

@@ -558,7 +558,8 @@ def set_default_target(
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == platform)
     ).scalar_one_or_none()
-    if not row:
+    # A disconnected row is kept for its post history, but it is not a connection.
+    if not row or not row.access_token:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "platform not connected")
     row.default_target = 1 if body.default_target else 0
     db.commit()

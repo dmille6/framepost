@@ -37,7 +37,6 @@ import json
 import re
 import logging
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, NamedTuple, Sequence
 
@@ -48,6 +47,7 @@ from sqlalchemy.orm import Session
 
 from crypto import decrypt_token, encrypt_token
 from models import PlatformCredential
+from services.platforms import credentials
 
 log = logging.getLogger("framepost.instagram")
 
@@ -184,28 +184,18 @@ def connect(db: Session, *, access_token: str) -> PlatformCredential:
         )
 
     now = datetime.now(timezone.utc)
-    existing = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if existing:
-        db.delete(existing)
-        db.flush()
-
-    cred = PlatformCredential(
-        id=str(uuid.uuid4()),
-        platform=PLATFORM,
-        access_token=encrypt_token(access_token),
-        token_expires=now + TOKEN_LIFETIME,
-        account_name=me.get("username") or "",
-        extra_json=json.dumps({
-            "ig_user_id": ig_user_id,
-            "account_type": account_type,
-        }),
-        connected_at=now,
-        last_success_at=now,
-        key_version=KEY_VERSION,
-    )
-    db.add(cred)
+    # Update in place, never delete-and-insert: post_platforms rows hang off this id,
+    # and a fresh uuid orphaned (pre-0033: cascaded away) every Instagram post on record.
+    cred = credentials.upsert(db, PLATFORM)
+    cred.access_token = encrypt_token(access_token)
+    cred.token_expires = now + TOKEN_LIFETIME
+    cred.extra_json = json.dumps({
+        "ig_user_id": ig_user_id,
+        "account_type": account_type,
+    })
+    credentials.mark_connected(cred, account_name=me.get("username") or "")
+    cred.last_success_at = now
+    cred.key_version = KEY_VERSION
     db.commit()
     db.refresh(cred)
     log.info("instagram connected: @%s (ig_user_id=%s, type=%s)",
@@ -214,14 +204,8 @@ def connect(db: Session, *, access_token: str) -> PlatformCredential:
 
 
 def disconnect(db: Session) -> bool:
-    row = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if not row:
-        return False
-    db.delete(row)
-    db.commit()
-    return True
+    """Forget the token; keep the row so published history (and its media ids) survive."""
+    return credentials.disconnect(db, PLATFORM, keep_extra=("ig_user_id", "account_type"))
 
 
 def current_status(db: Session) -> dict[str, Any]:

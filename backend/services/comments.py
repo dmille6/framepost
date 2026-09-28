@@ -687,6 +687,8 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
         .where(
             PostPlatform.status == "posted",
             Post.posted_at >= cutoff,
+            # Disconnected channels keep their rows (history), not their tokens.
+            PlatformCredential.access_token.is_not(None),
         )
     ).all()
     for pp, cred, _post in rows:

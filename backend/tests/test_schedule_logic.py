@@ -35,6 +35,7 @@ def _ig_post(db, posted_at_utc: datetime, *, quality: int) -> Post:
     """
     p = Post(id=uuid.uuid4().hex, status="posted", posted_at=posted_at_utc)
     db.add(p)
+    db.flush()  # parent row first: the suite now enforces foreign keys
     db.add(EngagementSnapshot(
         post_id=p.id, platform="instagram",
         sampled_at=posted_at_utc + timedelta(days=7),
@@ -46,6 +47,7 @@ def _ig_post(db, posted_at_utc: datetime, *, quality: int) -> Post:
 def _flickr_post(db, posted_at_utc: datetime, *, likes: int) -> Post:
     p = Post(id=uuid.uuid4().hex, status="posted", posted_at=posted_at_utc)
     db.add(p)
+    db.flush()  # parent row first: the suite now enforces foreign keys
     db.add(EngagementSnapshot(
         post_id=p.id, platform="flickr",
         sampled_at=posted_at_utc + timedelta(days=7),
@@ -153,6 +155,7 @@ def test_ranking_uses_the_seven_day_reading_not_the_lifetime_total(db):
         d = _BASE + timedelta(days=i)
         p = Post(id=uuid.uuid4().hex, status="posted", posted_at=d.replace(hour=15))
         db.add(p)
+        db.flush()  # parent row first: the suite now enforces foreign keys
         db.add(EngagementSnapshot(post_id=p.id, platform="instagram",
                                   sampled_at=d.replace(hour=15) + timedelta(days=7),
                                   likes=1, comments_count=0))
@@ -164,6 +167,7 @@ def test_ranking_uses_the_seven_day_reading_not_the_lifetime_total(db):
         d = _BASE + timedelta(days=i)
         p = Post(id=uuid.uuid4().hex, status="posted", posted_at=d.replace(hour=20))
         db.add(p)
+        db.flush()  # parent row first: the suite now enforces foreign keys
         db.add(EngagementSnapshot(post_id=p.id, platform="instagram",
                                   sampled_at=d.replace(hour=20) + timedelta(days=7),
                                   likes=500, comments_count=0))
@@ -181,6 +185,7 @@ def test_a_post_too_young_for_a_seven_day_reading_is_not_counted(db):
         d = _BASE + timedelta(days=100 + i)
         p = Post(id=uuid.uuid4().hex, status="posted", posted_at=d.replace(hour=22))
         db.add(p)
+        db.flush()  # parent row first: the suite now enforces foreign keys
         db.add(EngagementSnapshot(post_id=p.id, platform="instagram",
                                   sampled_at=d.replace(hour=22) + timedelta(hours=2),
                                   likes=9999, comments_count=0))

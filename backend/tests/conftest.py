@@ -3,7 +3,7 @@ backend python -m pytest tests/ -q`) where the app's env vars and deps already e
 DB-touching tests get a fresh in-memory SQLite with the full schema — never the real DB.
 """
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from database import Base
@@ -13,6 +13,14 @@ import models  # noqa: F401 — registers all tables on Base.metadata
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite://")
+
+    # Production runs with foreign_keys=ON (database.py). Without it here, SQLite ignores
+    # every ON DELETE rule, and the suite could not see the bug where reconnecting a
+    # platform cascaded away its entire post history.
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys = ON")
+
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
     yield session

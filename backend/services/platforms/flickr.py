@@ -9,7 +9,6 @@ column slot (the schema's name is generic — Flickr just happens to use a token
 from __future__ import annotations
 
 import logging
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +20,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from crypto import decrypt_token, encrypt_token
 from models import PlatformCredential
+from services.platforms import credentials
 
 log = logging.getLogger("framepost.flickr")
 
@@ -119,28 +119,14 @@ def complete_authorize(
         or "Flickr account"
     )
 
-    # Single-platform v1: replace any existing row.
-    existing = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if existing:
-        db.delete(existing)
-        db.flush()
-
-    cred = PlatformCredential(
-        id=uuid.uuid4().hex,
-        platform=PLATFORM,
-        access_token=encrypt_token(access_token),
-        auth_status="ok",
-        auth_error=None,
-        auth_flagged_at=None,
-        refresh_token=encrypt_token(access_secret),
-        token_expires=None,
-        account_name=account_name,
-        key_version=KEY_VERSION,
-        connected_at=datetime.now(timezone.utc),
-    )
-    db.add(cred)
+    # Single-platform v1: one row, updated in place. Replacing it with a new id is what
+    # used to cascade away post history on every reconnect (see platforms/credentials).
+    cred = credentials.upsert(db, PLATFORM)
+    cred.access_token = encrypt_token(access_token)
+    cred.refresh_token = encrypt_token(access_secret)
+    cred.token_expires = None
+    cred.key_version = KEY_VERSION
+    credentials.mark_connected(cred, account_name=account_name)
     db.commit()
     db.refresh(cred)
     log.info("flickr connected: account=%s", account_name)
@@ -148,22 +134,14 @@ def complete_authorize(
 
 
 def disconnect(db: Session) -> bool:
-    existing = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if not existing:
-        return False
-    db.delete(existing)
-    db.commit()
-    log.info("flickr disconnected")
-    return True
+    return credentials.disconnect(db, PLATFORM)
 
 
 def current_status(db: Session) -> dict[str, Any]:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
     ).scalar_one_or_none()
-    if not row:
+    if not credentials.is_connected(row):
         return {
             "connected": False,
             "account_name": None,
@@ -194,7 +172,7 @@ def _load_credential(db: Session) -> PlatformCredential:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
     ).scalar_one_or_none()
-    if not row:
+    if not credentials.is_connected(row):
         raise RuntimeError("Flickr is not connected.")
     return row
 

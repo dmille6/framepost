@@ -32,7 +32,10 @@ def flag_reauth(db: Session, platform: str, message: str) -> bool:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == platform)
     ).scalars().first()
-    if row is None:
+    if row is None or not row.access_token:
+        # Nothing to reconnect: the user disconnected it (the row is kept only for its
+        # post history), or it was never connected. Flagging it would put a "reconnect"
+        # banner over a channel the user deliberately turned off.
         return False
     if row.auth_status == "reauth_required" and row.auth_error == message:
         return False
@@ -67,7 +70,8 @@ def broken_channels(db: Session) -> list[dict[str, Any]]:
     """Every connection currently needing a reconnect, with its blast radius."""
     rows = db.execute(
         select(PlatformCredential).where(
-            PlatformCredential.auth_status == "reauth_required"
+            PlatformCredential.auth_status == "reauth_required",
+            PlatformCredential.access_token.is_not(None),
         )
     ).scalars().all()
     if not rows:

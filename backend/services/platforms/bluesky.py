@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -33,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from crypto import decrypt_token, encrypt_token
 from models import Performer, PlatformCredential, Venue
+from services.platforms import credentials
 
 log = logging.getLogger("framepost.bluesky")
 
@@ -113,29 +113,19 @@ def _refresh_session(refresh_jwt: str, pds: str = DEFAULT_PDS) -> _Session:
 def connect(db: Session, *, handle: str, app_password: str) -> PlatformCredential:
     """Verify the handle/app-password pair against bsky.social and persist the session."""
     session = _create_session(handle, app_password)
-    # Drop any existing connection for this platform — single-account model for v1.
-    existing = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if existing:
-        db.delete(existing)
-        db.flush()
-
-    cred = PlatformCredential(
-        id=str(uuid.uuid4()),
-        platform=PLATFORM,
-        access_token=encrypt_token(session.access_jwt),
-        refresh_token=encrypt_token(session.refresh_jwt),
-        account_name=session.handle,
-        instance_url=session.pds,
-        extra_json=json.dumps(
-            {"did": session.did, "app_password": encrypt_token(app_password)}
-        ),
-        connected_at=datetime.now(timezone.utc),
-        last_success_at=datetime.now(timezone.utc),
-        key_version=KEY_VERSION,
+    # Single-account model: one row, updated in place so post history keeps pointing at
+    # it (see platforms/credentials — a new id per connect used to cascade it away).
+    now = datetime.now(timezone.utc)
+    cred = credentials.upsert(db, PLATFORM)
+    cred.access_token = encrypt_token(session.access_jwt)
+    cred.refresh_token = encrypt_token(session.refresh_jwt)
+    cred.instance_url = session.pds
+    cred.extra_json = json.dumps(
+        {"did": session.did, "app_password": encrypt_token(app_password)}
     )
-    db.add(cred)
+    credentials.mark_connected(cred, account_name=session.handle)
+    cred.last_success_at = now
+    cred.key_version = KEY_VERSION
     db.commit()
     db.refresh(cred)
     log.info("bluesky connected: handle=%s did=%s", session.handle, session.did)
@@ -143,21 +133,15 @@ def connect(db: Session, *, handle: str, app_password: str) -> PlatformCredentia
 
 
 def disconnect(db: Session) -> bool:
-    row = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if not row:
-        return False
-    db.delete(row)
-    db.commit()
-    return True
+    # The app password goes with the tokens; the DID is public and harmless to keep.
+    return credentials.disconnect(db, PLATFORM, keep_extra=("did",))
 
 
 def _load_session(db: Session) -> tuple[PlatformCredential, _Session]:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
     ).scalar_one_or_none()
-    if not row:
+    if not credentials.is_connected(row):
         raise BlueskyError("Bluesky is not connected.", permanent=True)
     extra = json.loads(row.extra_json or "{}")
     pds = row.instance_url or DEFAULT_PDS
@@ -560,7 +544,7 @@ def current_status(db: Session) -> dict[str, Any]:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
     ).scalar_one_or_none()
-    if not row:
+    if not credentials.is_connected(row):
         return {"connected": False, "handle": None, "connected_at": None}
     return {
         "connected": True,

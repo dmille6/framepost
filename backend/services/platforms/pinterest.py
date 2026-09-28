@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from crypto import decrypt_token, encrypt_token
 from models import PlatformCredential
+from services.platforms import credentials
 
 log = logging.getLogger("framepost.pinterest")
 
@@ -80,27 +81,14 @@ def begin_connect(db: Session, *, redirect_uri: str) -> tuple[str, str]:
     app_id, _ = _require_app_keys()
     state = uuid.uuid4().hex
 
-    # Replace any prior pinterest credential — single-account model for v1.
-    existing = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if existing:
-        db.delete(existing)
-        db.flush()
-
-    cred = PlatformCredential(
-        id=str(uuid.uuid4()),
-        platform=PLATFORM,
-        access_token=None,
-        extra_json=json.dumps({
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "pending": True,
-        }),
-        connected_at=datetime.now(timezone.utc),
-        key_version=KEY_VERSION,
-    )
-    db.add(cred)
+    # In-flight state goes beside the live connection, not in place of it. Deleting the
+    # row here (as this used to) killed a working connection the moment the user clicked
+    # Connect — before Pinterest had even asked them — and, pre-0033, cascaded through
+    # every Pinterest post_platforms row. Nothing live changes until the callback works.
+    cred = credentials.upsert(db, PLATFORM)
+    if not cred.access_token:
+        cred.key_version = KEY_VERSION
+    credentials.set_pending_oauth(cred, {"redirect_uri": redirect_uri, "state": state})
     db.commit()
 
     qs = urlencode({
@@ -115,19 +103,18 @@ def begin_connect(db: Session, *, redirect_uri: str) -> tuple[str, str]:
 
 def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredential:
     """Exchange the authorization code for an access token, persist it, fetch account info."""
-    row = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if not row:
+    row = credentials.get(db, PLATFORM)
+    pending = credentials.pending_oauth(row)
+    if not pending:
         raise PinterestError("No pending Pinterest connection — start over from Settings.", permanent=True)
-
-    extra = json.loads(row.extra_json or "{}")
-    if not extra.get("pending"):
-        raise PinterestError("This Pinterest connection has already been completed.", permanent=True)
-    if extra.get("state") != state:
+    if pending.get("state") != state:
         raise PinterestError("OAuth state mismatch — possible CSRF, please retry.", permanent=True)
 
-    redirect_uri = extra["redirect_uri"]
+    redirect_uri = pending["redirect_uri"]
+    try:
+        previous = json.loads(row.extra_json or "{}")
+    except ValueError:
+        previous = {}
 
     with _client() as c:
         r = c.post(
@@ -163,25 +150,25 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
     account = r.json()
     username = account.get("username") or ""
 
+    # Same row, same id: pins already made stay attached to this connection.
     row.access_token = encrypt_token(access_token)
-    # A freshly stored token means the channel is authorised again — drop any
-    # "needs reconnecting" flag so the health banner clears immediately rather
-    # than waiting for the next scheduled post to prove it.
-    row.auth_status, row.auth_error, row.auth_flagged_at = "ok", None, None
     row.refresh_token = encrypt_token(refresh_token) if refresh_token else None
     if expires_in:
         row.token_expires = (
             datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
         ).replace(tzinfo=None)
-    row.account_name = username
+    row.key_version = KEY_VERSION
+    credentials.mark_connected(row, account_name=username)
     row.last_success_at = datetime.now(timezone.utc)
-    row.last_error = None
+    # A reconnect of the same account keeps its default board — re-picking it after
+    # every token renewal is busywork, and until it is re-picked every pin fails.
+    same_account = previous.get("user_id") in (None, account.get("id"))
     row.extra_json = json.dumps({
         "user_id": account.get("id"),
         "profile_url": f"https://www.pinterest.com/{username}/" if username else None,
         "account_type": account.get("account_type"),
-        "default_board_id": None,
-        "default_board_name": None,
+        "default_board_id": previous.get("default_board_id") if same_account else None,
+        "default_board_name": previous.get("default_board_name") if same_account else None,
     })
     db.commit()
     db.refresh(row)
@@ -190,14 +177,8 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
 
 
 def disconnect(db: Session) -> bool:
-    row = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if not row:
-        return False
-    db.delete(row)
-    db.commit()
-    return True
+    return credentials.disconnect(db, PLATFORM, keep_extra=(
+        "user_id", "profile_url", "default_board_id", "default_board_name"))
 
 
 def current_status(db: Session) -> dict[str, Any]:
@@ -209,7 +190,7 @@ def current_status(db: Session) -> dict[str, Any]:
     extra = json.loads(row.extra_json or "{}")
     return {
         "connected": bool(row.access_token),
-        "pending": bool(extra.get("pending")),
+        "pending": credentials.pending_oauth(row) is not None,
         "account": row.account_name,
         "profile_url": extra.get("profile_url"),
         "default_board_id": extra.get("default_board_id"),

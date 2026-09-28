@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from crypto import decrypt_token, encrypt_token
 from models import PlatformCredential
+from services.platforms import credentials
 
 log = logging.getLogger("framepost.pixelfed")
 
@@ -105,31 +106,21 @@ def begin_connect(
     client_secret = app["client_secret"]
     state = uuid.uuid4().hex
 
-    # Persist a half-connected credential. We delete any prior pixelfed connection so there's
-    # only ever one in flight at a time (single-account model for v1).
-    existing = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if existing:
-        db.delete(existing)
-        db.flush()
-
-    cred = PlatformCredential(
-        id=str(uuid.uuid4()),
-        platform=PLATFORM,
-        access_token=None,  # filled in by callback
-        instance_url=instance_url,
-        extra_json=json.dumps({
-            "client_id": client_id,
-            "client_secret": encrypt_token(client_secret),
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "pending": True,
-        }),
-        connected_at=datetime.now(timezone.utc),
-        key_version=KEY_VERSION,
-    )
-    db.add(cred)
+    # Park the in-flight OAuth state beside the live connection, never in place of it.
+    # This used to delete the existing row before the user had even seen the consent
+    # screen — so an abandoned reconnect killed a working connection, and (pre-0033) the
+    # delete cascaded through every Pixelfed post_platforms row. The tokens and the row
+    # id are untouched until complete_connect succeeds.
+    cred = credentials.upsert(db, PLATFORM)
+    if not cred.access_token:
+        cred.key_version = KEY_VERSION
+    credentials.set_pending_oauth(cred, {
+        "instance_url": instance_url,
+        "client_id": client_id,
+        "client_secret": encrypt_token(client_secret),
+        "redirect_uri": redirect_uri,
+        "state": state,
+    })
     db.commit()
 
     # Step 2: build the authorize URL the browser will be redirected to.
@@ -147,22 +138,18 @@ def begin_connect(
 
 def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredential:
     """Exchange the authorization code for an access token, persist it, fetch account info."""
-    row = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if not row:
+    row = credentials.get(db, PLATFORM)
+    pending = credentials.pending_oauth(row)
+    if not pending:
         raise PixelfedError("No pending Pixelfed connection — start over from Settings.", permanent=True)
-
-    extra = json.loads(row.extra_json or "{}")
-    if not extra.get("pending"):
-        raise PixelfedError("This Pixelfed connection has already been completed.", permanent=True)
-    if extra.get("state") != state:
+    if pending.get("state") != state:
         raise PixelfedError("OAuth state mismatch — possible CSRF, please retry.", permanent=True)
 
-    client_id = extra["client_id"]
-    client_secret = decrypt_token(extra["client_secret"])
-    redirect_uri = extra["redirect_uri"]
-    instance_url = row.instance_url or ""
+    client_id = pending["client_id"]
+    client_secret = decrypt_token(pending["client_secret"])
+    redirect_uri = pending["redirect_uri"]
+    # Pre-0033 pending rows kept the instance on the row itself.
+    instance_url = pending.get("instance_url") or row.instance_url or ""
 
     with _client(instance_url) as c:
         r = c.post(
@@ -194,14 +181,13 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
         raise PixelfedError(f"verify_credentials failed (HTTP {r.status_code}): {r.text[:200]}")
     account = r.json()
 
+    # Same row, same id: whatever this account already published stays attached to it.
     row.access_token = encrypt_token(access_token)
-    # A freshly stored token means the channel is authorised again — drop any
-    # "needs reconnecting" flag so the health banner clears immediately rather
-    # than waiting for the next scheduled post to prove it.
-    row.auth_status, row.auth_error, row.auth_flagged_at = "ok", None, None
-    row.account_name = account.get("acct") or account.get("username") or ""
+    row.instance_url = instance_url
+    row.key_version = KEY_VERSION
+    credentials.mark_connected(
+        row, account_name=account.get("acct") or account.get("username") or "")
     row.last_success_at = datetime.now(timezone.utc)
-    row.last_error = None
     row.extra_json = json.dumps({
         "client_id": client_id,
         "client_secret": encrypt_token(client_secret),
@@ -217,14 +203,8 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
 
 
 def disconnect(db: Session) -> bool:
-    row = db.execute(
-        select(PlatformCredential).where(PlatformCredential.platform == PLATFORM)
-    ).scalar_one_or_none()
-    if not row:
-        return False
-    db.delete(row)
-    db.commit()
-    return True
+    return credentials.disconnect(
+        db, PLATFORM, keep_extra=("account_id", "display_name", "url"))
 
 
 def current_status(db: Session) -> dict[str, Any]:
@@ -236,7 +216,7 @@ def current_status(db: Session) -> dict[str, Any]:
     extra = json.loads(row.extra_json or "{}")
     return {
         "connected": bool(row.access_token),
-        "pending": bool(extra.get("pending")),
+        "pending": credentials.pending_oauth(row) is not None,
         "account": row.account_name,
         "instance_url": row.instance_url,
         "profile_url": extra.get("url"),

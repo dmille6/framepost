@@ -295,8 +295,12 @@ class PlatformCredential(Base):
 class PostPlatform(Base):
     __tablename__ = "post_platforms"
     post_id = Column(String, ForeignKey("posts.id", ondelete="CASCADE"), primary_key=True)
+    # RESTRICT, not CASCADE (0033). These rows are the record of what was published —
+    # remote ids, permalinks, pending retries — and a credential is only ever the key
+    # used to publish them. CASCADE meant every reconnect (delete + reinsert) wiped the
+    # platform's history; now a delete that would orphan history is refused outright.
     platform_id = Column(
-        String, ForeignKey("platform_credentials.id", ondelete="CASCADE"), primary_key=True
+        String, ForeignKey("platform_credentials.id", ondelete="RESTRICT"), primary_key=True
     )
     status = Column(String, nullable=False, server_default="pending")
     remote_id = Column(Text)
