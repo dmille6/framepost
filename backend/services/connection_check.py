@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -48,12 +49,27 @@ RECHECK_AFTER = timedelta(hours=1)
 STATE_KEY = "connection_check_state"
 
 
+# Meta error codes (Graph API error handling reference). Only these two mean the grant
+# itself is gone: 190 "Invalid OAuth 2.0 access token" (all its subcodes — expired,
+# password changed, app removed, session invalidated) and 102 "API session". Codes 4,
+# 17, 32 and 613 are rate limits, and many other codes arrive typed OAuthException
+# without saying anything about the token, so neither the type nor a bare 401/403 is
+# evidence on its own.
+IG_REAUTH_CODES = frozenset({190, 102})
+IG_RATE_LIMIT_CODES = frozenset({4, 17, 32, 613})
+
+
 class CheckFailed(Exception):
     """A verification call got an answer, and the answer was no."""
 
-    def __init__(self, message: str, *, http_status: int | None = None):
+    def __init__(self, message: str, *, http_status: int | None = None,
+                 code: int | None = None, subcode: int | None = None,
+                 error_type: str | None = None):
         super().__init__(message)
         self.http_status = http_status
+        self.code = code
+        self.subcode = subcode
+        self.error_type = error_type
 
 
 def _now() -> datetime:
@@ -61,9 +77,19 @@ def _now() -> datetime:
 
 
 def _raise_for(platform: str, r) -> None:
-    if r.status_code >= 400:
-        raise CheckFailed(f"{platform} check HTTP {r.status_code}: {r.text[:300]}",
-                          http_status=r.status_code)
+    if r.status_code < 400:
+        return
+    code = subcode = error_type = None
+    try:
+        err = r.json().get("error")
+        if isinstance(err, dict):   # Meta's shape; other platforms answer differently
+            code, subcode, error_type = err.get("code"), err.get("error_subcode"), err.get("type")
+            code = int(code) if code is not None else None
+    except Exception:  # noqa: BLE001 — an unparseable body just means "no code"
+        pass
+    raise CheckFailed(f"{platform} check HTTP {r.status_code}: {r.text[:300]}",
+                      http_status=r.status_code, code=code, subcode=subcode,
+                      error_type=error_type)
 
 
 # --- the cheapest authenticated call per platform ------------------------------------
@@ -117,10 +143,17 @@ VERIFIERS: dict[str, Callable[[Session, PlatformCredential], None]] = {
 def is_reauth(platform: str, err: BaseException) -> tuple[bool, str]:
     """Does this failure mean the grant is gone (True), or only that the call failed?
 
-    Transport errors, 429 and 5xx are never reauth, whatever their text says: a
-    connection reset is not evidence about a token. After that, a 401/403 is, and the
-    shared publish_errors rules get a say on the rest (Flickr answers 200 with "error 98",
-    Instagram 400 with code 190).
+    Deliberately stingy with True — a false "reconnect" banner trains the user to ignore
+    the real one:
+
+      * transport errors, 429 and 5xx are never reauth, whatever their text says;
+      * Instagram: only error.code 190 or 102 is reauth. Rate-limit codes, other
+        OAuthException-typed errors and code-less 401/403s are transient;
+      * other platforms' own HTTP answers: 401 is reauth; a 403 is ambiguous
+        (suspended, blocked, scope, rate-limited) and transient;
+      * adapter exceptions (Flickr's "error 98", Bluesky refusing the stored app
+        password, Pinterest with no refresh token) go through publish_errors, whose
+        rules match the adapters' own messages rather than arbitrary response bodies.
     """
     cause = err.__cause__ or err.__context__
     if isinstance(err, httpx.TransportError) or isinstance(cause, httpx.TransportError):
@@ -128,11 +161,27 @@ def is_reauth(platform: str, err: BaseException) -> tuple[bool, str]:
     status = getattr(err, "http_status", None)
     if status is not None and (status >= 500 or status == 429):
         return False, f"{platform.title()} returned HTTP {status} during the connection check."
+
+    if isinstance(err, CheckFailed):
+        if platform == "instagram":
+            if err.code in IG_REAUTH_CODES:
+                return True, ("Instagram needs reconnecting — the access token is no "
+                              "longer valid.")
+            kind = "rate limit" if err.code in IG_RATE_LIMIT_CODES else "error"
+            return False, (f"Instagram connection check hit a {kind} (code {err.code}, "
+                           f"{err.error_type or 'no type'}, HTTP {status}).")
+        if status == 401:
+            return True, f"{platform.title()} needs reconnecting — it refused the saved login."
+        return False, f"{platform.title()} connection check failed with HTTP {status}."
+
+    # Adapter messages embed the status ("refresh failed (HTTP 503): <body>"), and the
+    # body can say anything — "expired", "scope" — so a 5xx/429 is settled before the
+    # text rules get a look at it.
+    if re.search(r"\bHTTP (5\d\d|429)\b", str(err)):
+        return False, f"{platform.title()} connection check failed: {str(err)[:200]}"
     failure = publish_errors.classify(platform, err)
     if failure.requires_reauth:
         return True, failure.user_message
-    if status in (401, 403):
-        return True, f"{platform.title()} needs reconnecting — it refused the saved login."
     # An adapter that says "permanent" on a read-only identity call is refusing the
     # grant (e.g. Bluesky rejecting the stored app password) — unless it also looked
     # like a transient failure above.

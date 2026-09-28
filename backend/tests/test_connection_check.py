@@ -87,7 +87,7 @@ def test_a_revoked_token_flags_reauth_and_alerts_once_a_day(db, calls):
     post = _post(db, targets=["instagram"])
     behaviour["instagram"] = cc.CheckFailed(
         'instagram check HTTP 400: {"error": {"message": "Error validating access token", '
-        '"code": 190}}', http_status=400)
+        '"code": 190}}', http_status=400, code=190, error_type="OAuthException")
 
     assert cc.run(db, now=NOW) == {"instagram": "reauth"}
     db.refresh(cred)
@@ -192,3 +192,63 @@ def test_instagram_verifier_uses_get_me(db, monkeypatch):
         cc._verify_instagram(db, cred)
     assert seen == ["/me"] and ei.value.http_status == 400
     assert cc.is_reauth("instagram", ei.value)[0] is True
+
+
+# --- reading Meta's error codes, not its prose ---------------------------------------
+
+def _ig(status, code, etype="OAuthException", subcode=None):
+    return cc.CheckFailed(f"instagram check HTTP {status}: permission denied, expired?",
+                          http_status=status, code=code, subcode=subcode, error_type=etype)
+
+
+@pytest.mark.parametrize("err,reauth", [
+    (_ig(400, 190), True),
+    (_ig(400, 190, subcode=460), True),          # password changed
+    (_ig(400, 102), True),                       # API session
+    (_ig(400, 4), False),                        # app rate limit
+    (_ig(400, 17), False),                       # user rate limit
+    (_ig(400, 32), False),                       # page rate limit
+    (_ig(400, 613), False),                      # custom rate limit
+    (_ig(400, 10), False),                       # OAuthException, not about the token
+    (_ig(403, None, etype=None), False),         # bare 403 with no code
+    (_ig(401, None, etype=None), False),         # bare 401 with no code
+])
+def test_instagram_reauth_is_decided_by_error_code(err, reauth):
+    assert cc.is_reauth("instagram", err)[0] is reauth
+
+
+@pytest.mark.parametrize("platform,status,reauth", [
+    ("pixelfed", 401, True), ("pixelfed", 403, False),
+    ("pinterest", 401, True), ("pinterest", 403, False),
+    ("bluesky", 401, True), ("bluesky", 400, False),
+])
+def test_other_platforms_only_treat_401_as_reauth(platform, status, reauth):
+    err = cc.CheckFailed(f"{platform} check HTTP {status}: token scope expired",
+                         http_status=status)
+    assert cc.is_reauth(platform, err)[0] is reauth
+
+
+def test_an_adapter_5xx_mentioning_expiry_is_not_reauth():
+    from services.platforms import pinterest
+    err = pinterest.PinterestError(
+        "Pinterest token refresh failed (HTTP 503): token expired? upstream", permanent=False)
+    assert cc.is_reauth("pinterest", err)[0] is False
+
+
+def test_the_verifier_parses_metas_error_code(db, monkeypatch):
+    from services.platforms import instagram
+
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, path, params=None):
+            return httpx.Response(400, json={"error": {
+                "message": "Application request limit reached", "type": "OAuthException",
+                "code": 4}})
+
+    monkeypatch.setattr(instagram, "_client", lambda: Client())
+    monkeypatch.setattr(cc, "decrypt_token", lambda t: t)
+    with pytest.raises(cc.CheckFailed) as ei:
+        cc._verify_instagram(db, _cred(db, "instagram"))
+    assert (ei.value.code, ei.value.error_type) == (4, "OAuthException")
+    assert cc.is_reauth("instagram", ei.value)[0] is False
