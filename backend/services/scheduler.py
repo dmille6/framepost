@@ -1609,6 +1609,74 @@ def retry_due_platform_posts() -> None:
         db.close()
 
 
+# How long a fired post's platform row may sit 'pending' with no retry time before the
+# sweep decides the attempt that owned it died. Far longer than any live attempt (a reel
+# transcode polls for eight minutes; a photo publish is seconds), so the sweep never
+# races a publish still in flight.
+STRANDED_AFTER = timedelta(minutes=30)
+
+
+def requeue_stranded(db, *, now: datetime | None = None) -> int:
+    """Give a retry time to platform rows a crash left 'pending' with none.
+
+    retry_due_platform_posts only picks up rows with next_retry_at set, and the failure
+    recorder is what sets it — so an attempt killed mid-publish (deploy, OOM, restart)
+    after it created the row (staging, the container checkpoint) but before it recorded
+    anything leaves the row pending forever, invisible to every retry.
+
+    Deliberately narrow:
+      * the post has fired (posted/late/failed — fanout has run), and not recently;
+      * the row is pending, has no retry time, and carries no sign of a publish
+        (no remote_id, no posted_at). A carousel member is never pending, and is
+        skipped regardless;
+      * it is only handed to the normal retry path, which for Instagram asks Meta about
+        the checkpointed container before doing anything — the part that makes a
+        crashed publish safe to retry rather than a second copy waiting to happen.
+    """
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    rows = db.execute(
+        select(PostPlatform, Post, PlatformCredential)
+        .join(Post, Post.id == PostPlatform.post_id)
+        .join(PlatformCredential, PlatformCredential.id == PostPlatform.platform_id)
+        .where(
+            PostPlatform.status == "pending",
+            PostPlatform.next_retry_at.is_(None),
+            PostPlatform.remote_id.is_(None),
+            PostPlatform.posted_at.is_(None),
+            Post.status.in_(("posted", "late", "failed")),
+            Post.updated_at <= now - STRANDED_AFTER,
+        )
+    ).all()
+    requeued = 0
+    for pp, post, cred in rows:
+        if carousel_svc.is_member(post):
+            continue
+        pp.next_retry_at = now
+        events.log_event(
+            db, post_id=post.id, event_type=f"{cred.platform}_requeued", actor="worker",
+            details={"reason": "left pending with no retry time — the attempt that owned "
+                               "it did not finish",
+                     "container_checkpoint": bool(pp.ig_container)},
+        )
+        log.warning("post %s: %s row stranded pending with no retry time — requeued%s",
+                    post.id[:8], cred.platform,
+                    " (will check its checkpointed container first)" if pp.ig_container else "")
+        requeued += 1
+    db.commit()
+    return requeued
+
+
+def requeue_stranded_platform_rows() -> None:
+    db = SessionLocal()
+    try:
+        requeue_stranded(db)
+    except Exception:  # noqa: BLE001
+        log.exception("stranded-row sweep failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def submit_due_groups() -> None:
     """Process pending group submissions for posts that have already landed on Flickr.
 
@@ -1927,6 +1995,8 @@ def main() -> int:
     scheduler.add_job(fire_due_posts, "interval", minutes=1, id="fire_due_posts")
     scheduler.add_job(submit_due_groups, "interval", minutes=1, id="submit_due_groups")
     scheduler.add_job(retry_due_platform_posts, "interval", minutes=1, id="retry_platform_posts")
+    scheduler.add_job(requeue_stranded_platform_rows, "interval", minutes=15,
+                      id="requeue_stranded_platform_rows")
     # Every 5 minutes, not every 1: a reel publish can occupy the worker for minutes
     # while Meta transcodes, and there is no value in queueing up passes behind it.
     scheduler.add_job(publish_due_reels, "interval", minutes=5, id="publish_due_reels")
