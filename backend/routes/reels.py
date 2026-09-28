@@ -339,14 +339,16 @@ def update_reel(
         # the two wins. Refused while a publish holds the claim, while a container
         # exists (a publish may be in flight or already live), and once posted — at each
         # of those points the kind is a fact about Instagram, which analytics rely on.
-        # A claim older than CLAIM_STALE_AFTER belongs to a worker that died; it is
-        # cleared here rather than blocking the reel forever.
+        # A claim not renewed for CLAIM_STALE_AFTER belongs to a worker that died; it
+        # is cleared here (token too) rather than blocking the reel forever — and if
+        # that worker is somehow alive, its next guarded write finds the claim gone.
         stale = reel_publish.claim_cutoff()
         won = db.execute(
             update(Reel)
             .where(Reel.id == reel_id, Reel.posted_at.is_(None), Reel.ig_container.is_(None),
                    or_(Reel.publish_claimed_at.is_(None), Reel.publish_claimed_at < stale))
-            .values(trial_graduation=body.trial_graduation, publish_claimed_at=None)
+            .values(trial_graduation=body.trial_graduation,
+                    publish_claimed_at=None, publish_claim_token=None)
             .execution_options(synchronize_session=False)
         ).rowcount
         if not won:

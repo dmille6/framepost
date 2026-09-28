@@ -17,6 +17,8 @@ the next pass; the worker must not die because Meta was slow.
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,10 +40,14 @@ STAGE_EXPIRY = r2.DEFAULT_EXPIRY
 # and a permanently broken one retried forever is how a worker queue fills with noise.
 MAX_ATTEMPTS = 4
 
-# A publish claim older than this belongs to a worker that died mid-attempt (a crash or
-# deploy runs no cleanup). Far longer than any live attempt: a transcode polls for 8
-# minutes, and a resumed container can wait that long again before publishing.
-CLAIM_STALE_AFTER = timedelta(minutes=30)
+# A claim not renewed for this long belongs to a worker that died mid-attempt (a crash
+# or deploy runs no cleanup). A live attempt renews it every CLAIM_RENEW_EVERY while it
+# waits on Meta -- each container-status poll, each container-creation try -- so the
+# longest silence is one HTTP call (60s timeout) plus a sleep, whatever Meta's pace.
+# Measured against renewal, not against an attempt's total length, which HTTP time can
+# stretch far past the poll budget.
+CLAIM_STALE_AFTER = timedelta(minutes=10)
+CLAIM_RENEW_EVERY = 60.0  # seconds
 
 
 class ReelPublishError(Exception):
@@ -56,6 +62,12 @@ class ReelBusy(ReelPublishError):
     """Another attempt holds the claim. Not a failure of this reel: no attempt is spent."""
 
 
+class ClaimLost(ReelBusy):
+    """This attempt's claim was taken over (it went quiet long enough to look dead).
+    Raised before any further write or media_publish; the checkpoint, if one was saved,
+    makes the next attempt safe."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -65,33 +77,74 @@ def claim_cutoff(now: datetime | None = None) -> datetime:
     return (now or _utcnow()) - CLAIM_STALE_AFTER
 
 
-def claim(db: Session, reel_id: str, *, now: datetime | None = None) -> bool:
-    """Take the reel for one publish attempt. True if this caller won.
+class Claim:
+    """This attempt's hold on a reel: its token, and the guarded way to commit.
+
+    Every write the attempt makes goes through commit(): one UPDATE that renews the
+    claim WHERE token = mine, in the same transaction as the attempt's own changes. If
+    the claim has been taken over the UPDATE matches nothing, the transaction is rolled
+    back and ClaimLost is raised -- so a worker that lost its claim can neither record
+    anything nor go on to publish. SQLite serialises writers, so nothing can take the
+    claim between that check and the commit.
+    """
+
+    def __init__(self, db: Session, reel_id: str, token: str):
+        self.db, self.reel_id, self.token = db, reel_id, token
+        self._renewed = time.monotonic()
+
+    def __bool__(self) -> bool:
+        return True
+
+    def commit(self) -> None:
+        mine = self.db.execute(
+            update(Reel).where(Reel.id == self.reel_id, Reel.publish_claim_token == self.token)
+            .values(publish_claimed_at=_utcnow())
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        if not mine:
+            self.db.rollback()
+            raise ClaimLost(f"reel {self.reel_id[:8]}: publish claim was taken over — stopping")
+        self.db.commit()
+        self._renewed = time.monotonic()
+
+    def heartbeat(self, force: bool = False) -> None:
+        """Renew during long waits (post_reel calls it from its poll loops); force=True
+        right before media_publish, which must never go out under a lost claim."""
+        if force or time.monotonic() - self._renewed >= CLAIM_RENEW_EVERY:
+            self.commit()
+
+    def release(self) -> None:
+        """End the claim, if it is still this attempt's. The attempt is over; if a
+        container is still checkpointed (outcome unknown), ig_container keeps the trial
+        kind frozen on its own."""
+        self.db.execute(
+            update(Reel).where(Reel.id == self.reel_id, Reel.publish_claim_token == self.token)
+            .values(publish_claimed_at=None, publish_claim_token=None)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.commit()
+
+
+def claim(db: Session, reel_id: str, *, now: datetime | None = None) -> Claim | None:
+    """Take the reel for one publish attempt. The Claim if this caller won, else None.
 
     A conditional UPDATE, committed at once: SQLite serialises writers, so of a worker
     and a PATCH changing the trial kind (routes/reels.update_reel, its own conditional
     UPDATE) exactly one wins, with no window between checking and writing. A stale
-    claim — a worker that died — is simply taken over.
+    claim — not renewed for CLAIM_STALE_AFTER — is taken over.
     """
     now = now or _utcnow()
+    token = uuid.uuid4().hex
     won = db.execute(
         update(Reel)
         .where(Reel.id == reel_id, Reel.posted_at.is_(None),
                or_(Reel.publish_claimed_at.is_(None),
                    Reel.publish_claimed_at < claim_cutoff(now)))
-        .values(publish_claimed_at=now)
+        .values(publish_claimed_at=now, publish_claim_token=token)
         .execution_options(synchronize_session=False)
     ).rowcount
     db.commit()
-    return bool(won)
-
-
-def release(db: Session, reel_id: str) -> None:
-    """End the claim. The attempt is over; if a container is still checkpointed (the
-    outcome is unknown), ig_container keeps the trial kind frozen on its own."""
-    db.execute(update(Reel).where(Reel.id == reel_id).values(publish_claimed_at=None)
-               .execution_options(synchronize_session=False))
-    db.commit()
+    return Claim(db, reel_id, token) if won else None
 
 
 def due_reels(db: Session, *, now: datetime | None = None) -> list[Reel]:
@@ -209,25 +262,27 @@ def publish(db: Session, reel: Reel) -> dict:
     The claim covers the whole attempt, including the window before the first
     checkpoint is saved, in which nothing else would stop the trial kind changing.
     """
-    if not claim(db, reel.id):
+    held = claim(db, reel.id)
+    if not held:
         raise ReelBusy(f"reel {reel.id[:8]} is already being published")
     # Re-read after winning: a PATCH that committed before the claim must be what is
     # published, not the row as it was when this pass listed its due reels.
     db.refresh(reel)
     try:
-        result = _publish_claimed(db, reel)
+        result = _publish_claimed(db, reel, held)
     except ReelPublishError:
-        release(db, reel.id)
+        held.release()
         db.refresh(reel)
         raise
     except Exception:
         db.rollback()
-        release(db, reel.id)
+        held.release()
         raise
+    held.release()
     return result
 
 
-def _publish_claimed(db: Session, reel: Reel) -> dict:
+def _publish_claimed(db: Session, reel: Reel, held: Claim) -> dict:
     reel.publish_attempts = (reel.publish_attempts or 0) + 1
     # Read once. Whatever the row says by the time Meta answers, this is what was asked
     # for — and the PATCH that could change it is refused while a container exists.
@@ -237,14 +292,21 @@ def _publish_claimed(db: Session, reel: Reel) -> dict:
     if checkpoint is None:
         # Nothing to resume, so this attempt will certainly need the MP4 — stage now,
         # and let a missing file or unconfigured R2 fail before Meta is involved.
-        key, staged_url = stage(reel)
+        try:
+            key, staged_url = stage(reel)
+        except ReelPublishError as e:
+            reel.publish_error = str(e)
+            if e.permanent:
+                reel.publish_attempts = MAX_ATTEMPTS
+            held.commit()
+            raise
         reel.staged_key = key
-    db.commit()
+    held.commit()
 
     def restage() -> str:
         key, url = stage(reel)
         reel.staged_key = key
-        db.commit()
+        held.commit()
         return url
 
     def video_url() -> str:
@@ -263,7 +325,7 @@ def _publish_claimed(db: Session, reel: Reel) -> dict:
 
     def save(cp) -> None:
         reel.ig_container = cp.to_json() if cp else None
-        db.commit()
+        held.commit()
 
     try:
         result = ig.post_reel(
@@ -277,6 +339,7 @@ def _publish_claimed(db: Session, reel: Reel) -> dict:
             checkpoint=checkpoint,
             on_checkpoint=save,
             media_identity=_media_identity(reel),
+            heartbeat=held.heartbeat,
         )
     except ig.InstagramError as e:
         reel.publish_error = str(e)
@@ -297,13 +360,15 @@ def _publish_claimed(db: Session, reel: Reel) -> dict:
                                  "graduation": trial,
                                  "error": str(e),
                              })
-        db.commit()
+        if e.permanent:
+            # Stop it being picked up again; recorded under the claim like the rest.
+            reel.publish_attempts = MAX_ATTEMPTS
+        held.commit()
         raise ReelPublishError(str(e), permanent=getattr(e, "permanent", False)) from e
 
     # What actually went out: the checkpoint's kind when Meta's container carried one
     # (a recovered publish reports it), else what this attempt asked for.
     reel.trial_graduation = result["trial_graduation"] if "trial_graduation" in result else trial
-    reel.publish_claimed_at = None
     # The frames follow what actually went out, which after a recovery can differ from
     # what was asked for. Posted frames are never touched (see reel_frames).
     reel_frames.sync_frame_instagram(db, reel)
@@ -317,7 +382,9 @@ def _publish_claimed(db: Session, reel: Reel) -> dict:
         log.warning("reel %s: an earlier attempt had already published it (%s) — "
                     "not published again", reel.id[:8], reel.remote_id)
     unstage(reel)
-    db.commit()
+    # If the claim was lost, a later attempt resumes the checkpoint, finds the container
+    # PUBLISHED, and records it — so losing this record costs nothing but a moment.
+    held.commit()
     log.info("reel %s published as %s", reel.id[:8], reel.remote_id)
     return result
 
@@ -336,11 +403,9 @@ def run_due(db: Session, *, now: datetime | None = None) -> int:
         except ReelBusy as e:
             log.info("%s — skipping", e)
         except ReelPublishError as e:
+            # Recorded (message, and attempts spent if permanent) under the claim; this
+            # loop writes nothing, because it no longer holds one.
             log.warning("reel %s not published: %s", reel.id[:8], e)
-            if e.permanent:
-                # Stop it being picked up again; the message is already on the row.
-                reel.publish_attempts = MAX_ATTEMPTS
-            db.commit()
         except Exception:  # noqa: BLE001 — a worker pass must survive one bad reel
             log.exception("reel %s: unexpected failure", reel.id[:8])
             db.rollback()

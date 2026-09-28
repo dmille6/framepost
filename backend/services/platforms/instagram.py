@@ -94,6 +94,15 @@ MAX_CAROUSEL = 10
 # not at all when an attempt resumes a checkpointed container Meta already ingested.
 MediaURL = Union[str, Callable[[], str]]
 
+# Called while a publish waits on Meta, so the caller can renew whatever it holds on the
+# work (reel_publish's claim). force=True comes right before media_publish. It may raise
+# to stop the attempt; it is never called where an exception would be read as Meta's.
+Heartbeat = Callable[..., None]
+
+
+def _no_heartbeat(force: bool = False) -> None:
+    return None
+
 
 def _resolve(url: MediaURL) -> str:
     return url() if callable(url) else url
@@ -517,7 +526,8 @@ def _is_fetch_failure(text: str) -> bool:
 
 
 def _create_container(
-    ig_user_id: str, data: dict, collaborators: list[str], *, fetch_attempts: int = 3
+    ig_user_id: str, data: dict, collaborators: list[str], *, fetch_attempts: int = 3,
+    heartbeat: Heartbeat = _no_heartbeat,
 ) -> tuple[str, list[str], list[str]]:
     """Create the media container, degrading gracefully on bad collaborators.
 
@@ -542,6 +552,7 @@ def _create_container(
         # image_url (bites freshly-uploaded staging variants). Transient despite the
         # 400 — retry in-line before handing off to the retry queue.
         for fetch_attempt in range(fetch_attempts):
+            heartbeat()
             with _client() as c:
                 r = c.post(f"/{ig_user_id}/media", data=body)
             if r.status_code < 400:
@@ -662,6 +673,7 @@ def post_reel(
     checkpoint: ContainerCheckpoint | None = None,
     on_checkpoint: Checkpoint | None = None,
     media_identity: str | None = None,
+    heartbeat: Heartbeat | None = None,
 ) -> dict:
     """Publish a reel from a publicly fetchable MP4. Returns {remote_id, url, ...}.
 
@@ -720,7 +732,8 @@ def post_reel(
         else:
             data["share_to_feed"] = "true" if share_to_feed else "false"
         try:
-            container_id, used, rejected = _create_container(ig_user_id, data, wanted)
+            container_id, used, rejected = _create_container(
+                ig_user_id, data, wanted, heartbeat=heartbeat or _no_heartbeat)
         except InstagramError as e:
             # Meta documents no error for an account without Trial Reels, so a refusal
             # that doesn't name the trial may still be about it. Classification stays
@@ -752,6 +765,7 @@ def post_reel(
             tries=REEL_POLL_TRIES, interval=REEL_POLL_INTERVAL,
             fingerprint=content_fingerprint(caption_text, wanted, identity),
             trial_graduation=trial_graduation,
+            heartbeat=heartbeat,
         )
     except PublishUnconfirmed:
         raise
@@ -898,6 +912,7 @@ def _publish_resumable(
     interval: float = STATUS_POLL_INTERVAL,
     fingerprint: str | None = None,
     trial_graduation: str | None = None,
+    heartbeat: Heartbeat | None = None,
 ) -> dict:
     """Publish via a container, resuming the checkpointed one when there is one.
 
@@ -919,12 +934,13 @@ def _publish_resumable(
     next attempt with neither a record nor a checkpoint, which is how duplicates happen.
     """
     save = on_checkpoint or (lambda _cp: None)
+    beat = heartbeat or _no_heartbeat
     cp = checkpoint
     if cp is not None:
         resumed = _resume_checkpoint(
             db, ig_user_id, token, cp, save=save, describing=describing, caption=caption,
             media_types=media_types, tries=tries, interval=interval, fingerprint=fingerprint,
-            trial_graduation=trial_graduation,
+            trial_graduation=trial_graduation, heartbeat=beat,
         )
         if resumed is not None:
             return resumed
@@ -936,15 +952,16 @@ def _publish_resumable(
                              fingerprint=fingerprint, caption=caption,
                              trial_graduation=trial_graduation)
     save(cp)
-    _await_container(container_id, token, describing=describing, tries=tries, interval=interval)
-    return _publish_checkpointed(ig_user_id, token, cp, save=save)
+    _await_container(container_id, token, describing=describing, tries=tries, interval=interval,
+                     heartbeat=beat)
+    return _publish_checkpointed(ig_user_id, token, cp, save=save, heartbeat=beat)
 
 
 def _resume_checkpoint(
     db: Session, ig_user_id: str, token: str, cp: ContainerCheckpoint, *, save: Checkpoint,
     describing: str, caption: str, media_types: tuple[str, ...],
     tries: int, interval: float, fingerprint: str | None = None,
-    trial_graduation: str | None = None,
+    trial_graduation: str | None = None, heartbeat: Heartbeat = _no_heartbeat,
 ) -> dict | None:
     """Act on a checkpoint. Returns the publish result, or None to build a fresh one."""
     # Built as a different kind of reel than is now wanted. The fingerprint catches this
@@ -990,11 +1007,11 @@ def _resume_checkpoint(
         if not fresh:
             return None
         if status == "FINISHED":
-            return _publish_checkpointed(ig_user_id, token, cp, save=save)
+            return _publish_checkpointed(ig_user_id, token, cp, save=save, heartbeat=heartbeat)
         if status == "IN_PROGRESS":
             _await_container(cp.container_id, token, describing=f"resumed {describing}",
-                             tries=tries, interval=interval)
-            return _publish_checkpointed(ig_user_id, token, cp, save=save)
+                             tries=tries, interval=interval, heartbeat=heartbeat)
+            return _publish_checkpointed(ig_user_id, token, cp, save=save, heartbeat=heartbeat)
         log.info("instagram: discarding container %s (status %r)", cp.container_id, status)
         return None
 
@@ -1043,8 +1060,8 @@ def _resume_checkpoint(
             return None
         if status == "IN_PROGRESS":
             _await_container(cp.container_id, token, describing=f"resumed {describing}",
-                             tries=tries, interval=interval)
-        return _publish_checkpointed(ig_user_id, token, cp, save=save)
+                             tries=tries, interval=interval, heartbeat=heartbeat)
+        return _publish_checkpointed(ig_user_id, token, cp, save=save, heartbeat=heartbeat)
 
     # ERROR, EXPIRED, unknown, or gone — after a publish was sent. Meta can't say what
     # happened, so only a unique match settles it. A negative search is not proof: the
@@ -1061,8 +1078,12 @@ def _resume_checkpoint(
 
 def _publish_checkpointed(
     ig_user_id: str, token: str, cp: ContainerCheckpoint, *, save: Checkpoint,
+    heartbeat: Heartbeat = _no_heartbeat,
 ) -> dict:
     """media_publish, with the "sent" mark made durable before the request goes out."""
+    # Last chance to stop: whoever this attempt answers to must still want it published.
+    # Outside the try below, so a refusal here is never mistaken for an unconfirmed send.
+    heartbeat(force=True)
     cp.publish_sent_at = _utcnow()
     save(cp)
     try:
@@ -1241,11 +1262,13 @@ def _count_children(media_id: str, token: str) -> int | None:
 def _await_container(
     container_id: str, token: str, *, describing: str,
     tries: int = STATUS_POLL_TRIES, interval: float = STATUS_POLL_INTERVAL,
+    heartbeat: Heartbeat = _no_heartbeat,
 ) -> None:
     """Block until Meta says the container is ready. Image containers usually come back
     FINISHED on the first check; reels pass a much longer budget (see post_reel)."""
     status_code = None
     for _attempt in range(tries):
+        heartbeat()
         with _client() as c:
             r = c.get(f"/{container_id}", params={
                 "fields": "status_code",

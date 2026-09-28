@@ -267,7 +267,7 @@ def test_an_in_progress_reel_is_waited_on_not_recreated(db, meta, monkeypatch):
     meta.containers["c0"] = {"status": "IN_PROGRESS", "caption": "reel", "type": "VIDEO"}
     polls = []
 
-    def fake_await(cid, token, *, describing, tries=0, interval=0):
+    def fake_await(cid, token, *, describing, tries=0, interval=0, heartbeat=None):
         polls.append((cid, tries))
         meta.containers[cid]["status"] = "FINISHED"
     monkeypatch.setattr(ig, "_await_container", fake_await)

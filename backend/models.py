@@ -448,6 +448,11 @@ class Reel(Base):
     # attempt, cleared when the attempt ends. While set (and fresh), the trial kind
     # can't be changed — see reel_publish.claim and routes/reels.update_reel.
     publish_claimed_at = Column(DateTime)
+    # (0039) Who holds the claim: a random token per attempt. Release and every write the
+    # attempt makes require it, so a claim taken over as stale can't be cleared, or
+    # written through, by the worker that lost it. publish_claimed_at is then "last
+    # renewed at" — the attempt renews it while it waits on Meta.
+    publish_claim_token = Column(String)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp(), index=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 

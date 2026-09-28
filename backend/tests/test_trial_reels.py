@@ -868,3 +868,128 @@ def test_published_photos_claimed_as_drafts_are_not_managed(db):
     db.commit()
     _build_from_drafts(db, [p], trial_graduation=None)
     assert _ig(db, p) and p.target_platforms is None
+
+
+# --- third review round: claims are owned and renewed ---------------------------------
+
+from sqlalchemy import update as sa_update
+
+
+def _age_claim(session, reel_id, token="thief"):
+    """Another worker takes the claim over as stale (what a slow Meta used to allow)."""
+    session.execute(sa_update(Reel).where(Reel.id == reel_id)
+                    .values(publish_claim_token=token, publish_claimed_at=datetime.utcnow()))
+    session.commit()
+
+
+def test_a_stolen_claim_is_not_cleared_by_its_previous_owner(two, tmp_path):
+    worker, other = two
+    r = _db_reel(worker, tmp_path)
+    mine = reel_publish.claim(worker, r.id)
+    other.execute(sa_update(Reel).where(Reel.id == r.id).values(
+        publish_claimed_at=datetime.utcnow() - reel_publish.CLAIM_STALE_AFTER - timedelta(minutes=1)))
+    other.commit()
+    theirs = reel_publish.claim(other, r.id)
+    assert theirs, "a claim not renewed for CLAIM_STALE_AFTER is taken over"
+
+    mine.release()
+    row = _fresh(two, r.id)
+    assert row.publish_claim_token == theirs.token and row.publish_claimed_at is not None
+
+
+def test_a_worker_that_lost_its_claim_writes_nothing(two, tmp_path):
+    worker, other = two
+    r = _db_reel(worker, tmp_path)
+    mine = reel_publish.claim(worker, r.id)
+    _age_claim(other, r.id)
+    worker.refresh(r)
+    r.publish_error = "written by the loser"
+    with pytest.raises(reel_publish.ClaimLost):
+        mine.commit()
+    assert _fresh(two, r.id).publish_error is None
+
+
+def test_renewal_keeps_a_long_attempt_from_looking_dead(two, tmp_path):
+    worker, other = two
+    r = _db_reel(worker, tmp_path)
+    mine = reel_publish.claim(worker, r.id)
+    other.execute(sa_update(Reel).where(Reel.id == r.id).values(
+        publish_claimed_at=datetime.utcnow() - reel_publish.CLAIM_STALE_AFTER - timedelta(minutes=1)))
+    other.commit()
+    mine.heartbeat(force=True)                     # the attempt is alive and says so
+    assert not reel_publish.claim(other, r.id)
+
+
+def test_slow_meta_takeover_mid_poll_stops_before_publishing(
+        two, meta, r2_stub, tmp_path, monkeypatch):
+    """The reproduction: Meta is slow, the claim is taken over while this worker polls.
+    It must stop at its next renewal — before media_publish — and must not clear the
+    new owner's claim. The checkpoint it saved lets the next attempt finish, once."""
+    worker, other = two
+    monkeypatch.setattr(reel_publish, "CLAIM_RENEW_EVERY", 0.0)
+    r = _db_reel(worker, tmp_path)
+    polls = {"n": 0}
+    real_get = meta._get
+
+    def slow_get(path, params):
+        if params.get("fields") == "status_code" and polls["n"] == 0:
+            polls["n"] += 1
+            _age_claim(other, r.id)                        # taken over during the wait
+            return _Resp(200, {"status_code": "IN_PROGRESS"})
+        return real_get(path, params)
+    monkeypatch.setattr(meta, "_get", slow_get)
+
+    with pytest.raises(reel_publish.ClaimLost):
+        reel_publish.publish(worker, r)
+    assert meta.publishes == []
+    row = _fresh(two, r.id)
+    assert row.publish_claim_token == "thief", "the old owner didn't clear the new claim"
+    assert json.loads(row.ig_container)["id"] == "c1"
+    assert row.posted_at is None
+
+    # The thief dies; its claim goes stale; the next pass resumes the checkpoint.
+    other.execute(sa_update(Reel).where(Reel.id == r.id).values(
+        publish_claimed_at=datetime.utcnow() - reel_publish.CLAIM_STALE_AFTER - timedelta(minutes=1)))
+    other.commit()
+    monkeypatch.setattr(meta, "_get", real_get)
+    assert reel_publish.run_due(other) == 1
+    assert meta.publishes == ["c1"] and len(meta.creates) == 1
+    assert _fresh(two, r.id).posted_at is not None
+
+
+def test_a_claim_lost_after_the_container_is_ready_never_reaches_media_publish(
+        two, meta, r2_stub, tmp_path, monkeypatch):
+    """Renewal is throttled while polling. What stops it here is the guarded save of the
+    "publish sent" mark, which must commit before media_publish goes out; a forced
+    renewal in _publish_checkpointed backs that up for callers whose save isn't guarded."""
+    worker, other = two
+    r = _db_reel(worker, tmp_path)
+    real_get = meta._get
+
+    def get(path, params):
+        out = real_get(path, params)
+        if params.get("fields") == "status_code":
+            _age_claim(other, r.id)                        # lost as it finishes
+        return out
+    monkeypatch.setattr(meta, "_get", get)
+
+    with pytest.raises(reel_publish.ClaimLost):
+        reel_publish.publish(worker, r)
+    assert meta.publishes == []
+    assert _fresh(two, r.id).publish_claim_token == "thief"
+
+
+def test_a_lost_claim_spends_no_attempt_in_the_worker_loop(two, meta, r2_stub, tmp_path, monkeypatch):
+    worker, other = two
+    r = _db_reel(worker, tmp_path)
+    real_get = meta._get
+
+    def get(path, params):
+        out = real_get(path, params)
+        if params.get("fields") == "status_code":
+            _age_claim(other, r.id)
+        return out
+    monkeypatch.setattr(meta, "_get", get)
+    assert reel_publish.run_due(worker) == 0
+    row = _fresh(two, r.id)
+    assert row.publish_attempts == 1 and row.publish_error is None
