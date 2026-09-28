@@ -26,9 +26,8 @@ def _transport(monkeypatch, handler):
         seen.append(request)
         return handler(request)
 
-    monkeypatch.setattr(media_probe, "_client", lambda: httpx.Client(
-        transport=httpx.MockTransport(record),
-        headers={"User-Agent": media_probe.PROBE_USER_AGENT}, follow_redirects=True))
+    monkeypatch.setattr(media_probe, "_client", lambda: media_probe.http_client.client(
+        transport=httpx.MockTransport(record), follow_redirects=True))
     return seen
 
 
@@ -39,21 +38,28 @@ def _image(status=206, ctype="image/jpeg"):
 
 # --- the probe itself ----------------------------------------------------------------
 
-def test_a_ranged_get_with_metas_user_agent(monkeypatch):
+def test_a_ranged_get_with_our_own_user_agent(monkeypatch):
     seen = _transport(monkeypatch, _image())
     assert media_probe.probe("https://r2.test/a.jpg?X-Amz-Signature=s").ok
     req = seen[0]
     assert req.method == "GET"                    # presigned GET URLs 403 a HEAD
     assert req.headers["range"] == "bytes=0-0"
-    assert req.headers["user-agent"].startswith("facebookexternalhit")
+    # Not an imitation of Meta's fetcher: that invites the bot rules we must not trip.
+    assert req.headers["user-agent"] == media_probe.http_client.USER_AGENT
 
 
 @pytest.mark.parametrize("status,ctype,ok", [
     (200, "image/jpeg", True),           # host ignored Range: still fine
     (206, "video/mp4", False),           # wrong kind for an image
     (200, "text/html; charset=utf-8", False),   # a proxy's error page with a 200
-    (403, "application/xml", False),     # expired presign / S3 error document
     (404, "image/jpeg", False),
+    (410, None, False),
+    (500, "text/html", False),
+    (503, None, False),
+    # Advisory: may be about this box (bot rules, rate limits), not about Meta.
+    (401, None, True),
+    (403, "application/xml", True),
+    (429, "text/plain", True),
     (200, None, True),                   # no content-type: let Meta judge
     (200, "binary/octet-stream", True),
 ])
@@ -66,10 +72,18 @@ def test_a_get_refused_as_a_method_falls_back_to_head(monkeypatch):
     def handler(req):
         if req.method == "GET":
             return httpx.Response(405)
-        return httpx.Response(200, headers={"content-type": "image/jpeg"})
+        return httpx.Response(404)
     seen = _transport(monkeypatch, handler)
-    assert media_probe.probe("https://h/x.jpg").ok
+    assert not media_probe.probe("https://h/x.jpg").ok
     assert [r.method for r in seen] == ["GET", "HEAD"]
+
+
+def test_a_bot_wall_never_stops_the_publish(db, monkeypatch):
+    """A 403 from a CDN's bot rules: log, and let Meta try the very same URL."""
+    _transport(monkeypatch, lambda req: httpx.Response(403, headers={"content-type": "text/html"}))
+    assert media_probe.first_fetchable(
+        "https://cdn/a.jpg", [("restage", lambda: pytest.fail("re-staged a good URL"))]
+    ) == "https://cdn/a.jpg"
 
 
 def test_a_transport_failure_is_unreachable(monkeypatch):
@@ -106,12 +120,12 @@ def test_the_first_fetchable_fallback_wins(monkeypatch):
 
 
 def test_nothing_fetchable_names_hosts_not_signatures(monkeypatch):
-    _transport(monkeypatch, lambda req: httpx.Response(403))
+    _transport(monkeypatch, lambda req: httpx.Response(404))
     with pytest.raises(media_probe.MediaUnreachable) as ei:
         media_probe.first_fetchable("https://r2.test/a.jpg?X-Amz-Signature=secret",
                                     [("re-staged copy", lambda: "https://r2.test/b.jpg?sig=x")])
     msg = str(ei.value)
-    assert "r2.test" in msg and "HTTP 403" in msg and "secret" not in msg
+    assert "r2.test" in msg and "HTTP 404" in msg and "secret" not in msg
 
 
 # --- wired into the Instagram publish ------------------------------------------------
@@ -169,7 +183,7 @@ def test_a_dead_r2_url_is_restaged_before_meta_sees_it(db, meta, r2_stub, monkey
     dead: set[str] = set()
 
     def handler(req):
-        return httpx.Response(403) if req.url.path in dead else _image()(req)
+        return httpx.Response(404) if req.url.path in dead else _image()(req)
     _transport(monkeypatch, handler)
     # The first staged object's URL is dead (e.g. deleted by a lifecycle rule).
     real_presign = __import__("services.r2", fromlist=["x"]).presign_get
@@ -223,7 +237,7 @@ def test_nothing_fetchable_costs_no_meta_call_and_retries(db, meta, r2_stub, mon
 
 def test_the_unreachable_error_is_retry_class_not_reauth():
     err = ig.InstagramError("image URL unreachable for abcd — nothing was sent to Instagram: "
-                            "r2.test: HTTP 403")
+                            "r2.test: HTTP 404")
     f = publish_errors.classify("instagram", err)
     assert f.category is publish_errors.FailureCategory.RETRY
 
@@ -243,7 +257,7 @@ def test_a_reel_url_that_fails_is_restaged_once(db, meta, r2_stub, monkeypatch, 
     def handler(req):
         calls["n"] += 1
         if calls["n"] == 1:
-            return httpx.Response(403, headers={"content-type": "application/xml"})
+            return httpx.Response(404, headers={"content-type": "application/xml"})
         return httpx.Response(206, headers={"content-type": "video/mp4"})
     _transport(monkeypatch, handler)
 

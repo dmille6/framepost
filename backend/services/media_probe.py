@@ -7,25 +7,35 @@ proven by R2 serving the identical bytes in the same minute. Every such failure 
 container-creation call, and the retry queue's backoff, finding out something a
 one-byte request could have told us first — and could have routed around.
 
-The probe is deliberately humble. It exists to catch "definitely not servable" (404,
-403, an expired signature, an HTML error page with a 200) and must never be the reason
-a publish fails when the URL is fine:
+The probe is deliberately humble. It exists to catch "definitely not servable" and
+must never be the reason a publish stops when the URL is fine. So it only believes
+answers that cannot be about *us*:
+
+  unreachable  404/410 (the object is gone), any 5xx, a transport error, or a 2xx
+               whose content-type is an error page (text/*, JSON, XML) or the other
+               media kind (a video where a photo belongs).
+  advisory     401, 403, 405, 429 and any other status. A CDN's bot rules, rate
+               limits or method rules may apply to this box and not to Meta — the
+               probe is not Meta — so these are logged and the URL goes to Meta as is.
+               (An expired R2 presign also lands here: a 403. Meta then says so in its
+               own words and the next attempt re-presigns, exactly as before.)
+  fetchable    200/206 with the expected media type, or with no/unknown content-type
+               (Meta may well accept it and we can't prove otherwise).
+
+How it asks:
 
   * GET with Range: bytes=0-0, not HEAD. A presigned R2 URL is signed for GET; a HEAD
-    against it is a signature mismatch (403) on a perfectly good URL. Only if the GET is
+    against it is a signature mismatch on a perfectly good URL. Only if the GET is
     refused as a method (405/501) do we try HEAD.
   * The body is never read beyond headers, so a host that ignores Range costs nothing.
-  * the expected kind (image/* for photos, video/* for reels) passes; text/*, JSON,
-    XML (error pages, S3 error documents) and the other media kind fail; anything else — no content-type, octet-stream — passes with a log line,
-    because Meta may well accept it and we can't prove otherwise.
+  * The ordinary FramePost User-Agent (services/http_client), not an imitation of
+    Meta's fetcher: pretending to be facebookexternalhit invites exactly the bot
+    rules that the advisory class above exists to ignore.
   * A transport error (timeout, refused, DNS) counts as unreachable. Those hosts are
     global CDNs; if we cannot reach one, our own outbound path is the likeliest
     culprit, and the Meta API call would not have fared better.
   * Any other exception inside the probe is a bug in the probe, not a fact about the
     URL: it is logged and the URL is treated as fine.
-
-The User-Agent is Meta's fetcher's, because whether a host serves *Meta* is the
-question — Flickr has already once decided on the basis of User-Agent alone.
 """
 from __future__ import annotations
 
@@ -40,7 +50,6 @@ from services import http_client
 
 log = logging.getLogger("framepost.media_probe")
 
-PROBE_USER_AGENT = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"
 PROBE_TIMEOUT = 10.0
 IMAGE = ("image/",)
 VIDEO = ("video/",)
@@ -58,15 +67,16 @@ class ProbeResult:
 
 
 def _client() -> httpx.Client:
-    return http_client.client(
-        headers={"User-Agent": PROBE_USER_AGENT},
-        timeout=PROBE_TIMEOUT, follow_redirects=True,
-    )
+    return http_client.client(timeout=PROBE_TIMEOUT, follow_redirects=True)
 
 
 def _judge(status: int, content_type: str, kinds: Sequence[str]) -> ProbeResult:
-    if status not in (200, 206):
+    if status in (404, 410) or status >= 500:
         return ProbeResult(False, f"HTTP {status}")
+    if status not in (200, 206):
+        # 401/403/405/429 and friends: possibly about this box, not about Meta.
+        log.warning("probe: HTTP %s — advisory only, handing the URL to Meta as is", status)
+        return ProbeResult(True, f"HTTP {status} (advisory)")
     ctype = (content_type or "").split(";")[0].strip().lower()
     if any(ctype.startswith(k) for k in kinds):
         return ProbeResult(True, f"HTTP {status} {ctype}")
