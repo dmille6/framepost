@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -60,18 +60,25 @@ function readyMissing(p: Post): string[] {
   );
 }
 
-function computeBatches(drafts: Post[]): { key: string; ids: string[] }[] {
-  const map = new Map<string, string[]>();
+const UNMATCHED = "\u0000unmatched";
+
+/** Every show in the drafts, biggest first. Unlike the old chip row this hides nothing:
+ *  the chips capped at eight batches of three-or-more, which was fine when clicking one
+ *  only SELECTED it, but a filter you cannot reach is a filter that does not exist —
+ *  on the live queue two shows were invisible under that rule. */
+function computeBatches(drafts: Post[]): { key: string; label: string; ids: string[] }[] {
+  const map = new Map<string, Post[]>();
   for (const p of drafts) {
-    const key = batchKey(p);
-    if (!key) continue;
-    map.set(key, [...(map.get(key) ?? []), p.id]);
+    const key = batchKey(p) ?? UNMATCHED;
+    map.set(key, [...(map.get(key) ?? []), p]);
   }
   return [...map.entries()]
-    .filter(([, ids]) => ids.length >= 3) // singletons/pairs aren't a "show"
-    .map(([key, ids]) => ({ key, ids }))
-    .sort((a, b) => b.ids.length - a.ids.length)
-    .slice(0, 8);
+    .map(([key, list]) => ({
+      key,
+      label: key === UNMATCHED ? "Not part of a show" : key,
+      ids: list.map((p) => p.id),
+    }))
+    .sort((a, b) => b.ids.length - a.ids.length || a.label.localeCompare(b.label));
 }
 
 export default function DraftQueue() {
@@ -122,11 +129,16 @@ export default function DraftQueue() {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<"newest" | "oldest" | "captured" | "largest" | "ready">("newest");
   const [filterReady, setFilterReady] = useState(false);
+  // "" = every show. Holds a batch key from computeBatches.
+  const [showFilter, setShowFilter] = useState("");
 
   const batches = useMemo(() => computeBatches(drafts), [drafts]);
 
   const visibleDrafts = useMemo(() => {
     let list = drafts;
+    if (showFilter) {
+      list = list.filter((p) => (batchKey(p) ?? UNMATCHED) === showFilter);
+    }
     if (filterReady) {
       list = list.filter(isReady);
     }
@@ -161,7 +173,13 @@ export default function DraftQueue() {
       }
     });
     return arr;
-  }, [drafts, search, sortKey, filterReady]);
+  }, [drafts, search, sortKey, filterReady, showFilter]);
+
+  // A show can vanish under the filter — delete its last draft, or schedule the batch —
+  // which would otherwise leave the grid stuck on an empty selection with no obvious cause.
+  useEffect(() => {
+    if (showFilter && !batches.some((b) => b.key === showFilter)) setShowFilter("");
+  }, [batches, showFilter]);
 
   function toggleCheck(id: string) {
     setCheckedIds((prev) => {
@@ -503,56 +521,80 @@ export default function DraftQueue() {
                   </>
                 )}
               </div>
-              {batches.length > 0 && (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <span style={{ fontSize: 11, color: "var(--text-fade)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                    Shows
-                  </span>
-                  {batches.map((b) => {
-                    const allSelected = multiSelect && b.ids.every((id) => checkedIds.has(id));
-                    return (
-                      <button
-                        key={b.key}
-                        onClick={() => {
-                          setMultiSelect(true);
-                          setCheckedIds((prev) => {
-                            const next = new Set(prev);
-                            if (allSelected) b.ids.forEach((id) => next.delete(id));
-                            else b.ids.forEach((id) => next.add(id));
-                            return next;
-                          });
-                        }}
-                        title={
-                          allSelected
-                            ? "Deselect this show's drafts"
-                            : `Select all ${b.ids.length} drafts from this show — then Bulk Edit for shared venue/show/performers, Smart Fill to scatter`
-                        }
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 6,
-                          padding: "5px 12px",
-                          border: `0.5px solid ${allSelected ? "rgba(93,202,165,0.3)" : "var(--border-strong)"}`,
-                          background: allSelected ? "var(--teal-tint)" : "transparent",
-                          color: allSelected ? "var(--text)" : "var(--text-dim)",
-                          borderRadius: 999,
-                          fontSize: 12,
-                          fontWeight: allSelected ? 500 : 400,
-                          cursor: "pointer",
-                          maxWidth: 280,
-                        }}
-                      >
-                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {b.key}
-                        </span>
-                        <span style={{ color: "var(--text-fade)", fontVariantNumeric: "tabular-nums" }}>
-                          {b.ids.length}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+              {batches.length > 0 && (() => {
+                const active = batches.find((b) => b.key === showFilter) ?? null;
+                const allSelected =
+                  !!active && multiSelect && active.ids.every((id) => checkedIds.has(id));
+                return (
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <label
+                      htmlFor="show-filter"
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-fade)",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.04em",
+                      }}
+                    >
+                      Shows
+                    </label>
+                    <select
+                      id="show-filter"
+                      className="fp-input"
+                      value={showFilter}
+                      onChange={(e) => setShowFilter(e.target.value)}
+                      title="Show only the drafts from one shoot"
+                      style={{ maxWidth: 420, fontSize: 13, padding: "6px 10px" }}
+                    >
+                      <option value="">All shows ({drafts.length})</option>
+                      {batches.map((b) => (
+                        <option key={b.key} value={b.key}>
+                          {b.label} ({b.ids.length})
+                        </option>
+                      ))}
+                    </select>
+
+                    {active && (
+                      <>
+                        {/* The chip row this replaced selected a whole show in one click, and
+                            that fed Bulk Edit -> Smart Fill, which is the core workflow. Keep
+                            it reachable rather than making the operator filter and then hunt
+                            for "Select all visible" in the toolbar. */}
+                        <button
+                          type="button"
+                          className="fp-btn fp-btn-ghost"
+                          onClick={() => {
+                            setMultiSelect(true);
+                            setCheckedIds((prev) => {
+                              const next = new Set(prev);
+                              if (allSelected) active.ids.forEach((id) => next.delete(id));
+                              else active.ids.forEach((id) => next.add(id));
+                              return next;
+                            });
+                          }}
+                          title={
+                            allSelected
+                              ? "Deselect this show's drafts"
+                              : `Select all ${active.ids.length} drafts from this show — then Bulk Edit for shared venue/show/performers, Smart Fill to scatter`
+                          }
+                        >
+                          {allSelected ? "Deselect all" : `Select all ${active.ids.length}`}
+                        </button>
+                        <button
+                          type="button"
+                          className="fp-btn fp-btn-ghost"
+                          onClick={() => setShowFilter("")}
+                          title="Show every draft again"
+                        >
+                          Clear filter
+                        </button>
+                      </>
+                    )}
+
+                    {/* No count here on purpose — the sort row already shows "N of M". */}
+                  </div>
+                );
+              })()}
               <div className="fp-grid-cards">
                 {visibleDrafts.map((p) => (
                   <DraftCard
