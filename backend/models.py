@@ -444,6 +444,10 @@ class Reel(Base):
     # strategy so "trial with no strategy" cannot exist. Frozen once posted: it says what
     # kind of media went out, which is what keeps trial numbers out of normal-reel ones.
     trial_graduation = Column(String)
+    # (0038) Set by the worker's conditional UPDATE when it takes the reel for a publish
+    # attempt, cleared when the attempt ends. While set (and fresh), the trial kind
+    # can't be changed — see reel_publish.claim and routes/reels.update_reel.
+    publish_claimed_at = Column(DateTime)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp(), index=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 

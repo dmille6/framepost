@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
-from models import AppConfig, EngagementSnapshot as ES, Post, PostEvent, Reel
+from models import AppConfig, EngagementSnapshot as ES, Post, PostEvent, Reel, ReelPhoto
 from services import reel_publish
 from services.platforms import instagram as ig
 
@@ -346,7 +346,7 @@ def test_the_reels_summary_reports_both_groups_separately(db, tmp_path):
 
 # --- the migration -------------------------------------------------------------------
 
-def test_migrations_0036_and_0037_up_and_down(tmp_path, monkeypatch):
+def test_migrations_0036_to_0038_up_and_down(tmp_path, monkeypatch):
     """Existing reels come through as ordinary reels, and the column goes away cleanly."""
     import sqlalchemy as sa
     from alembic import command
@@ -372,6 +372,11 @@ def test_migrations_0036_and_0037_up_and_down(tmp_path, monkeypatch):
         c.execute(sa.text("INSERT INTO reel_photos (reel_id, position, post_id) "
                           "VALUES ('r1', 0, 'p1')"))
         assert c.execute(sa.text("SELECT ig_follows_reel FROM reel_photos")).scalar_one() == 0
+    command.upgrade(cfg, "0038_reel_publish_claim")
+    with eng.connect() as c:
+        assert c.execute(sa.text("SELECT publish_claimed_at FROM reels")).scalar_one() is None
+    command.downgrade(cfg, "0037_reel_frame_ig_follows")
+    assert "publish_claimed_at" not in {c["name"] for c in sa.inspect(eng).get_columns("reels")}
     command.downgrade(cfg, "0036_reel_trial")
     assert "ig_follows_reel" not in {c["name"] for c in sa.inspect(eng).get_columns("reel_photos")}
 
@@ -618,3 +623,248 @@ def test_replacing_the_photos_keeps_a_frames_follow_flag(db):
                                                          crop_start=crop)])
     _patch(db, reel.id, trial_graduation=None)
     assert not _ig(db, frames[1])
+
+
+
+# --- second review round: an atomic claim, interleaved for real ----------------------
+# Two sessions on one file-backed SQLite database — the worker's and the route's — so
+# the interleavings below are the real ones: separate connections, SQLite serialising
+# the writers. The in-memory fixture is a single connection and could not show this.
+
+from sqlalchemy import create_engine, event as sa_event
+from sqlalchemy.orm import sessionmaker
+
+
+@pytest.fixture()
+def two(tmp_path):
+    from database import Base
+    engine = create_engine(f"sqlite:///{tmp_path / 'race.db'}", connect_args={"timeout": 5})
+
+    @sa_event.listens_for(engine, "connect")
+    def _fk_on(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys = ON")
+
+    Base.metadata.create_all(engine)
+    make = sessionmaker(bind=engine)
+    worker, route = make(), make()
+    yield worker, route
+    worker.close()
+    route.close()
+    engine.dispose()
+
+
+def _fresh(session_pair, reel_id):
+    """What is actually committed, read through a third session."""
+    worker, _ = session_pair
+    s = sessionmaker(bind=worker.get_bind())()
+    try:
+        return s.get(Reel, reel_id)
+    finally:
+        s.close()
+
+
+def _sent(kw, remote="m1"):
+    return {"remote_id": remote, "url": None, "collaborators": [],
+            "collaborators_rejected": [], "trial_graduation": kw["trial_graduation"]}
+
+
+def _patch_expect(route, reel_id, value):
+    """PATCH the trial kind from the route's session. Returns the HTTP status."""
+    from routes import reels as routes_reels
+    try:
+        routes_reels.update_reel(reel_id, routes_reels.ReelPatch(trial_graduation=value),
+                                 route, None)
+        return 200
+    except HTTPException as e:
+        return e.status_code
+
+
+def test_a_patch_landing_mid_publish_is_refused_and_the_label_stays_true(
+        two, r2_stub, tmp_path, monkeypatch):
+    """The reported race: the route read the reel before the worker checkpointed, and
+    tries to write while Meta is working. It must lose, and the reel must be recorded
+    as what went out."""
+    worker, route = two
+    r = _db_reel(worker, tmp_path)                       # ordinary
+    route.get(Reel, r.id)                                # the route's early read
+    outcome = {}
+
+    def post_reel(db_, **kw):
+        outcome["patch"] = _patch_expect(route, r.id, "MANUAL")   # before any checkpoint
+        return _sent(kw)
+    monkeypatch.setattr(ig, "post_reel", post_reel)
+
+    reel_publish.publish(worker, r)
+    assert outcome["patch"] == 409
+    assert _patch_expect(route, r.id, "MANUAL") == 409, "and after: it is posted"
+    assert _fresh(two, r.id).trial_graduation is None
+    assert _fresh(two, r.id).publish_claimed_at is None
+
+
+def test_a_patch_after_the_claim_but_before_the_checkpoint_is_refused(two, tmp_path):
+    worker, route = two
+    r = _db_reel(worker, tmp_path)
+    assert reel_publish.claim(worker, r.id)
+    assert _fresh(two, r.id).ig_container is None, "the window the claim closes"
+    assert _patch_expect(route, r.id, "MANUAL") == 409
+    assert _fresh(two, r.id).trial_graduation is None
+
+
+def test_a_patch_that_wins_before_the_claim_is_what_gets_published(
+        two, r2_stub, tmp_path, monkeypatch):
+    """The worker listed the reel as ordinary, then the PATCH committed, then the worker
+    claimed. The claim re-reads, so the trial the photographer chose is what goes out."""
+    worker, route = two
+    r = _db_reel(worker, tmp_path)
+    [listed] = reel_publish.due_reels(worker)
+    assert _patch_expect(route, r.id, "MANUAL") == 200
+    asked = {}
+
+    def post_reel(db_, **kw):
+        asked["trial"] = kw["trial_graduation"]
+        return _sent(kw)
+    monkeypatch.setattr(ig, "post_reel", post_reel)
+
+    reel_publish.publish(worker, listed)
+    assert asked["trial"] == "MANUAL"
+    assert _fresh(two, r.id).trial_graduation == "MANUAL"
+
+
+def test_two_workers_never_publish_the_same_reel(two, tmp_path, monkeypatch):
+    worker, other = two
+    r = _db_reel(worker, tmp_path)
+    assert reel_publish.claim(worker, r.id)
+    theirs = other.get(Reel, r.id)
+    monkeypatch.setattr(ig, "post_reel", lambda db_, **kw: pytest.fail("published twice"))
+    with pytest.raises(reel_publish.ReelBusy):
+        reel_publish.publish(other, theirs)
+    assert _fresh(two, r.id).publish_attempts == 0, "losing the claim spends no attempt"
+
+
+def test_a_dead_workers_claim_goes_stale(two, tmp_path):
+    worker, route = two
+    r = _db_reel(worker, tmp_path)
+    r.publish_claimed_at = datetime.utcnow() - reel_publish.CLAIM_STALE_AFTER - timedelta(minutes=1)
+    worker.commit()
+    assert _patch_expect(route, r.id, "MANUAL") == 200, "the photographer isn't locked out"
+    assert _fresh(two, r.id).publish_claimed_at is None
+    r2 = _db_reel(worker, tmp_path)
+    r2.publish_claimed_at = datetime.utcnow() - reel_publish.CLAIM_STALE_AFTER - timedelta(minutes=1)
+    worker.commit()
+    assert reel_publish.claim(worker, r2.id), "and the next pass takes it over"
+
+
+def test_a_fresh_claim_is_not_taken_over(two, tmp_path):
+    worker, other = two
+    r = _db_reel(worker, tmp_path)
+    assert reel_publish.claim(worker, r.id)
+    assert not reel_publish.claim(other, r.id)
+
+
+def test_a_confirmed_non_publish_releases_the_claim(two, r2_stub, tmp_path, monkeypatch):
+    worker, route = two
+    r = _db_reel(worker, tmp_path)
+
+    def refused(db_, **kw):
+        raise ig.InstagramError("Invalid parameter", permanent=True, http_status=400)
+    monkeypatch.setattr(ig, "post_reel", refused)
+
+    reel_publish.run_due(worker)
+    row = _fresh(two, r.id)
+    assert row.publish_claimed_at is None and row.publish_attempts == reel_publish.MAX_ATTEMPTS
+    assert _patch_expect(route, r.id, "MANUAL") == 200
+
+
+def test_a_transient_failure_releases_the_claim_for_the_next_pass(
+        two, r2_stub, tmp_path, monkeypatch):
+    worker, _ = two
+    r = _db_reel(worker, tmp_path)
+
+    def slow(db_, **kw):
+        raise ig.InstagramError("still IN_PROGRESS — will retry")
+    monkeypatch.setattr(ig, "post_reel", slow)
+    reel_publish.run_due(worker)
+    assert _fresh(two, r.id).publish_claimed_at is None
+    assert reel_publish.claim(worker, r.id)
+
+
+def test_an_unexpected_crash_in_the_attempt_releases_the_claim(two, r2_stub, tmp_path, monkeypatch):
+    worker, _ = two
+    r = _db_reel(worker, tmp_path)
+    monkeypatch.setattr(ig, "post_reel", lambda db_, **kw: 1 / 0)
+    reel_publish.run_due(worker)
+    assert _fresh(two, r.id).publish_claimed_at is None
+
+
+# --- second review round: frames follow what actually went out ------------------------
+
+def test_a_recovered_trial_puts_its_frames_back_on_instagram(db, meta, r2_stub):
+    """Built as ordinary (frames lost Instagram); the container that actually published
+    was a trial. The frames follow Meta's copy — except one that already posted."""
+    _connect_instagram(db)
+    frames = _drafts(db, n=3)
+    built = _build_from_drafts(db, frames, trial_graduation=None)
+    assert not any(_ig(db, f) for f in frames)
+    frames[2].status = "posted"
+    frames[2].posted_at = datetime.utcnow()
+    db.commit()
+
+    reel = db.get(Reel, built.id)
+    meta.containers["c0"] = {"status": "PUBLISHED", "caption": "Roxie at the Allways",
+                             "type": "VIDEO"}
+    reel.caption = "Roxie at the Allways"
+    reel.status = "ready"
+    reel.mp4_path = "/nonexistent.mp4"
+    reel.ig_container = ig.ContainerCheckpoint(
+        "c0", datetime.utcnow() - timedelta(minutes=2),
+        publish_sent_at=datetime.utcnow() - timedelta(minutes=1),
+        trial_graduation="MANUAL", caption="Roxie at the Allways").to_json()
+    db.commit()
+
+    reel_publish.publish(db, reel)
+    assert reel.trial_graduation == "MANUAL"
+    assert _ig(db, frames[0]) and _ig(db, frames[1])
+    assert not _ig(db, frames[2]), "a posted frame is history"
+
+
+def test_a_published_ordinary_reel_leaves_its_frames_off_instagram(db, r2_stub, tmp_path, monkeypatch):
+    _connect_instagram(db)
+    frames = _drafts(db)
+    built = _build_from_drafts(db, frames, trial_graduation=None)
+    reel = db.get(Reel, built.id)
+    f = tmp_path / "r.mp4"
+    f.write_bytes(b"mp4")
+    reel.status, reel.mp4_path = "ready", str(f)
+    db.commit()
+    monkeypatch.setattr(ig, "post_reel", lambda db_, **kw: _sent(kw))
+    reel_publish.publish(db, reel)
+    assert not any(_ig(db, f) for f in frames)
+
+
+# --- second review round: only true drafts are managed -------------------------------
+
+def test_a_scheduled_frame_is_never_managed(db):
+    """Scheduled is a plan someone made; the reel keeps its hands off it, whatever the
+    client says about where the frames came from."""
+    _connect_instagram(db)
+    draft, scheduled = _drafts(db)
+    scheduled.scheduled_at = datetime.utcnow() + timedelta(days=2)
+    db.commit()
+    reel = _build_from_drafts(db, [draft, scheduled], trial_graduation=None)
+    assert not _ig(db, draft)
+    assert _ig(db, scheduled) and scheduled.target_platforms is None
+    flags = {p.post_id: p.ig_follows_reel for p in
+             db.query(ReelPhoto).filter_by(reel_id=reel.id).all()}
+    assert flags == {draft.id: True, scheduled.id: False}
+    _patch(db, reel.id, trial_graduation="MANUAL")
+    _patch(db, reel.id, trial_graduation=None)
+    assert _ig(db, scheduled) and scheduled.target_platforms is None
+
+
+def test_published_photos_claimed_as_drafts_are_not_managed(db):
+    _connect_instagram(db)
+    [p] = _drafts(db, n=1)
+    p.status, p.posted_at = "posted", datetime.utcnow()
+    db.commit()
+    _build_from_drafts(db, [p], trial_graduation=None)
+    assert _ig(db, p) and p.target_platforms is None

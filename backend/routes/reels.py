@@ -18,13 +18,13 @@ from fastapi.responses import FileResponse
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_session
-from models import AppConfig, PlatformCredential, Post, PostPlatform, Reel, ReelPhoto, User
+from models import AppConfig, PlatformCredential, Post, Reel, ReelPhoto, User
 from routes.auth import current_user
-from services import events, preflight, storage
+from services import reel_frames, reel_publish, storage
 from services.reel import CropRect, PhotoSegment, ReelGenerationError, generate
 
 log = logging.getLogger("framepost.reels")
@@ -59,8 +59,9 @@ class ReelCreate(BaseModel):
     # Omitted: the Settings default (reel_trial_default) decides. Sent, even as null:
     # the caller has decided, and null means an ordinary reel.
     trial_graduation: TrialGraduation | None = None
-    # The frames are unposted drafts (the Draft Queue's "Reel" button). Their Instagram
-    # targeting then follows the reel's kind; see _sync_frame_instagram.
+    # Built from the Draft Queue. Frames that really are drafts aimed at Instagram then
+    # have their Instagram targeting follow the reel's kind; see services/reel_frames.
+    # Checked per frame server-side: a scheduled or posted photo is never managed.
     frames_from_drafts: bool = False
 
 
@@ -127,52 +128,6 @@ class ReelPatch(BaseModel):
 
 
 # --- helpers ---------------------------------------------------------------
-
-def _frame_is_posted(db: Session, post: Post) -> bool:
-    """Has this photograph gone out anywhere? Then its targeting is history, not a plan,
-    and the reel never touches it."""
-    if post.posted_at is not None or post.status in ("posted", "late"):
-        return True
-    return db.execute(
-        select(PostPlatform.post_id).where(
-            PostPlatform.post_id == post.id, PostPlatform.remote_id.is_not(None))
-    ).first() is not None
-
-
-def _sync_frame_instagram(db: Session, reel: Reel) -> list[str]:
-    """Make each drafts-built frame's Instagram targeting match the reel's kind.
-
-    Ordinary reel: Instagram off — the reel carries these photographs there, and without
-    this they would go out as a reel AND as separate posts. Trial Reel: Instagram on —
-    a trial is shown to non-followers first, so followers would otherwise get none of
-    the photos unless it graduated; the photographer wants the trial as extra reach.
-
-    Only frames flagged ig_follows_reel (drafts aimed at Instagram when the reel was
-    built), and never one that has already posted. Returns the post ids changed.
-    """
-    want_ig = reel.trial_graduation is not None
-    creds = list(db.execute(select(PlatformCredential)).scalars())
-    changed: list[str] = []
-    frames = db.execute(
-        select(ReelPhoto).where(ReelPhoto.reel_id == reel.id, ReelPhoto.ig_follows_reel.is_(True))
-    ).scalars().all()
-    for frame in frames:
-        post = db.get(Post, frame.post_id)
-        if post is None or _frame_is_posted(db, post):
-            continue
-        targets = preflight.targets_for(post, creds)
-        if want_ig == ("instagram" in targets):
-            continue
-        targets = targets + ["instagram"] if want_ig else [t for t in targets if t != "instagram"]
-        post.target_platforms = json.dumps(targets)
-        events.log_event(db, post_id=post.id, event_type="edited", actor="system", details={
-            "fields": ["target_platforms"], "reel_id": reel.id,
-            "reason": "trial reel: frame also posts to Instagram" if want_ig
-            else "reel carries this photo to Instagram",
-        })
-        changed.append(post.id)
-    return changed
-
 
 def default_trial_graduation(db: Session) -> str | None:
     """What a new reel is created as, from Settings. Anything but a known strategy —
@@ -277,11 +232,8 @@ def create_reel(
     db.add(reel)
     creds = list(db.execute(select(PlatformCredential)).scalars()) if body.frames_from_drafts else []
     for p in body.photos:
-        follows = False
-        if body.frames_from_drafts:
-            post = db.get(Post, p.post_id)
-            follows = (not _frame_is_posted(db, post)
-                       and "instagram" in preflight.targets_for(post, creds))
+        follows = body.frames_from_drafts and reel_frames.should_follow(
+            db, db.get(Post, p.post_id), creds)
         db.add(ReelPhoto(
             reel_id=reel_id,
             position=p.position,
@@ -291,7 +243,7 @@ def create_reel(
             ig_follows_reel=follows,
         ))
     db.flush()
-    _sync_frame_instagram(db, reel)
+    reel_frames.sync_frame_instagram(db, reel)
     db.commit()
     db.refresh(reel)
     photos = _load_photos(db, reel_id)
@@ -382,26 +334,32 @@ def update_reel(
     retarget = False
     if "trial_graduation" in body.model_fields_set \
             and body.trial_graduation != reel.trial_graduation:
-        # Once it is live the kind of media is a fact about Instagram, not a setting, and
-        # analytics rely on it to keep trial and ordinary reels apart. (Before that, a
-        # change is safe even with a container checkpointed: the fingerprint includes
-        # the trial, so a stale container is rebuilt rather than published.)
-        if reel.posted_at:
+        # One conditional UPDATE, not read-check-write: the worker claims a reel with a
+        # conditional UPDATE of its own and SQLite serialises writers, so exactly one of
+        # the two wins. Refused while a publish holds the claim, while a container
+        # exists (a publish may be in flight or already live), and once posted — at each
+        # of those points the kind is a fact about Instagram, which analytics rely on.
+        # A claim older than CLAIM_STALE_AFTER belongs to a worker that died; it is
+        # cleared here rather than blocking the reel forever.
+        stale = reel_publish.claim_cutoff()
+        won = db.execute(
+            update(Reel)
+            .where(Reel.id == reel_id, Reel.posted_at.is_(None), Reel.ig_container.is_(None),
+                   or_(Reel.publish_claimed_at.is_(None), Reel.publish_claimed_at < stale))
+            .values(trial_graduation=body.trial_graduation, publish_claimed_at=None)
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        if not won:
+            db.rollback()  # release SQLite's write lock before answering
+            db.refresh(reel)
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                "This reel is already on Instagram — whether it is a Trial Reel can't change now.",
+                "This reel is already on Instagram — whether it is a Trial Reel can't change now."
+                if reel.posted_at else
+                "Instagram is processing this reel — whether it is a Trial Reel can't change "
+                "until that attempt finishes or fails.",
             )
-        if reel.ig_container:
-            # A container exists: a publish is under way, or may already have gone out
-            # without anyone hearing back. Changing the kind now would record the reel
-            # as something other than what Meta has. Frees up again once the worker
-            # drops the container after a definite "no" from Meta.
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "Instagram is already processing this reel — whether it is a Trial Reel "
-                "can't change until that attempt finishes or fails.",
-            )
-        reel.trial_graduation = body.trial_graduation
+        db.refresh(reel)
         retarget = True
     if body.caption is not None:
         reel.caption = body.caption
@@ -431,7 +389,7 @@ def update_reel(
 
     if retarget:
         db.flush()
-        _sync_frame_instagram(db, reel)
+        reel_frames.sync_frame_instagram(db, reel)
     reel.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(reel)
