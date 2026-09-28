@@ -11,9 +11,11 @@ The probe is deliberately humble. It exists to catch "definitely not servable" a
 must never be the reason a publish stops when the URL is fine. So it only believes
 answers that cannot be about *us*:
 
-  unreachable  404/410 (the object is gone), any 5xx, a transport error, or a 2xx
-               whose content-type is an error page (text/*, JSON, XML) or the other
-               media kind (a video where a photo belongs).
+  blocking     404/410 (the object is gone), or a 2xx whose content-type is an error
+               page (text/*, JSON, XML) or the other media kind (a video where a photo
+               belongs) — and only after every alternative has failed too.
+  soft         any 5xx or transport error. Routed around when an alternative works;
+               otherwise the URL still goes to Meta (see first_fetchable).
   advisory     401, 403, 405, 429 and any other status. A CDN's bot rules, rate
                limits or method rules may apply to this box and not to Meta — the
                probe is not Meta — so these are logged and the URL goes to Meta as is.
@@ -31,9 +33,9 @@ How it asks:
   * The ordinary FramePost User-Agent (services/http_client), not an imitation of
     Meta's fetcher: pretending to be facebookexternalhit invites exactly the bot
     rules that the advisory class above exists to ignore.
-  * A transport error (timeout, refused, DNS) counts as unreachable. Those hosts are
-    global CDNs; if we cannot reach one, our own outbound path is the likeliest
-    culprit, and the Meta API call would not have fared better.
+  * A transport error (timeout, refused, DNS) is soft: if we cannot reach a global
+    CDN, our own outbound path is the likeliest culprit, which says nothing about
+    whether Meta can.
   * Any other exception inside the probe is a bug in the probe, not a fact about the
     URL: it is logged and the URL is treated as fine.
 """
@@ -64,6 +66,10 @@ class MediaUnreachable(Exception):
 class ProbeResult:
     ok: bool
     reason: str
+    # For a failure: True when the answer is definitive about the URL (404/410, an
+    # error page or the wrong media kind). False for 5xx and transport errors, which
+    # may be passing, or about our side only — see first_fetchable.
+    hard: bool = False
 
 
 def _client() -> httpx.Client:
@@ -71,7 +77,9 @@ def _client() -> httpx.Client:
 
 
 def _judge(status: int, content_type: str, kinds: Sequence[str]) -> ProbeResult:
-    if status in (404, 410) or status >= 500:
+    if status in (404, 410):
+        return ProbeResult(False, f"HTTP {status}", hard=True)
+    if status >= 500:
         return ProbeResult(False, f"HTTP {status}")
     if status not in (200, 206):
         # 401/403/405/429 and friends: possibly about this box, not about Meta.
@@ -82,7 +90,7 @@ def _judge(status: int, content_type: str, kinds: Sequence[str]) -> ProbeResult:
         return ProbeResult(True, f"HTTP {status} {ctype}")
     if ctype.startswith(_BAD_TYPES + IMAGE + VIDEO):
         # An error page, or media of the wrong kind (a video where a photo belongs).
-        return ProbeResult(False, f"HTTP {status} but served {ctype}")
+        return ProbeResult(False, f"HTTP {status} but served {ctype}", hard=True)
     log.info("probe: HTTP %s with content-type %r — letting Meta judge", status, ctype)
     return ProbeResult(True, f"HTTP {status} {ctype or 'no content-type'}")
 
@@ -123,11 +131,20 @@ def first_fetchable(
 
     Fallbacks are (label, make_url) and are built lazily: re-staging costs an upload,
     and is only worth paying when the first URL has actually failed.
+
+    When nothing passes, only definitive failures block. A 5xx or a transport error is
+    worth routing around while there is somewhere else to go, but once the alternatives
+    are spent it is not grounds to keep the post from Meta: it may be momentary, or
+    about our network rather than the host, and if Meta can't fetch it either that comes
+    back as a RETRY-class 2207052 anyway. So the best such candidate — the original if it
+    is one — goes to Meta. Only when every candidate is gone (404/410) or serving the
+    wrong thing is nothing sent.
     """
     result = probe(url, kinds=kinds)
     if result.ok:
         return url
     tried = [f"{_host(url)}: {result.reason}"]
+    soft = [url] if not result.hard else []
     for label, make in fallbacks:
         try:
             alt = make()
@@ -140,4 +157,10 @@ def first_fetchable(
                         _host(url), result.reason, label)
             return alt
         tried.append(f"{label} ({_host(alt)}): {alt_result.reason}")
+        if not alt_result.hard:
+            soft.append(alt)
+    if soft:
+        log.warning("no media URL passed the probe (%s) — none definitively dead, so "
+                    "handing %s to Meta to try", "; ".join(tried), _host(soft[0]))
+        return soft[0]
     raise MediaUnreachable("; ".join(tried))

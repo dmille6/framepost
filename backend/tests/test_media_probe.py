@@ -266,3 +266,55 @@ def test_a_reel_url_that_fails_is_restaged_once(db, meta, r2_stub, monkeypatch, 
     assert calls["n"] == 2
     assert meta.creates[0]["video_url"].startswith("https://r2.test/reels/")
     assert reel.posted_at is not None
+
+
+# --- GPT review: after the alternatives, only a definitive failure blocks ------------
+
+def _raise_connect(req):
+    raise httpx.ConnectError("refused")
+
+
+@pytest.mark.parametrize("handler", [
+    lambda req: httpx.Response(503),
+    lambda req: httpx.Response(500, headers={"content-type": "text/html"}),
+    _raise_connect,
+])
+def test_soft_failures_everywhere_still_hand_meta_the_original(monkeypatch, handler):
+    _transport(monkeypatch, handler)
+    assert media_probe.first_fetchable(
+        "https://r2.test/orig.jpg", [("re-staged copy", lambda: "https://r2.test/new.jpg")]
+    ) == "https://r2.test/orig.jpg"
+
+
+def test_a_dead_original_prefers_a_merely_flaky_alternative(monkeypatch):
+    _transport(monkeypatch, lambda req: httpx.Response(404) if "orig" in str(req.url)
+               else httpx.Response(503))
+    assert media_probe.first_fetchable(
+        "https://r2.test/orig.jpg", [("re-staged copy", lambda: "https://r2.test/new.jpg")]
+    ) == "https://r2.test/new.jpg"
+
+
+@pytest.mark.parametrize("handler", [
+    lambda req: httpx.Response(410),
+    lambda req: httpx.Response(200, headers={"content-type": "text/html"}),
+    lambda req: httpx.Response(206, headers={"content-type": "video/mp4"}),
+])
+def test_only_definitive_failures_block(monkeypatch, handler):
+    _transport(monkeypatch, handler)
+    with pytest.raises(media_probe.MediaUnreachable):
+        media_probe.first_fetchable(
+            "https://r2.test/orig.jpg", [("re-staged copy", lambda: "https://r2.test/new.jpg")])
+
+
+def test_r2_and_flickr_both_flaky_still_publishes(db, meta, r2_stub, monkeypatch, tmp_path):
+    post, cred = _landscape(db, tmp_path)
+    _transport(monkeypatch, lambda req: httpx.Response(502))
+    monkeypatch.setattr(scheduler.flickr, "get_display_image_url",
+                        lambda db, pid, **kw: "https://live.staticflickr.com/42_b.jpg")
+
+    scheduler.fanout_to_platforms(db, post, fired_at=datetime.utcnow(), targets=["instagram"])
+    db.commit()
+
+    assert len(meta.creates) == 1
+    assert meta.creates[0]["image_url"].startswith("https://r2.test/")   # the original
+    assert db.get(PostPlatform, (post.id, cred.id)).status == "posted"
