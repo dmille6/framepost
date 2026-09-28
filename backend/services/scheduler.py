@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 
 from config import settings
 from database import SessionLocal
-from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostGroup, PostPlatform, Group
+from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostEvent, PostGroup, PostPlatform, Group
 from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, media_probe, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
@@ -1629,9 +1629,13 @@ def requeue_stranded(db, *, now: datetime | None = None) -> int:
       * the row is pending, has no retry time, and carries no sign of a publish
         (no remote_id, no posted_at). A carousel member is never pending, and is
         skipped regardless;
-      * it is only handed to the normal retry path, which for Instagram asks Meta about
-        the checkpointed container before doing anything — the part that makes a
-        crashed publish safe to retry rather than a second copy waiting to happen.
+      * only INSTAGRAM rows are requeued. The retry path asks Meta about the
+        checkpointed container before doing anything, and a row with no checkpoint
+        means no container was ever created — nothing can have gone live. Bluesky,
+        Pixelfed and Pinterest have no such question to ask: the crash may have come
+        after the post went live, and a retry would post it twice. Those rows are left
+        alone and flagged once ({platform}_needs_review) for the photographer to
+        decide — check the profile, then retry or dismiss.
     """
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     rows = db.execute(
@@ -1651,6 +1655,9 @@ def requeue_stranded(db, *, now: datetime | None = None) -> int:
     for pp, post, cred in rows:
         if carousel_svc.is_member(post):
             continue
+        if cred.platform != "instagram":
+            _flag_needs_review(db, post, cred, pp)
+            continue
         pp.next_retry_at = now
         events.log_event(
             db, post_id=post.id, event_type=f"{cred.platform}_requeued", actor="worker",
@@ -1664,6 +1671,30 @@ def requeue_stranded(db, *, now: datetime | None = None) -> int:
         requeued += 1
     db.commit()
     return requeued
+
+
+def _flag_needs_review(db, post: Post, cred: PlatformCredential, pp: PostPlatform) -> None:
+    """Say once, on the post's timeline, that this row needs a human. Idempotent by the
+    event itself, so the 15-minute sweep doesn't restate it every pass."""
+    event_type = f"{cred.platform}_needs_review"
+    already = db.execute(
+        select(PostEvent.id).where(PostEvent.post_id == post.id,
+                                   PostEvent.event_type == event_type).limit(1)
+    ).first()
+    if already:
+        return
+    pp.error_message = (
+        f"{cred.platform.title()}: an attempt was interrupted and may or may not have "
+        "published. Check the profile, then retry or dismiss — it won't be retried "
+        "automatically, to avoid posting twice."
+    )
+    events.log_event(
+        db, post_id=post.id, event_type=event_type, actor="worker",
+        details={"reason": "left pending with no retry time after an interrupted "
+                           "attempt; outcome unknown, not retried automatically"},
+    )
+    log.warning("post %s: %s row stranded pending — outcome unknown, flagged for review "
+                "rather than retried", post.id[:8], cred.platform)
 
 
 def requeue_stranded_platform_rows() -> None:

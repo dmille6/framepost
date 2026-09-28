@@ -26,8 +26,8 @@ def _row(db, cred, *, post_status="posted", fired=LONG_AGO, **pp):
     return post, row
 
 
-def _cred(db):
-    c = PlatformCredential(id=uuid.uuid4().hex, platform="instagram", access_token="t")
+def _cred(db, platform="instagram"):
+    c = PlatformCredential(id=uuid.uuid4().hex, platform=platform, access_token="t")
     db.add(c)
     db.commit()
     return c
@@ -100,3 +100,27 @@ def test_a_requeued_instagram_row_asks_meta_before_publishing(db, monkeypatch):
     db.refresh(row)
     assert published == []
     assert row.status == "posted" and row.remote_id == "m9"
+
+
+def test_other_platforms_are_flagged_for_review_once_and_never_requeued(db):
+    """Bluesky has no container to ask about: the crash may have come after the post
+    went live, and a retry would post it twice."""
+    for platform in ("bluesky", "pixelfed", "pinterest"):
+        cred = _cred(db, platform)
+        post, row = _row(db, cred)
+
+        assert scheduler.requeue_stranded(db, now=NOW) == 0
+        assert scheduler.requeue_stranded(db, now=NOW + timedelta(minutes=15)) == 0
+
+        db.refresh(row)
+        assert row.next_retry_at is None and row.status == "pending"
+        assert "won't be retried automatically" in row.error_message
+        evs = db.query(PostEvent).filter_by(post_id=post.id).all()
+        assert [e.event_type for e in evs] == [f"{platform}_needs_review"]
+
+
+def test_an_instagram_row_without_a_checkpoint_is_still_requeued(db):
+    """No checkpoint means no container was ever created — nothing can be live."""
+    cred = _cred(db)
+    _post, row = _row(db, cred)
+    assert scheduler.requeue_stranded(db, now=NOW) == 1
