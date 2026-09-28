@@ -332,6 +332,16 @@ def update_reel(
                 status.HTTP_409_CONFLICT,
                 "This reel is already on Instagram — whether it is a Trial Reel can't change now.",
             )
+        if reel.ig_container:
+            # A container exists: a publish is under way, or may already have gone out
+            # without anyone hearing back. Changing the kind now would record the reel
+            # as something other than what Meta has. Frees up again once the worker
+            # drops the container after a definite "no" from Meta.
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Instagram is already processing this reel — whether it is a Trial Reel "
+                "can't change until that attempt finishes or fails.",
+            )
         reel.trial_graduation = body.trial_graduation
     if body.caption is not None:
         reel.caption = body.caption

@@ -82,6 +82,7 @@ MAX_COLLABORATORS = 3
 # alike). SS_PERFORMANCE: Instagram shares it with followers if it performs. MANUAL:
 # the account graduates it by hand in the Instagram app.
 TRIAL_GRADUATION_STRATEGIES = ("SS_PERFORMANCE", "MANUAL")
+TRIAL_HINT = "(sent as a Trial Reel — if this account isn't eligible, turn Trial off for this reel)"
 # Meta's ceiling on carousel children. A carousel takes its aspect ratio from the FIRST
 # child and crops the rest to match, which is why grouping validates ratio up front.
 MAX_CAROUSEL = 10
@@ -250,10 +251,16 @@ class ContainerCheckpoint:
     # for whatever the caption is now — the post may have been edited since. None on
     # older checkpoints, which fall back to the current caption.
     caption: str | None = None
+    # What kind of reel the container was built as: None for an ordinary reel (and for
+    # every photo/carousel), else the trial's graduation_strategy. Recorded so that a
+    # recovered publish reports what actually went out, not what the reel says now.
+    # Checkpoints written before trials existed have none, and were all ordinary.
+    trial_graduation: str | None = None
 
     def to_json(self) -> str:
         return json.dumps({
             "caption": self.caption,
+            "trial_graduation": self.trial_graduation,
             "fingerprint": self.fingerprint,
             "id": self.container_id,
             "created_at": self.created_at.isoformat(),
@@ -279,6 +286,7 @@ class ContainerCheckpoint:
                 rejected=list(d.get("rejected") or []),
                 fingerprint=d.get("fingerprint"),
                 caption=d.get("caption"),
+                trial_graduation=d.get("trial_graduation"),
             )
         except (ValueError, KeyError, TypeError):
             log.warning("instagram: ignoring unreadable container checkpoint %r", raw[:200])
@@ -711,7 +719,22 @@ def post_reel(
             data["trial_params"] = json.dumps({"graduation_strategy": trial_graduation})
         else:
             data["share_to_feed"] = "true" if share_to_feed else "false"
-        container_id, used, rejected = _create_container(ig_user_id, data, wanted)
+        try:
+            container_id, used, rejected = _create_container(ig_user_id, data, wanted)
+        except InstagramError as e:
+            # Meta documents no error for an account without Trial Reels, so a refusal
+            # that doesn't name the trial may still be about it. Classification stays
+            # with the text test below; this only points at the likeliest cause.
+            if (trial and e.permanent and e.http_status is not None
+                    and 400 <= e.http_status < 500 and not _is_trial_rejection(str(e))):
+                hinted = InstagramError(
+                    f"{e} {TRIAL_HINT}", permanent=True, http_status=e.http_status,
+                )
+                # The hint says "Trial Reel"; the text test below must not then read our
+                # own words as Meta refusing the trial.
+                hinted.trial_hinted = True
+                raise hinted from e
+            raise
         if rejected:
             log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
         return container_id, used, rejected
@@ -728,12 +751,13 @@ def post_reel(
             media_types=("VIDEO", "REELS"),
             tries=REEL_POLL_TRIES, interval=REEL_POLL_INTERVAL,
             fingerprint=content_fingerprint(caption_text, wanted, identity),
+            trial_graduation=trial_graduation,
         )
     except PublishUnconfirmed:
         raise
     except InstagramError as e:
         if trial and e.http_status is not None and 400 <= e.http_status < 500 \
-                and _is_trial_rejection(str(e)):
+                and not getattr(e, "trial_hinted", False) and _is_trial_rejection(str(e)):
             raise TrialReelRejected(str(e), http_status=e.http_status) from e
         raise
 
@@ -873,6 +897,7 @@ def _publish_resumable(
     tries: int = STATUS_POLL_TRIES,
     interval: float = STATUS_POLL_INTERVAL,
     fingerprint: str | None = None,
+    trial_graduation: str | None = None,
 ) -> dict:
     """Publish via a container, resuming the checkpointed one when there is one.
 
@@ -899,6 +924,7 @@ def _publish_resumable(
         resumed = _resume_checkpoint(
             db, ig_user_id, token, cp, save=save, describing=describing, caption=caption,
             media_types=media_types, tries=tries, interval=interval, fingerprint=fingerprint,
+            trial_graduation=trial_graduation,
         )
         if resumed is not None:
             return resumed
@@ -907,7 +933,8 @@ def _publish_resumable(
     container_id, used, rejected = create()
     cp = ContainerCheckpoint(container_id=container_id, created_at=_utcnow(),
                              collaborators=list(used), rejected=list(rejected),
-                             fingerprint=fingerprint, caption=caption)
+                             fingerprint=fingerprint, caption=caption,
+                             trial_graduation=trial_graduation)
     save(cp)
     _await_container(container_id, token, describing=describing, tries=tries, interval=interval)
     return _publish_checkpointed(ig_user_id, token, cp, save=save)
@@ -917,15 +944,21 @@ def _resume_checkpoint(
     db: Session, ig_user_id: str, token: str, cp: ContainerCheckpoint, *, save: Checkpoint,
     describing: str, caption: str, media_types: tuple[str, ...],
     tries: int, interval: float, fingerprint: str | None = None,
+    trial_graduation: str | None = None,
 ) -> dict | None:
     """Act on a checkpoint. Returns the publish result, or None to build a fresh one."""
+    # Built as a different kind of reel than is now wanted. The fingerprint catches this
+    # for new checkpoints; a legacy one has no fingerprint (and no kind, because it
+    # predates trials and was ordinary), so without this a trial request would resume —
+    # and publish — the old ordinary container. Legacy ordinary reels still resume.
+    wrong_kind = (cp.trial_graduation or None) != (trial_graduation or None)
     fresh = _utcnow() - cp.created_at < CONTAINER_REUSE_WINDOW
     if not fresh and not cp.publish_sent_at:
         log.info("instagram: checkpointed container %s is past Meta's 24h window — "
                  "building a new one", cp.container_id)
         return None
-    if (not cp.publish_sent_at and cp.fingerprint and fingerprint
-            and cp.fingerprint != fingerprint):
+    if not cp.publish_sent_at and (wrong_kind or (
+            cp.fingerprint and fingerprint and cp.fingerprint != fingerprint)):
         # The caption, the co-authors or the image changed since this container was
         # built (typically after a 4xx sent the post back for editing). Publishing it
         # would ship the old version. Safe to drop only because no publish was ever sent
@@ -1002,7 +1035,7 @@ def _resume_checkpoint(
                  "Meta didn't take it", cp.container_id)
         cp.publish_sent_at = None
         save(cp)
-        if cp.fingerprint and fingerprint and cp.fingerprint != fingerprint:
+        if wrong_kind or (cp.fingerprint and fingerprint and cp.fingerprint != fingerprint):
             log.info("instagram: container %s was built from different content — "
                      "building a new one", cp.container_id)
             return None
@@ -1059,6 +1092,7 @@ def _publish_checkpointed(
         "url": permalink,
         "collaborators": list(cp.collaborators),
         "collaborators_rejected": list(cp.rejected),
+        "trial_graduation": cp.trial_graduation,
     }
 
 
@@ -1074,6 +1108,7 @@ def _recovered(cp: ContainerCheckpoint, found: tuple[str, str | None] | None) ->
         "url": found[1] if found else None,
         "collaborators": list(cp.collaborators),
         "collaborators_rejected": list(cp.rejected),
+        "trial_graduation": cp.trial_graduation,
         "recovered": True,
     }
 

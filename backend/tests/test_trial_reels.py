@@ -147,7 +147,7 @@ def test_changing_the_strategy_also_builds_a_new_container(db, meta):
 def test_an_unchanged_trial_resumes_its_container(db, meta):
     meta.containers["c0"] = {"status": "FINISHED", "caption": "Roxie at the Allways",
                              "type": "VIDEO"}
-    cp = ig.ContainerCheckpoint("c0", datetime.utcnow(),
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow(), trial_graduation="MANUAL",
                                 fingerprint=_fp("mp4-v1|trial:MANUAL", collabs=()))
     _reel_post(db, trial_graduation="MANUAL", checkpoint=cp, on_checkpoint=Store())
     assert meta.publishes == ["c0"] and meta.creates == []
@@ -373,3 +373,128 @@ def test_migration_0036_up_and_down(tmp_path, monkeypatch):
     with eng.connect() as c:
         assert c.execute(sa.text("SELECT id FROM reels")).scalar_one() == "r1"
     eng.dispose()
+
+
+# --- review round: the kind is frozen while Meta has it -------------------------------
+
+def _patch(db, reel_id, **fields):
+    from routes import reels as routes_reels
+    return routes_reels.update_reel(reel_id, routes_reels.ReelPatch(**fields), db, None)
+
+
+def test_the_kind_cannot_change_while_a_container_exists(db, tmp_path):
+    cp = ig.ContainerCheckpoint("c9", datetime.utcnow())
+    r = _db_reel(db, tmp_path, ig_container=cp.to_json())
+    with pytest.raises(HTTPException) as e:
+        _patch(db, r.id, trial_graduation="MANUAL")
+    assert e.value.status_code == 409
+    # ...but everything else about the reel can still be edited, and re-sending the
+    # current value is not a change.
+    assert _patch(db, r.id, caption="new", trial_graduation=None).caption == "new"
+
+
+def test_the_strategy_cannot_change_while_a_container_exists_either(db, tmp_path):
+    cp = ig.ContainerCheckpoint("c9", datetime.utcnow(), trial_graduation="MANUAL")
+    r = _db_reel(db, tmp_path, trial_graduation="MANUAL", ig_container=cp.to_json())
+    with pytest.raises(HTTPException):
+        _patch(db, r.id, trial_graduation="SS_PERFORMANCE")
+
+
+def test_a_definite_no_from_meta_frees_the_kind_again(db, meta, r2_stub, tmp_path):
+    """Refused at media_publish: the container is known unpublished, so it is dropped
+    and the photographer can turn Trial off and reschedule."""
+    r = _db_reel(db, tmp_path, trial_graduation="MANUAL")
+    meta.publish_error = NOT_ELIGIBLE
+    reel_publish.run_due(db)
+    db.refresh(r)
+    assert r.ig_container is None
+    assert _patch(db, r.id, trial_graduation=None).trial_graduation is None
+
+
+def test_an_outstanding_publish_keeps_its_container(db, meta, r2_stub, tmp_path):
+    r = _db_reel(db, tmp_path, trial_graduation="MANUAL")
+    meta.publish_behaviour = ["timeout_after"]
+    with pytest.raises(reel_publish.ReelPublishError):
+        reel_publish.publish(db, r)
+    db.refresh(r)
+    assert r.ig_container is not None
+    with pytest.raises(HTTPException):
+        _patch(db, r.id, trial_graduation=None)
+
+
+def test_the_kind_recorded_is_the_kind_that_was_sent(db, r2_stub, tmp_path, monkeypatch):
+    """A change that slips in while the worker is publishing does not rewrite history."""
+    r = _db_reel(db, tmp_path, trial_graduation="MANUAL")
+    seen = {}
+
+    def publish_and_meanwhile_edit(db_, **kw):
+        seen["asked"] = kw["trial_graduation"]
+        r.trial_graduation = None      # the concurrent edit, landing mid-publish
+        return {"remote_id": "m1", "url": None, "collaborators": [],
+                "collaborators_rejected": [], "trial_graduation": kw["trial_graduation"]}
+    monkeypatch.setattr(ig, "post_reel", publish_and_meanwhile_edit)
+
+    reel_publish.publish(db, r)
+    db.refresh(r)
+    assert seen["asked"] == "MANUAL" and r.trial_graduation == "MANUAL"
+
+
+def test_the_checkpoint_remembers_the_kind(db, meta):
+    store = Store()
+    _reel_post(db, trial_graduation="SS_PERFORMANCE", on_checkpoint=store)
+    assert store.saved[0].trial_graduation == "SS_PERFORMANCE"
+    assert ig.ContainerCheckpoint.from_json('{"id": "c", "created_at": "2026-01-01T00:00:00"}'
+                                            ).trial_graduation is None
+
+
+def test_a_recovered_publish_records_what_actually_went_out(db, meta, r2_stub, tmp_path):
+    """The container went out as a trial; the row now says ordinary. Meta's copy wins."""
+    meta.containers["c0"] = {"status": "PUBLISHED", "caption": "Roxie at the Allways",
+                             "type": "VIDEO"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow() - timedelta(minutes=2),
+                                publish_sent_at=datetime.utcnow() - timedelta(minutes=1),
+                                trial_graduation="MANUAL", caption="Roxie at the Allways")
+    r = _db_reel(db, tmp_path, trial_graduation=None, ig_container=cp.to_json())
+    result = reel_publish.publish(db, r)
+    db.refresh(r)
+    assert result["recovered"] and r.posted_at is not None
+    assert r.trial_graduation == "MANUAL"
+    assert meta.publishes == []
+
+
+# --- review round: a legacy checkpoint is not a trial --------------------------------
+
+def test_a_legacy_checkpoint_is_rebuilt_for_a_trial(db, meta):
+    """No fingerprint, never sent, FINISHED: it was built as an ordinary reel."""
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "Roxie at the Allways",
+                             "type": "VIDEO"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow())
+    _reel_post(db, trial_graduation="MANUAL", checkpoint=cp, on_checkpoint=Store())
+    assert "c0" not in meta.publishes
+    assert "trial_params" in meta.creates[0]
+
+
+def test_a_legacy_checkpoint_still_resumes_for_an_ordinary_reel(db, meta):
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "Roxie at the Allways",
+                             "type": "VIDEO"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow())
+    _reel_post(db, checkpoint=cp, on_checkpoint=Store())
+    assert meta.publishes == ["c0"] and meta.creates == []
+
+
+# --- review round: a hint when the refusal doesn't name the trial --------------------
+
+def test_an_unrelated_400_on_a_trial_gets_the_trial_hint(db, meta):
+    meta.create_error = {"message": "Invalid parameter", "code": 100}
+    with pytest.raises(ig.InstagramError) as e:
+        _reel_post(db, trial_graduation="MANUAL", on_checkpoint=Store())
+    assert not isinstance(e.value, ig.TrialReelRejected), "classification unchanged"
+    assert e.value.permanent
+    assert str(e.value).endswith(ig.TRIAL_HINT)
+
+
+def test_an_ordinary_reel_gets_no_trial_hint(db, meta):
+    meta.create_error = {"message": "Invalid parameter", "code": 100}
+    with pytest.raises(ig.InstagramError) as e:
+        _reel_post(db, on_checkpoint=Store())
+    assert ig.TRIAL_HINT not in str(e.value)

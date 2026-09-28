@@ -163,6 +163,9 @@ def publish(db: Session, reel: Reel) -> dict:
     resumed container was already ingested by Meta, and needs no MP4 in R2.
     """
     reel.publish_attempts = (reel.publish_attempts or 0) + 1
+    # Read once. Whatever the row says by the time Meta answers, this is what was asked
+    # for — and the PATCH that could change it is refused while a container exists.
+    trial = reel.trial_graduation
     checkpoint = ig.ContainerCheckpoint.from_json(reel.ig_container)
     staged_url: str | None = None
     if checkpoint is None:
@@ -204,25 +207,36 @@ def publish(db: Session, reel: Reel) -> dict:
             collaborators=collaborators_for(db, reel),
             # post_reel owns what a trial changes on the wire (no collaborators, no
             # share_to_feed) so no caller can get those rules half right.
-            trial_graduation=reel.trial_graduation,
+            trial_graduation=trial,
             checkpoint=checkpoint,
             on_checkpoint=save,
             media_identity=_media_identity(reel),
         )
     except ig.InstagramError as e:
         reel.publish_error = str(e)
+        if e.permanent and not isinstance(e, ig.PublishUnconfirmed):
+            # Meta said a definite no, and no publish is outstanding: the container can't
+            # go out as it is. Forget it, so the photographer can change the reel (the
+            # trial setting is frozen while a checkpoint exists) and the next attempt
+            # builds a fresh one. A container with a publish in flight is never dropped.
+            cp = ig.ContainerCheckpoint.from_json(reel.ig_container)
+            if cp is not None and cp.publish_sent_at is None:
+                reel.ig_container = None
         if isinstance(e, ig.TrialReelRejected):
             # On the cover's timeline: reels have no event log of their own, and this
             # one needs a person — Trial off, or wait and reschedule.
             events.log_event(db, post_id=reel.cover_post_id, event_type="reel_trial_rejected",
                              actor="worker", details={
                                  "reel_id": reel.id,
-                                 "graduation": reel.trial_graduation,
+                                 "graduation": trial,
                                  "error": str(e),
                              })
         db.commit()
         raise ReelPublishError(str(e), permanent=getattr(e, "permanent", False)) from e
 
+    # What actually went out: the checkpoint's kind when Meta's container carried one
+    # (a recovered publish reports it), else what this attempt asked for.
+    reel.trial_graduation = result["trial_graduation"] if "trial_graduation" in result else trial
     reel.remote_id = result.get("remote_id")
     reel.remote_url = result.get("url")
     reel.posted_at = _utcnow()
