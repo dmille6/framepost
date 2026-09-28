@@ -10,6 +10,7 @@ for recovering an ambiguous remote publish; the lease only excludes live competi
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import uuid
+import logging
 
 from sqlalchemy import event, or_, update
 from sqlalchemy.dialects.sqlite import insert
@@ -17,12 +18,14 @@ from sqlalchemy.dialects.sqlite import insert
 from models import Post, PostPlatform
 from services.platforms.instagram import StopAttempt
 
+log = logging.getLogger(__name__)
+
 STALE_AFTER = timedelta(minutes=10)
 _active: ContextVar[tuple] = ContextVar("feed_claims", default=())
 
 
 class ClaimLost(StopAttempt):
-    """A replaced owner must neither send another request nor commit stale results."""
+    """A replaced owner must stop requests and bookkeeping; delivery proof is retained."""
 
 
 def now_utc():
@@ -80,7 +83,20 @@ def before_request(request):
     active = _active.get()
     if active:
         # Nested post + platform claims share a session; both guards run on this commit.
-        active[-1].db.commit()
+        db = active[-1].db
+        try:
+            db.commit()
+        except ClaimLost:
+            raise
+        except Exception:
+            # A renewal outage is not an upload failure: a thread root may already
+            # be public. Keep sending under the lease; the final commit still fences
+            # a replaced owner. Roll back so the next renewal can use the session.
+            log.exception("feed claim renewal failed; continuing under existing lease")
+            try:
+                db.rollback()
+            except Exception:
+                log.exception("feed claim renewal rollback failed")
 
 
 def _take(db, model, key, conditions, now):
@@ -100,13 +116,13 @@ def post_claim(db, post_id, *, now=None):
     ], now)
 
 
-def platform_claim(db, post_id, platform_id, *, now=None, recoverable=True):
+def platform_claim(db, post_id, platform_id, *, now=None, recoverable=True, retry_failed=False):
     now = now or now_utc()
     # First attempts do not yet have a row. INSERT ... ON CONFLICT avoids racing two
     # ORM inserts; the following conditional UPDATE still has exactly one winner.
     db.execute(insert(PostPlatform).values(post_id=post_id, platform_id=platform_id)
                .on_conflict_do_nothing(index_elements=["post_id", "platform_id"]))
-    conditions = [PostPlatform.status == "pending",
+    conditions = [PostPlatform.status.in_(("pending", "failed") if retry_failed else ("pending",)),
                   or_(PostPlatform.next_retry_at.is_(None), PostPlatform.next_retry_at <= now)]
     if not recoverable:
         # Enforce the ambiguous-crash policy at the atomic decision too: a stale
@@ -116,3 +132,26 @@ def platform_claim(db, post_id, platform_id, *, now=None, recoverable=True):
     return _take(db, PostPlatform,
                  [PostPlatform.post_id == post_id, PostPlatform.platform_id == platform_id],
                  conditions, now)
+
+
+def commit_delivery(db, proof):
+    """Commit normally, but preserve only delivery facts if ownership was replaced.
+
+    `proof` is a narrow SQL statement, conditional on no existing remote identity.
+    A lost owner may record a remote acknowledgement, never flush stale ORM edits,
+    clear a successor's token, or perform follow-on bookkeeping.
+    """
+    try:
+        db.commit()
+    except ClaimLost:
+        db.rollback()
+        guards = [claim for claim in _active.get() if claim.db is db]
+        for claim in guards:
+            event.remove(db, "before_commit", claim._guard)
+        try:
+            db.execute(proof)
+            db.commit()
+        finally:
+            for claim in guards:
+                event.listen(db, "before_commit", claim._guard)
+        raise

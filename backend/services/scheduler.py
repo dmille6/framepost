@@ -17,6 +17,7 @@ from pathlib import Path
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.schedulers.blocking import BlockingScheduler
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.sqlite import insert
 
 from config import settings
 from database import SessionLocal
@@ -180,7 +181,11 @@ def _flickr_post(db, post: Post, fired_at: datetime) -> None:
         # The photo is on Flickr. Record that before anything else can fail: a rollback
         # here would lose the id, and the retry would upload a second copy into the
         # archive.
-        db.commit()
+        feed_claim.commit_delivery(db, update(Post).where(
+            Post.id == post.id, Post.flickr_photo_id.is_(None),
+        ).values(flickr_photo_id=photo_id, flickr_url=post.flickr_url,
+                 posted_at=fired_at, status=post.status, error_message=None,
+                 next_retry_at=None, updated_at=fired_at))
 
         # Everything below is bookkeeping, and none of it may fail the post. Two reasons.
         # The photo is already public, so raising would re-upload it. And the caller
@@ -188,6 +193,7 @@ def _flickr_post(db, post: Post, fired_at: datetime) -> None:
         # leave the post marked posted with Instagram never fired and nothing to retry
         # (fire_due_posts only picks up 'pending').
         try:
+            channel_health.clear(db, "flickr")
             _flickr_post_bookkeeping(db, post, photo_id, fired_at, late)
         except Exception:
             log.exception(
@@ -1182,7 +1188,16 @@ def _record_published(
     # checkpoint is then what stops that retry publishing a second copy.
     if remote_id:
         pp.ig_container = None
-    db.commit()
+    values = dict(status="posted", remote_id=remote_id, remote_url=remote_url,
+                  posted_at=fired_at, error_message=None, next_retry_at=None)
+    if remote_id:
+        values["ig_container"] = None
+    proof = insert(PostPlatform).values(post_id=post.id, platform_id=cred.id, **values)
+    proof = proof.on_conflict_do_update(
+        index_elements=["post_id", "platform_id"], set_=values,
+        where=PostPlatform.remote_id.is_(None),
+    )
+    feed_claim.commit_delivery(db, proof)
 
 
 def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: datetime) -> None:
@@ -1462,9 +1477,8 @@ def fanout_to_platforms(
     if not targets_creds:
         return
 
-    # On a repost we only want to re-fire Flickr — non-Flickr platforms posted successfully
-    # the first time around and the photos are still live. Skip any platform that already
-    # has a 'posted' row for this post.
+    # A repost may recover failed destinations, but successes are still live.
+    # Never send a destination that already has a posted row.
     already_posted_ids = {
         row.platform_id for row in db.execute(
             select(PostPlatform).where(
@@ -1474,30 +1488,49 @@ def fanout_to_platforms(
         ).scalars().all()
     }
 
-    for cred in targets_creds:
-        if not cred.access_token:
-            continue  # Pixelfed connection not yet completed (still pending OAuth callback)
-        if cred.id in already_posted_ids:
-            log.info(
-                "post %s: %s already posted, skipping fanout",
-                post.id[:8], cred.platform,
-            )
+    # Persist every first-attempt destination before dispatch. If a claim or its
+    # release fails, later destinations already exist for retry/stranded recovery.
+    eligible = [(c.id, c.platform) for c in targets_creds
+                if c.access_token and c.id not in already_posted_ids]
+    for cred_id, platform in eligible:
+        if platform in carousel_svc.CAROUSEL_PLATFORMS and carousel_svc.is_member(post):
             continue
+        db.execute(insert(PostPlatform).values(
+            post_id=post.id, platform_id=cred_id, next_retry_at=fired_at,
+        ).on_conflict_do_nothing(index_elements=["post_id", "platform_id"]))
+    db.commit()
+    post_id = post.id
+    for cred_id, platform in eligible:
+        try:
+            cred = db.get(PlatformCredential, cred_id)
+            if platform in carousel_svc.CAROUSEL_PLATFORMS and carousel_svc.is_member(post):
+                _mark_carousel_member(db, post, cred)
+                db.commit()
+                continue
+            _attempt_platform(db, cred, post, fired_at, retry_failed=True)
+        except feed_claim.ClaimLost:
+            raise
+        except Exception:
+            db.rollback()
+            log.exception("post %s: %s attempt failed; continuing fanout", post_id[:8], platform)
+            # Failed rows are explicitly eligible in fanout, too. If claiming one
+            # failed before sending, leave it retryable. Pending ambiguous attempts
+            # retain their checkpoint/claim and are handled by the stranded sweep.
+            try:
+                db.execute(update(PostPlatform).where(
+                    PostPlatform.post_id == post_id, PostPlatform.platform_id == cred_id,
+                    PostPlatform.status == "failed", PostPlatform.remote_id.is_(None),
+                    feed_claim.available(PostPlatform, feed_claim.now_utc()),
+                ).values(status="pending", next_retry_at=fired_at))
+                db.commit()
+            except feed_claim.ClaimLost:
+                raise
+            except Exception:
+                db.rollback()
+                log.exception("post %s: could not queue %s recovery", post_id[:8], platform)
 
-        # A carousel publishes once, from its lead. Members still fan out to Flickr (one
-        # photo per photo, which is the point of the archive) but their row here exists
-        # only to hold the staging id the lead will publish — it must never read as
-        # pending, or the health banner spends forever waiting on a post that will never
-        # be made.
-        if cred.platform in carousel_svc.CAROUSEL_PLATFORMS and carousel_svc.is_member(post):
-            _mark_carousel_member(db, post, cred)
-            db.commit()
-            continue
 
-        _attempt_platform(db, cred, post, fired_at)
-
-
-def _attempt_platform(db, cred, post, fired_at):
+def _attempt_platform(db, cred, post, fired_at, *, retry_failed=False):
     previous = db.get(PostPlatform, (post.id, cred.id))
     if (previous and previous.publish_claim_token and previous.next_retry_at is None
             and previous.publish_claimed_at
@@ -1509,7 +1542,8 @@ def _attempt_platform(db, cred, post, fired_at):
         db.commit()
         return
     claim = feed_claim.platform_claim(db, post.id, cred.id,
-                                      recoverable=cred.platform == "instagram")
+                                      recoverable=cred.platform == "instagram",
+                                      retry_failed=retry_failed)
     if claim is None:
         return
     try:
@@ -1517,6 +1551,7 @@ def _attempt_platform(db, cred, post, fired_at):
             # A crash must go through the stranded-row recovery policy, not an old
             # retry timer. IG resumes its checkpoint; other ambiguous sends need review.
             pp = db.get(PostPlatform, (post.id, cred.id))
+            pp.status = "pending"
             pp.next_retry_at = None
             db.commit()
             try:

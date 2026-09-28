@@ -225,3 +225,16 @@ def test_record_failure_still_works_for_a_real_upload_failure(db):
     scheduler._record_failure(db, post, RuntimeError("upload refused"), fired_at=NOW)
     assert post.retry_count == 1
     assert post.status in ("pending", "failed")
+
+
+def test_flickr_success_clears_reauth_even_when_bookkeeping_fails(db, flickr_ok, monkeypatch):
+    post = _pending(db, flickr_ok)
+    cred = PlatformCredential(id='flickr', platform='flickr', access_token='token',
+        auth_status='reauth_required', auth_error='error 98', auth_flagged_at=NOW)
+    db.add(cred); db.commit()
+    monkeypatch.setattr(scheduler, '_flickr_post_bookkeeping',
+                        lambda *a: (_ for _ in ()).throw(RuntimeError('bookkeeping failed')))
+    scheduler._flickr_post(db, post, NOW)
+    db.rollback()
+    assert cred.auth_status == 'ok'
+    assert cred.auth_error is None and cred.auth_flagged_at is None

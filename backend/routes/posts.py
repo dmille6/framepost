@@ -841,7 +841,7 @@ def instagram_post_now(
             status.HTTP_400_BAD_REQUEST,
             "Instagram isn't connected — Settings → Platforms → Instagram.",
         )
-    if post.status not in ("posted", "late"):
+    if post.status not in ("posted", "late", "failed"):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Post hasn't been published yet — Instagram fires automatically as part of "
