@@ -67,7 +67,8 @@ def test_interactive_route_snaps_suggestions(db, monkeypatch, tmp_path, fake_sug
     assert ai.suggest("photo", db=db, _user=None).tags == ["Guitar"]
 
 
-def test_import_auto_apply_snaps_before_merging(db, monkeypatch, tmp_path, fake_suggester):
+def test_import_auto_apply_never_plural_snaps(db, monkeypatch, tmp_path, fake_suggester):
+    """Unreviewed import tags ship as hashtags: "guitars" stays itself, not "Guitar"."""
     import database
     src = tmp_path / "photo.jpg"
     src.touch()
@@ -78,7 +79,7 @@ def test_import_auto_apply_snaps_before_merging(db, monkeypatch, tmp_path, fake_
     monkeypatch.setattr(database, "SessionLocal", lambda: db)
     monkeypatch.setattr(db, "close", lambda: None)
     ai_tagging.apply_to_post("new")
-    assert db.get(Post, "new").tags == "Guitar"
+    assert db.get(Post, "new").tags == "guitars"
 
 
 def test_alt_text_sweep_uses_guarded_prompt(db, monkeypatch, tmp_path, fake_suggester):
@@ -99,3 +100,20 @@ def test_alt_text_sweep_uses_guarded_prompt(db, monkeypatch, tmp_path, fake_sugg
     fake_suggester.suggest = suggest
     assert alt_text.fill_missing_alt_text(db) == 1
     assert ai_tagging.NAME_GROUNDING_RULE in prompts[0]
+
+
+def test_import_path_snaps_case_only(db):
+    db.add(Post(id="vocab", tags="Guitars, NOLA"))
+    db.commit()
+    assert tags.snap_to_vocabulary(db, ["guitar", "nola"], plurals=False) == ["guitar", "NOLA"]
+
+
+@pytest.mark.parametrize("saved, suggested", [
+    ("blues", "blue"), ("blue", "blues"), ("rocks", "rock"), ("news", "new"),
+    ("arts", "art"), ("metals", "metal"), ("lights", "light"), ("pops", "pop"),
+])
+def test_ambiguous_plural_pairs_never_snap(db, saved, suggested):
+    db.add(Post(id="vocab", tags=saved))
+    db.commit()
+    assert tags.snap_to_vocabulary(db, [suggested]) == [suggested]
+

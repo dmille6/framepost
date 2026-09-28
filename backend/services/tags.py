@@ -85,7 +85,15 @@ def merge_unique(*sources: Iterable[str]) -> list[str]:
     return out
 
 
-def snap_to_vocabulary(db: Session, suggested: list[str]) -> list[str]:
+# Words whose trailing-s form is a different word to a concert photographer, not a
+# plural: blue light vs blues music, rock vs rocks, new vs news. Never snapped across.
+_AMBIGUOUS_PLURALS = frozenset({
+    "blue", "rock", "new", "art", "soul", "pop", "metal", "light", "string", "drum",
+    "horn", "key", "bar", "arm", "glass", "wing", "spirit", "show", "stair", "ton",
+})
+
+
+def snap_to_vocabulary(db: Session, suggested: list[str], *, plurals: bool = True) -> list[str]:
     """Keep the photographer's spelling for case and trivial trailing-s variants.
 
     Vocabulary lives in posts.tags and tag_profiles.tags, as in tag autocomplete.
@@ -94,6 +102,12 @@ def snap_to_vocabulary(db: Session, suggested: list[str]) -> list[str]:
     singular and plural tags can coexist. Only ordinary +s is recognized: no stemming,
     -es/-ies, aliases, or whitespace rules. In particular bass/basses and bus/buses
     stay separate; a broad stemmer can change the subject of a concert photograph.
+
+    plurals=False snaps case only. The unattended import path uses that: a plural
+    snap there ships straight to every platform's hashtags with no one looking, and
+    "blue" (the stage light) becoming "blues" (the genre) is a different photograph.
+    Plural snapping stays for the interactive suggest, where the photographer reviews
+    every tag, and even there never crosses _AMBIGUOUS_PLURALS.
     """
     from collections import Counter
 
@@ -108,6 +122,8 @@ def snap_to_vocabulary(db: Session, suggested: list[str]) -> list[str]:
     def plural(word: str) -> str | None:
         if len(word) < 3 or word.endswith(("s", "x", "z", "ch", "sh", "y")):
             return None
+        if word in _AMBIGUOUS_PLURALS:
+            return None
         return word + "s"
 
     out: list[str] = []
@@ -115,12 +131,12 @@ def snap_to_vocabulary(db: Session, suggested: list[str]) -> list[str]:
         cleaned = tag.strip()
         key = cleaned.lower()
         match = canonical.get(key)
-        if match is None:
+        if match is None and plurals:
             candidates = [spelling for word, spelling in canonical.items()
                           if plural(key) == word or plural(word) == key]
             # Ambiguous vocabulary is the photographer's decision, not ours.
             match = candidates[0] if len(candidates) == 1 else cleaned
-        out.append(match)
+        out.append(match if match is not None else cleaned)
     return out
 
 

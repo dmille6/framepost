@@ -82,3 +82,9 @@ def test_upload_receives_place_tags(db, monkeypatch, tmp_path):
     assert "The AllWays Lounge" in shlex.split(uploads[0]["tags"])
     assert "New Orleans" in shlex.split(uploads[0]["tags"])
     assert post.flickr_photo_id == "remote"
+
+
+def test_double_quotes_in_a_place_never_break_tag_quoting():
+    from services.platforms import flickr
+    out = flickr.format_tags(['The "Big" Room', 'plain'], machine_tags=["framepost:sha256=abc"])
+    assert out == '"The Big Room" plain framepost:sha256=abc'

@@ -260,3 +260,14 @@ def test_a_disconnected_pinterest_is_not_offered(db, monkeypatch):
 
     out = platforms_route.list_connected_platforms(db=db, _user=None)
     assert [p["platform"] for p in out] == []
+
+
+def test_a_pin_past_the_analytics_window_is_not_resampled(db, monkeypatch):
+    cred = _cred(db)
+    _pin(db, cred, remote_id="old", days_ago=pinterest.ANALYTICS_MAX_DAYS_BACK + 1)
+    calls = []
+    monkeypatch.setattr(pinterest, "fetch_pin_analytics",
+                        lambda *a, **kw: calls.append(a) or None)
+    comments_svc.sync_all(db)
+    assert calls == []
+    assert _snaps(db) == []

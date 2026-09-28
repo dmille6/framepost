@@ -198,15 +198,16 @@ class TagSuggestion:
     sources: list[list[str]] | None = None
 
 
-def snap_suggestion(db, result: TagSuggestion) -> TagSuggestion:
+def snap_suggestion(db, result: TagSuggestion, *, plurals: bool = True) -> TagSuggestion:
     """Reuse saved spellings without losing ensemble provider badges when tags merge.
 
     Run at the DB-owning boundaries (interactive and import); provider adapters stay
     independent of the database, and the alt-text sweep discards tags altogether.
+    Import passes plurals=False: nobody reviews those tags before they ship.
     """
     from services import tags as tag_helpers
 
-    snapped = tag_helpers.snap_to_vocabulary(db, result.tags)
+    snapped = tag_helpers.snap_to_vocabulary(db, result.tags, plurals=plurals)
     tags: list[str] = []
     sources: list[list[str]] | None = [] if result.sources is not None else None
     positions: dict[str, int] = {}
@@ -696,7 +697,7 @@ def apply_to_post(post_id: str) -> None:
             log.warning("ai auto-apply: suggester failed on %s: %s", post_id[:8], e)
             return
 
-        result = snap_suggestion(db, result)
+        result = snap_suggestion(db, result, plurals=False)
         existing = tag_helpers.parse_csv(post.tags)
         merged = tag_helpers.merge_unique(existing, result.tags)
         added = [t for t in result.tags if t.lower() not in {e.lower() for e in existing}]

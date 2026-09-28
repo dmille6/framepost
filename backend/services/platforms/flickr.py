@@ -241,7 +241,9 @@ def format_tags(comma_separated: str | list[str] | None, *, machine_tags: list[s
     if comma_separated:
         values = comma_separated.split(",") if isinstance(comma_separated, str) else comma_separated
         for raw in values:
-            t = raw.strip()
+            # Flickr has no escape for a quote inside a quoted tag, so a venue saved as
+            # The "Big" Room would split into junk tags. Drop the quotes instead.
+            t = raw.replace('"', "").strip()
             if not t:
                 continue
             out.append(f'"{t}"' if " " in t else t)

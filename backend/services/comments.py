@@ -693,6 +693,11 @@ def _sync_pinterest(db: Session, post_platforms: list[tuple[PostPlatform, Platfo
     for pp, _cred in targets:
         try:
             since = pp.posted_at.date() if pp.posted_at else today
+            if (today - since).days > pinterest_svc.ANALYTICS_MAX_DAYS_BACK:
+                # Past the endpoint's window the request is clamped and would drop the
+                # pin's first days, so its "lifetime" total would shrink. The last
+                # full reading stands.
+                continue
             totals = pinterest_svc.fetch_pin_analytics(
                 token, pp.remote_id, since=since, today=today)
             if totals is None:
