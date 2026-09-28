@@ -5,6 +5,7 @@ through the retry policy in services/retry.py.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -887,6 +888,18 @@ def _note_recovered(db, post: Post, result: dict) -> None:
     )
 
 
+def _ig_media_identity(frame: Post, wanted: str) -> str:
+    """What the image Meta will ingest is made from — the photo and every framing choice
+    applied to it. Part of the container fingerprint (instagram.content_fingerprint), so
+    a crop edited after a failed attempt isn't published from the old container. Not the
+    staged object's key: a re-stage of identical content must not look like an edit."""
+    return json.dumps([
+        frame.id, frame.sha256, wanted, frame.ig_fit, frame.ig_crop_x, frame.ig_crop_y,
+        frame.ig_crop_w, frame.ig_crop_h, frame.ig_crop_ratio, frame.ig_crop_offset,
+        frame.ig_focal_x, frame.ig_focal_y,
+    ])
+
+
 def _ig_wanted_ratio(db, frame: Post) -> str:
     floor, ratio_key, _tested = ig_variant.supported_floor(db)
     ratio = (frame.width / frame.height) if frame.width and frame.height else None
@@ -1031,6 +1044,8 @@ def _post_instagram_carousel(
             db=db, images=images, caption=caption, collaborators=collabs,
             resume=resume, on_child=_remember,
             checkpoint=checkpoint, on_checkpoint=save_checkpoint,
+            media_identity=json.dumps(
+                [_ig_media_identity(f, _ig_wanted_ratio(db, f)) for f in frames]),
         )
     except instagram.InstagramError as e:
         # Same 3:4 probe as the single path. A carousel costs one wasted upload per
@@ -1248,6 +1263,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 db=db, image_url=_ig_fetchable(db, cred, post, image_url, wanted=wanted),
                 caption=text, alt_text=alt, collaborators=collab_handles,
                 checkpoint=checkpoint, on_checkpoint=save_checkpoint,
+                media_identity=_ig_media_identity(post, wanted),
             )
         except instagram.InstagramError as e:
             # The 3:4 probe: we optimistically assume Meta's 2025 grid change reached the

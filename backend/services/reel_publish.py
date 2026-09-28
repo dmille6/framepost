@@ -143,6 +143,16 @@ def unstage(reel: Reel) -> None:
     reel.staged_key = None
 
 
+def _media_identity(reel: Reel) -> str:
+    """The rendered file, by path, size and mtime: a re-render after a failed attempt
+    must not be published from the container built from the old MP4."""
+    try:
+        st = Path(reel.mp4_path).stat() if reel.mp4_path else None
+    except OSError:
+        st = None
+    return f"{reel.id}|{reel.mp4_path}|{st.st_size if st else ''}|{st.st_mtime_ns if st else ''}"
+
+
 def publish(db: Session, reel: Reel) -> dict:
     """Stage, publish, record. Raises ReelPublishError; the caller decides about retries.
 
@@ -194,6 +204,7 @@ def publish(db: Session, reel: Reel) -> dict:
             collaborators=collaborators_for(db, reel),
             checkpoint=checkpoint,
             on_checkpoint=save,
+            media_identity=_media_identity(reel),
         )
     except ig.InstagramError as e:
         reel.publish_error = str(e)

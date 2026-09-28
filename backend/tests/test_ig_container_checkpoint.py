@@ -352,3 +352,109 @@ def test_reel_checkpoint_lives_on_the_reel(db, meta, r2_stub, tmp_path):
     db.refresh(reel)
     assert meta.publishes == ["c1", "c1"] and len(meta.creates) == 1
     assert reel.remote_id == "m1" and reel.ig_container is None
+
+
+# --- review fixes: recovery must not claim another post's media ----------------------
+
+def _now_ig(offset=timedelta(0)):
+    return (datetime.now(timezone.utc) + offset).strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+
+def test_recovery_skips_media_already_recorded_for_another_post(db, meta):
+    """55 captions are reused. Post B must not adopt post A's live media as its own."""
+    other, cred = _ig_post(db)
+    db.add(PostPlatform(post_id=other.id, platform_id=cred.id, status="posted", remote_id="mA"))
+    db.commit()
+    meta.containers["c1"] = {"status": "PUBLISHED", "caption": "Roxie at the Allways",
+                             "type": "IMAGE"}
+    meta.media.append({"id": "mA", "caption": "Roxie at the Allways", "media_type": "IMAGE",
+                       "timestamp": _now_ig(), "permalink": "https://www.instagram.com/p/mA/"})
+    cp = ig.ContainerCheckpoint("c1", datetime.utcnow() - timedelta(minutes=2),
+                                publish_sent_at=datetime.utcnow() - timedelta(minutes=1))
+
+    result = _photo(db, checkpoint=cp, on_checkpoint=Store())
+
+    assert result["recovered"] and result["remote_id"] is None
+    assert meta.publishes == []
+
+
+def test_recovery_ignores_media_published_long_after_the_request(db, meta):
+    """An unconfirmed publish from an hour ago that Meta never took: a same-caption post
+    made since is not it, so the container is published — once."""
+    meta.containers["c1"] = {"status": "FINISHED", "caption": "Roxie at the Allways",
+                             "type": "IMAGE"}
+    meta.media.append({"id": "mLater", "caption": "Roxie at the Allways",
+                       "media_type": "IMAGE", "timestamp": _now_ig(),
+                       "permalink": "https://www.instagram.com/p/mLater/"})
+    hour_ago = datetime.utcnow() - timedelta(hours=1)
+    cp = ig.ContainerCheckpoint("c1", hour_ago, publish_sent_at=hour_ago)
+
+    result = _photo(db, checkpoint=cp, on_checkpoint=Store())
+
+    assert meta.publishes == ["c1"]
+    assert result["remote_id"] != "mLater" and not result.get("recovered")
+
+
+# --- review fixes: a container built from old content is not published --------------
+
+def _fp(caption="Roxie at the Allways", collabs=(), media="img-v1"):
+    return ig.content_fingerprint(caption, list(collabs), media)
+
+
+def test_an_edited_post_gets_a_new_container(db, meta):
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "old", "type": "IMAGE"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow(), fingerprint=_fp(caption="old"))
+    _photo(db, checkpoint=cp, on_checkpoint=Store(), media_identity="img-v1")
+    assert meta.publishes == ["c2"] and len(meta.creates) == 1   # c0 never published
+
+
+def test_a_recropped_photo_gets_a_new_container(db, meta):
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "Roxie at the Allways",
+                             "type": "IMAGE"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow(), fingerprint=_fp(media="img-v1"))
+    _photo(db, checkpoint=cp, on_checkpoint=Store(), media_identity="img-v2")
+    assert meta.publishes == ["c2"] and len(meta.creates) == 1
+
+
+def test_unchanged_content_resumes_the_container(db, meta):
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "Roxie at the Allways",
+                             "type": "IMAGE"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow(), fingerprint=_fp())
+    _photo(db, checkpoint=cp, on_checkpoint=Store(), media_identity="img-v1")
+    assert meta.publishes == ["c0"] and meta.creates == []
+
+
+def test_a_checkpoint_without_a_fingerprint_still_resumes(db, meta):
+    meta.containers["c0"] = {"status": "FINISHED", "caption": "x", "type": "IMAGE"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow())
+    _photo(db, checkpoint=cp, on_checkpoint=Store(), media_identity="anything")
+    assert meta.publishes == ["c0"]
+
+
+def test_a_sent_container_is_checked_not_discarded_when_content_changed(db, meta):
+    """Once a publish was sent, "is it live?" beats "is it current?"."""
+    meta.containers["c0"] = {"status": "PUBLISHED", "caption": "old", "type": "IMAGE"}
+    cp = ig.ContainerCheckpoint("c0", datetime.utcnow(), fingerprint=_fp(caption="old"),
+                                publish_sent_at=datetime.utcnow())
+    result = _photo(db, checkpoint=cp, on_checkpoint=Store(), media_identity="img-v1")
+    assert result["recovered"] and meta.creates == [] and meta.publishes == []
+
+
+# --- review fixes: an unconfirmed publish waits minutes, not one -------------------
+
+def test_an_unconfirmed_publish_retries_after_minutes(db, meta, monkeypatch, tmp_path):
+    post, cred = _ig_post(db)
+    monkeypatch.setattr(scheduler, "_source_for", lambda p: tmp_path / "x.jpg")
+    monkeypatch.setattr(scheduler.flickr, "get_display_image_url",
+                        lambda db, pid, **kw: "https://live.staticflickr.com/x.jpg")
+    monkeypatch.setattr(scheduler.ig_variant, "target_ratio_key",
+                        lambda *a: scheduler.ig_variant.NATIVE_RATIO_KEY)
+    meta.publish_behaviour = ["500"]
+    before = datetime.utcnow()
+
+    scheduler.fanout_to_platforms(db, post, fired_at=before, targets=["instagram"])
+    db.commit()
+
+    pp = db.get(PostPlatform, (post.id, cred.id))
+    wait = (pp.next_retry_at - before).total_seconds()
+    assert 5 * 60 <= wait <= 10 * 60

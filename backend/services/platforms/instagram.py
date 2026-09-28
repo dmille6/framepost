@@ -33,6 +33,7 @@ Hard API constraints enforced here / upstream:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import logging
@@ -47,7 +48,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from crypto import decrypt_token, encrypt_token
-from models import PlatformCredential
+from models import PlatformCredential, PostPlatform, Reel
 from services.platforms import credentials
 
 log = logging.getLogger("framepost.instagram")
@@ -133,6 +134,14 @@ CONTAINER_REUSE_WINDOW = timedelta(hours=23)
 RECOVERY_SKEW = timedelta(minutes=5)
 # How far back through the account's newest media to look for one we may have published.
 RECOVERY_LOOKBACK = 25
+# ...and how long after the publish request a match may appear. Unbounded, a later post
+# reusing the same caption (55 titles are reused across the queue) would be claimed as
+# this one's, and this post would be marked live without ever being published.
+RECOVERY_WINDOW = timedelta(minutes=15)
+# An unconfirmed publish waits this long before the next attempt asks Meta about it: the
+# 1-minute first step of the backoff curve would hit Meta again while whatever caused the
+# timeout or 5xx is most likely still going on.
+UNCONFIRMED_RETRY_SECONDS = 420
 
 
 class InstagramError(Exception):
@@ -156,10 +165,22 @@ class PublishUnconfirmed(InstagramError):
 
     def __init__(self, message: str):
         super().__init__(message, permanent=False)
+        # Read by the scheduler's failure recorder (same hook as carousel resume).
+        self.retry_after_seconds = UNCONFIRMED_RETRY_SECONDS
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def content_fingerprint(caption: str, collaborators: Sequence[str],
+                        media_identity: str | None) -> str:
+    """What a container was built from: caption, the co-authors asked for, and the
+    caller's identity for the media (source + crop/ratio for a photo, the file for a
+    reel). A resumed container whose fingerprint no longer matches would publish the
+    old caption or the old crop, so it is rebuilt — if it was never sent for publish."""
+    blob = json.dumps([caption or "", [c.lower() for c in collaborators], media_identity or ""])
+    return hashlib.sha256(blob.encode()).hexdigest()[:32]
 
 
 @dataclass
@@ -183,9 +204,13 @@ class ContainerCheckpoint:
     publish_sent_at: datetime | None = None
     collaborators: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
+    # content_fingerprint() of what the container was built from. None on checkpoints
+    # written before fingerprints existed; those are resumed as before.
+    fingerprint: str | None = None
 
     def to_json(self) -> str:
         return json.dumps({
+            "fingerprint": self.fingerprint,
             "id": self.container_id,
             "created_at": self.created_at.isoformat(),
             "publish_sent_at": self.publish_sent_at.isoformat() if self.publish_sent_at else None,
@@ -208,6 +233,7 @@ class ContainerCheckpoint:
                 publish_sent_at=datetime.fromisoformat(sent) if sent else None,
                 collaborators=list(d.get("collaborators") or []),
                 rejected=list(d.get("rejected") or []),
+                fingerprint=d.get("fingerprint"),
             )
         except (ValueError, KeyError, TypeError):
             log.warning("instagram: ignoring unreadable container checkpoint %r", raw[:200])
@@ -526,6 +552,7 @@ def post_photo(
     collaborators: list[str] | None = None,
     checkpoint: ContainerCheckpoint | None = None,
     on_checkpoint: Checkpoint | None = None,
+    media_identity: str | None = None,
 ) -> dict:
     """Container → poll → publish. Returns {remote_id, url, collaborators}.
 
@@ -564,8 +591,10 @@ def post_photo(
         return container_id, used, rejected
 
     return _publish_resumable(
-        ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
+        db, ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
         create=create, describing="photo", caption=caption_text, media_types=("IMAGE",),
+        fingerprint=content_fingerprint(
+            caption_text, _wanted_collaborators(collaborators), media_identity),
     )
 
 
@@ -578,6 +607,7 @@ def post_reel(
     share_to_feed: bool = True,
     checkpoint: ContainerCheckpoint | None = None,
     on_checkpoint: Checkpoint | None = None,
+    media_identity: str | None = None,
 ) -> dict:
     """Publish a reel from a publicly fetchable MP4. Returns {remote_id, url, ...}.
 
@@ -616,10 +646,12 @@ def post_reel(
         return container_id, used, rejected
 
     return _publish_resumable(
-        ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
+        db, ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
         create=create, describing="reel", caption=caption_text,
         media_types=("VIDEO", "REELS"),
         tries=REEL_POLL_TRIES, interval=REEL_POLL_INTERVAL,
+        fingerprint=content_fingerprint(
+            caption_text, _wanted_collaborators(collaborators), media_identity),
     )
 
 
@@ -633,6 +665,7 @@ def post_carousel(
     on_child: Callable[[list[str]], None] | None = None,
     checkpoint: ContainerCheckpoint | None = None,
     on_checkpoint: Checkpoint | None = None,
+    media_identity: str | None = None,
 ) -> dict:
     """Publish 2..MAX_CAROUSEL images as one carousel. Returns the same shape as
     post_photo.
@@ -711,9 +744,11 @@ def post_carousel(
         return parent_id, used, rejected
 
     result = _publish_resumable(
-        ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
+        db, ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
         create=create, describing=f"carousel of {len(images)}", caption=caption_text,
         media_types=("CAROUSEL_ALBUM",),
+        fingerprint=content_fingerprint(
+            caption_text, _wanted_collaborators(collaborators), media_identity),
     )
 
     media_id = result["remote_id"]
@@ -742,6 +777,7 @@ def post_carousel(
 # -----------------------------------------------------------------------------
 
 def _publish_resumable(
+    db: Session,
     ig_user_id: str,
     token: str,
     *,
@@ -753,6 +789,7 @@ def _publish_resumable(
     media_types: tuple[str, ...],
     tries: int = STATUS_POLL_TRIES,
     interval: float = STATUS_POLL_INTERVAL,
+    fingerprint: str | None = None,
 ) -> dict:
     """Publish via a container, resuming the checkpointed one when there is one.
 
@@ -777,8 +814,8 @@ def _publish_resumable(
     cp = checkpoint
     if cp is not None:
         resumed = _resume_checkpoint(
-            ig_user_id, token, cp, save=save, describing=describing, caption=caption,
-            media_types=media_types, tries=tries, interval=interval,
+            db, ig_user_id, token, cp, save=save, describing=describing, caption=caption,
+            media_types=media_types, tries=tries, interval=interval, fingerprint=fingerprint,
         )
         if resumed is not None:
             return resumed
@@ -786,21 +823,31 @@ def _publish_resumable(
 
     container_id, used, rejected = create()
     cp = ContainerCheckpoint(container_id=container_id, created_at=_utcnow(),
-                             collaborators=list(used), rejected=list(rejected))
+                             collaborators=list(used), rejected=list(rejected),
+                             fingerprint=fingerprint)
     save(cp)
     _await_container(container_id, token, describing=describing, tries=tries, interval=interval)
     return _publish_checkpointed(ig_user_id, token, cp, save=save)
 
 
 def _resume_checkpoint(
-    ig_user_id: str, token: str, cp: ContainerCheckpoint, *, save: Checkpoint,
+    db: Session, ig_user_id: str, token: str, cp: ContainerCheckpoint, *, save: Checkpoint,
     describing: str, caption: str, media_types: tuple[str, ...],
-    tries: int, interval: float,
+    tries: int, interval: float, fingerprint: str | None = None,
 ) -> dict | None:
     """Act on a checkpoint. Returns the publish result, or None to build a fresh one."""
     fresh = _utcnow() - cp.created_at < CONTAINER_REUSE_WINDOW
     if not fresh and not cp.publish_sent_at:
         log.info("instagram: checkpointed container %s is past Meta's 24h window — "
+                 "building a new one", cp.container_id)
+        return None
+    if (not cp.publish_sent_at and cp.fingerprint and fingerprint
+            and cp.fingerprint != fingerprint):
+        # The caption, the co-authors or the image changed since this container was
+        # built (typically after a 4xx sent the post back for editing). Publishing it
+        # would ship the old version. Safe to drop only because no publish was ever sent
+        # for it; once one has been, the question is "is it live?", not "is it current?".
+        log.info("instagram: container %s was built from different content — "
                  "building a new one", cp.container_id)
         return None
 
@@ -810,7 +857,7 @@ def _resume_checkpoint(
 
     if status == "PUBLISHED":
         try:
-            found = _find_published(ig_user_id, token, cp, caption, media_types)
+            found = _find_published(db, ig_user_id, token, cp, caption, media_types)
         except Exception as e:  # noqa: BLE001 — it is live either way; the id is a nicety
             log.warning("instagram: container %s is published but its media id could not "
                         "be looked up: %s", cp.container_id, e)
@@ -822,7 +869,7 @@ def _resume_checkpoint(
         # the newest media; look before sending another. A failed lookup means we still
         # don't know — so wait for the next attempt rather than risk a duplicate.
         try:
-            found = _find_published(ig_user_id, token, cp, caption, media_types)
+            found = _find_published(db, ig_user_id, token, cp, caption, media_types)
         except Exception as e:  # noqa: BLE001
             raise PublishUnconfirmed(
                 f"media publish outcome still unconfirmed for container {cp.container_id} "
@@ -834,6 +881,10 @@ def _resume_checkpoint(
                  "Meta didn't take it", cp.container_id)
         cp.publish_sent_at = None
         save(cp)
+        if cp.fingerprint and fingerprint and cp.fingerprint != fingerprint:
+            log.info("instagram: container %s was built from different content — "
+                     "building a new one", cp.container_id)
+            return None
 
     if not fresh:
         return None
@@ -931,7 +982,7 @@ def _parse_ig_time(value: str | None) -> datetime | None:
 
 
 def _find_published(
-    ig_user_id: str, token: str, cp: ContainerCheckpoint, caption: str,
+    db: Session, ig_user_id: str, token: str, cp: ContainerCheckpoint, caption: str,
     media_types: tuple[str, ...],
 ) -> tuple[str, str | None] | None:
     """The media a checkpointed container became, found among the account's newest.
@@ -942,6 +993,12 @@ def _find_published(
     type, published no earlier than the container was created, with the same caption.
     The earliest match wins — if a duplicate did slip out, the original is the one to
     track. Raises when the lookup itself fails; returns None when nothing matches.
+
+    Two guards against claiming someone else's post, which would mark this one live
+    without ever publishing it — captions are reused across the queue:
+      * a window: no later than RECOVERY_WINDOW after the publish request (or, lacking
+        one, the container's creation), since Meta publishes within seconds;
+      * media already recorded against another post or reel is never a match.
     """
     with _client() as c:
         r = c.get(f"/{ig_user_id}/media", params={
@@ -952,11 +1009,24 @@ def _find_published(
     if r.status_code >= 400:
         _raise_api_error(r, "recent media lookup")
     since = cp.created_at - RECOVERY_SKEW
+    until = (cp.publish_sent_at or cp.created_at) + RECOVERY_WINDOW
     want = " ".join((caption or "").split())
+    items = r.json().get("data") or []
+    ids = [str(m.get("id")) for m in items if m.get("id")]
+    recorded: set[str] = set()
+    if ids:
+        recorded |= set(db.execute(
+            select(PostPlatform.remote_id).where(PostPlatform.remote_id.in_(ids))
+        ).scalars())
+        recorded |= set(db.execute(
+            select(Reel.remote_id).where(Reel.remote_id.in_(ids))
+        ).scalars())
     matches = []
-    for m in r.json().get("data") or []:
+    for m in items:
         ts = _parse_ig_time(m.get("timestamp"))
-        if ts is None or ts < since:
+        if ts is None or ts < since or ts > until:
+            continue
+        if str(m.get("id")) in recorded:
             continue
         if media_types and m.get("media_type") not in media_types:
             continue
