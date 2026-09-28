@@ -1692,6 +1692,26 @@ def daily_instagram_token_refresh() -> None:
         db.close()
 
 
+def pre_post_connection_check() -> None:
+    """Verify the connections the next ~90 minutes of posts will use, an hour ahead.
+
+    Warn-only by construction: see services/connection_check. Its own session and its
+    own try, so a check that throws can neither touch a publish nor stop the worker.
+    """
+    db = SessionLocal()
+    try:
+        from services import connection_check
+
+        out = connection_check.run(db)
+        if out:
+            log.info("pre-post connection check: %s", out)
+    except Exception:  # noqa: BLE001
+        log.exception("pre-post connection check failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def daily_cleanup() -> None:
     """Daily cron job — runs at app_config.cleanup_time (default 03:00 UTC):
        1. SQLite hot backup to /mnt/photo-data/backup/.
@@ -1795,6 +1815,11 @@ def main() -> int:
     scheduler.add_job(daily_flickr_sync, "cron", hour=flickr_h, minute=flickr_m, id="daily_flickr_sync")
     scheduler.add_job(daily_instagram_token_refresh, "cron", hour=5, minute=30,
                       id="instagram_token_refresh")
+    # Every 15 minutes against a 90-minute lookahead: each upcoming post is covered by
+    # several passes, and a pass costs at most one call per platform (none when the
+    # connection was proven in the last hour).
+    scheduler.add_job(pre_post_connection_check, "interval", minutes=15,
+                      id="pre_post_connection_check")
     scheduler.add_job(daily_cleanup, "cron", hour=cleanup_h, minute=cleanup_m, id="daily_cleanup")
     scheduler.add_job(fill_missing_alt_text_job, "interval", minutes=15, id="fill_missing_alt_text")
     scheduler.add_job(weekly_trending_refresh, "cron", day_of_week="mon", hour=2, minute=0,
