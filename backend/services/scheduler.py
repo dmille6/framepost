@@ -853,6 +853,40 @@ def _ig_collaborators(db, post: Post) -> list[str]:
     ][:instagram.MAX_COLLABORATORS]
 
 
+def _ig_checkpoint(db, post: Post, cred: PlatformCredential):
+    """The post's checkpointed Instagram container, and the function that persists it.
+
+    Every save commits on the spot: the checkpoint must survive the rollback the caller
+    does when this attempt fails, and — the reason it exists — it must be on disk before
+    media_publish is sent, so a crash mid-publish is answered next time by asking Meta,
+    not by publishing again. See instagram._publish_resumable.
+    """
+    pp = db.get(PostPlatform, (post.id, cred.id))
+    checkpoint = instagram.ContainerCheckpoint.from_json(pp.ig_container if pp else None)
+
+    def save(cp) -> None:
+        row = db.get(PostPlatform, (post.id, cred.id))
+        if row is None:
+            row = PostPlatform(post_id=post.id, platform_id=cred.id)
+            db.add(row)
+        row.ig_container = cp.to_json() if cp else None
+        db.commit()
+
+    return checkpoint, save
+
+
+def _note_recovered(db, post: Post, result: dict) -> None:
+    """A retry found the post already live and did not publish it again. Say so on the
+    post's timeline: it is the only trace that the earlier attempt's error was a lie."""
+    if not result.get("recovered"):
+        return
+    events.log_event(
+        db, post_id=post.id, event_type="instagram_publish_recovered", actor="worker",
+        details={"remote_id": result.get("remote_id"), "url": result.get("url"),
+                 "note": "an earlier attempt had already published; not published again"},
+    )
+
+
 def _ig_image_url(db, cred: PlatformCredential, frame: Post, *, force_restage: bool = False) -> str:
     """The public URL Meta should fetch for one frame.
 
@@ -937,10 +971,12 @@ def _post_instagram_carousel(
         # children no longer describe this carousel.
         resume = []
         _remember([])
+    checkpoint, save_checkpoint = _ig_checkpoint(db, post, cred)
     try:
         result = instagram.post_carousel(
             db=db, images=images, caption=caption, collaborators=collabs,
             resume=resume, on_child=_remember,
+            checkpoint=checkpoint, on_checkpoint=save_checkpoint,
         )
     except instagram.InstagramError as e:
         # Same 3:4 probe as the single path. A carousel costs one wasted upload per
@@ -955,7 +991,7 @@ def _post_instagram_carousel(
             _remember([])
             result = instagram.post_carousel(
                 db=db, images=_build(True), caption=caption, collaborators=collabs,
-                on_child=_remember,
+                on_child=_remember, on_checkpoint=save_checkpoint,
             )
         else:
             if len(_children()) > len(resume):
@@ -966,6 +1002,7 @@ def _post_instagram_carousel(
                 e.retry_after_seconds = CAROUSEL_RESUME_SECONDS
             raise
 
+    _note_recovered(db, post, result)
     if pp is not None:
         pp.carousel_children = None
     # Every frame staged its own object. The single-photo path cleans up after itself;
@@ -1029,6 +1066,13 @@ def _record_published(
     pp.posted_at = fired_at
     pp.error_message = None
     pp.next_retry_at = None
+    # In the same commit as "posted": clearing the Instagram container checkpoint any
+    # earlier would open a window with neither a record nor a checkpoint to recover from.
+    # Kept when there is no remote_id — a publish recovered without its media id — because
+    # such a row is not protected from a retry (see _record_platform_failure), and the
+    # checkpoint is then what stops that retry publishing a second copy.
+    if remote_id:
+        pp.ig_container = None
     db.commit()
 
 
@@ -1144,10 +1188,12 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 if p.instagram_handle
             ][:instagram.MAX_COLLABORATORS]
 
+        checkpoint, save_checkpoint = _ig_checkpoint(db, post, cred)
         try:
             result = instagram.post_photo(
                 db=db, image_url=image_url, caption=text, alt_text=alt,
                 collaborators=collab_handles,
+                checkpoint=checkpoint, on_checkpoint=save_checkpoint,
             )
         except instagram.InstagramError as e:
             # The 3:4 probe: we optimistically assume Meta's 2025 grid change reached the
@@ -1165,7 +1211,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
                 )
                 result = instagram.post_photo(
                     db=db, image_url=image_url, caption=text, alt_text=alt,
-                    collaborators=collab_handles,
+                    collaborators=collab_handles, on_checkpoint=save_checkpoint,
                 )
             else:
                 raise
@@ -1173,6 +1219,7 @@ def _post_to_platform(db, cred: PlatformCredential, post: Post, fired_at: dateti
             if staging_id and ratio_key == "3:4" and not floor_tested:
                 ig_variant.record_floor(db, "3:4")
 
+        _note_recovered(db, post, result)
         remote_id, remote_url = result["remote_id"], result["url"]
         collab_sent = result.get("collaborators") or []
         collab_refused = result.get("collaborators_rejected") or []

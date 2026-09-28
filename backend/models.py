@@ -319,6 +319,13 @@ class PostPlatform(Base):
     # single pass. Containers live 24h, so each attempt resumes from the last one's
     # children instead of starting over. Cleared once the parent publishes.
     carousel_children = Column(Text)
+    # The Instagram container awaiting (or mid-) publish, as instagram.ContainerCheckpoint
+    # JSON: id, created_at, publish_sent_at, collaborators (0034). For a carousel this is
+    # the PARENT. Committed before media_publish is sent, so a crash or an ambiguous
+    # publish is resolved next attempt by asking Meta about this container instead of
+    # creating — and publishing — a second one. Cleared in the commit that records the
+    # post as published.
+    ig_container = Column(Text)
 
 
 class AppConfig(Base):
@@ -420,6 +427,9 @@ class Reel(Base):
     publish_error = Column(Text)
     publish_attempts = Column(Integer, nullable=False, server_default="0")
     staged_key = Column(Text)
+    # Same checkpoint as post_platforms.ig_container (0034). A reel sits in IN_PROGRESS
+    # for minutes while Meta transcodes — the widest crash window of any publish.
+    ig_container = Column(Text)
     created_at = Column(DateTime, nullable=False, server_default=func.current_timestamp(), index=True)
     updated_at = Column(DateTime, nullable=False, server_default=func.current_timestamp())
 

@@ -144,18 +144,44 @@ def unstage(reel: Reel) -> None:
 
 
 def publish(db: Session, reel: Reel) -> dict:
-    """Stage, publish, record. Raises ReelPublishError; the caller decides about retries."""
+    """Stage, publish, record. Raises ReelPublishError; the caller decides about retries.
+
+    The container is checkpointed on the reel (reel.ig_container) and committed before
+    media_publish goes out, so an attempt that died mid-publish — or while Meta spent
+    minutes transcoding — is resumed from that container next time instead of uploading
+    and publishing the reel a second time. Staging is deferred for the same reason: a
+    resumed container was already ingested by Meta, and needs no MP4 in R2.
+    """
     reel.publish_attempts = (reel.publish_attempts or 0) + 1
-    key, url = stage(reel)
-    reel.staged_key = key
+    checkpoint = ig.ContainerCheckpoint.from_json(reel.ig_container)
+    staged_url: str | None = None
+    if checkpoint is None:
+        # Nothing to resume, so this attempt will certainly need the MP4 — stage now,
+        # and let a missing file or unconfigured R2 fail before Meta is involved.
+        key, staged_url = stage(reel)
+        reel.staged_key = key
     db.commit()
+
+    def video_url() -> str:
+        if staged_url is not None:
+            return staged_url
+        key, url = stage(reel)
+        reel.staged_key = key
+        db.commit()
+        return url
+
+    def save(cp) -> None:
+        reel.ig_container = cp.to_json() if cp else None
+        db.commit()
 
     try:
         result = ig.post_reel(
             db,
-            video_url=url,
+            video_url=video_url,
             caption=reel.caption or "",
             collaborators=collaborators_for(db, reel),
+            checkpoint=checkpoint,
+            on_checkpoint=save,
         )
     except ig.InstagramError as e:
         reel.publish_error = str(e)
@@ -166,6 +192,11 @@ def publish(db: Session, reel: Reel) -> dict:
     reel.remote_url = result.get("url")
     reel.posted_at = _utcnow()
     reel.publish_error = None
+    # Cleared with the record of success, never before it (see instagram._publish_resumable).
+    reel.ig_container = None
+    if result.get("recovered"):
+        log.warning("reel %s: an earlier attempt had already published it (%s) — "
+                    "not published again", reel.id[:8], reel.remote_id)
     unstage(reel)
     db.commit()
     log.info("reel %s published as %s", reel.id[:8], reel.remote_id)

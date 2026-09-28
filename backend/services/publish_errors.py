@@ -78,6 +78,15 @@ _RULES: dict[str, list[tuple[str, FailureCategory, str]]] = {
          "Flickr is rate-limiting; it will retry shortly."),
     ],
     "instagram": [
+        # A publish was sent and its outcome is unknown (timeout, reset, 5xx). Retryable,
+        # but the retry does not publish blind: it asks Meta about the checkpointed
+        # container first (instagram._publish_resumable). FIRST in this list:
+        # the embedded Meta text (a 5xx body) can contain anything, and only a 5xx or a
+        # transport failure is ever reported this way, so no other rule applies.
+        (r"publish outcome (still )?unconfirmed",
+         FailureCategory.RETRY,
+         "Instagram may already have published this; FramePost will confirm before "
+         "trying again."),
         # 190 = invalid/expired token; 10 & 200 = permission not granted.
         (r"error validating access token|session has been invalidated|code.?:?\s*190"
          r"|oauthexception|access token.*expired",

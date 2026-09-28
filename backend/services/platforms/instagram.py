@@ -38,7 +38,8 @@ import re
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, NamedTuple, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Callable, NamedTuple, Sequence, Union
 
 import httpx
 from services import http_client
@@ -80,9 +81,20 @@ MAX_COLLABORATORS = 3
 MAX_CAROUSEL = 10
 
 
+# A media URL, or a zero-argument callable producing one. Deferred so the caller's work
+# to produce a fetchable URL (staging, presigning, probing it — see scheduler and
+# services/media_probe) runs only when a container is actually about to be created, and
+# not at all when an attempt resumes a checkpointed container Meta already ingested.
+MediaURL = Union[str, Callable[[], str]]
+
+
+def _resolve(url: MediaURL) -> str:
+    return url() if callable(url) else url
+
+
 class CarouselImage(NamedTuple):
     """One slide. alt is per-image; the caption belongs to the carousel, not the slide."""
-    url: str
+    url: MediaURL
     alt: str | None = None
 
 # Instagram caps: caption 2200 chars, alt text 1000.
@@ -113,10 +125,93 @@ PUBLISH_RETRY_INTERVAL = 5.0
 _NOT_READY_RE = re.compile(r"not ready for publishing|media is not ready", re.I)
 
 
+# Meta keeps an unpublished container for 24h, then it reads EXPIRED. 23h leaves room
+# for an attempt that starts just inside the window to finish inside it.
+CONTAINER_REUSE_WINDOW = timedelta(hours=23)
+# Clock skew allowed when matching a recovered media's timestamp against the moment we
+# created its container: Meta's clock and ours are not the same clock.
+RECOVERY_SKEW = timedelta(minutes=5)
+# How far back through the account's newest media to look for one we may have published.
+RECOVERY_LOOKBACK = 25
+
+
 class InstagramError(Exception):
-    def __init__(self, message: str, *, permanent: bool = False):
+    def __init__(self, message: str, *, permanent: bool = False,
+                 http_status: int | None = None):
         super().__init__(message)
         self.permanent = permanent
+        # Set when Meta actually answered. A 4xx is Meta saying no; no status at all
+        # (timeout, reset, unparseable 200) means we don't know what Meta did.
+        self.http_status = http_status
+
+
+class PublishUnconfirmed(InstagramError):
+    """media_publish was sent and we cannot tell whether it worked.
+
+    Never permanent, and never answered by publishing again in the same attempt: Meta has
+    been seen publishing on requests it answered with an error, and re-sending the same
+    creation_id then stacked duplicates. The container stays checkpointed; the next
+    attempt asks Meta for its status_code (and the account's recent media) first.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, permanent=False)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+@dataclass
+class ContainerCheckpoint:
+    """A container Meta has accepted, remembered across attempts and crashes.
+
+    Carousel children already survive a failed attempt (post_platforms.carousel_children);
+    the container that actually gets published — a photo's, a reel's, a carousel's
+    parent — did not. So a crash, timeout or deploy between /media and /media_publish
+    either orphaned it (and the retry paid for a new one) or, worse, left a publish whose
+    outcome nobody knew, and the retry published a second copy.
+
+    Persisted by the caller (on_checkpoint) BEFORE media_publish is sent, for the same
+    survive-the-rollback reason as staging_remote_id. publish_sent_at is the
+    "unconfirmed" marker: set just before media_publish, cleared only when Meta answers
+    with a definite no. The collaborators ride along because a resumed container keeps
+    the collaborators it was created with, and the bookkeeping must record those.
+    """
+    container_id: str
+    created_at: datetime                      # naive UTC, like every stored timestamp
+    publish_sent_at: datetime | None = None
+    collaborators: list[str] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "id": self.container_id,
+            "created_at": self.created_at.isoformat(),
+            "publish_sent_at": self.publish_sent_at.isoformat() if self.publish_sent_at else None,
+            "collaborators": self.collaborators,
+            "rejected": self.rejected,
+        })
+
+    @classmethod
+    def from_json(cls, raw: str | None) -> "ContainerCheckpoint | None":
+        """Tolerant: an unreadable checkpoint is treated as none, never as an error —
+        the worst outcome of forgetting a checkpoint is today's behaviour."""
+        if not raw:
+            return None
+        try:
+            d = json.loads(raw)
+            sent = d.get("publish_sent_at")
+            return cls(
+                container_id=str(d["id"]),
+                created_at=datetime.fromisoformat(d["created_at"]),
+                publish_sent_at=datetime.fromisoformat(sent) if sent else None,
+                collaborators=list(d.get("collaborators") or []),
+                rejected=list(d.get("rejected") or []),
+            )
+        except (ValueError, KeyError, TypeError):
+            log.warning("instagram: ignoring unreadable container checkpoint %r", raw[:200])
+            return None
 
 
 def aspect_ok(width: int, height: int) -> bool:
@@ -149,6 +244,7 @@ def _raise_api_error(r: httpx.Response, doing: str) -> None:
     raise InstagramError(
         f"{doing} failed (HTTP {r.status_code}): {_error_text(r)}",
         permanent=(r.status_code in (400, 401, 403)),
+        http_status=r.status_code,
     )
 
 
@@ -400,13 +496,36 @@ def _create_container(
     raise InstagramError("media container creation failed after dropping all collaborators")
 
 
+Checkpoint = Callable[["ContainerCheckpoint | None"], None]
+
+
+def _wanted_collaborators(collaborators: list[str] | None) -> list[str]:
+    return [
+        h.lstrip("@").strip()
+        for h in (collaborators or [])
+        if h and h.strip()
+    ][:MAX_COLLABORATORS]
+
+
+def _credential_parts(db: Session) -> tuple[str, str]:
+    row = _load_credential(db)
+    _maybe_refresh(db, row)
+    token = decrypt_token(row.access_token)
+    ig_user_id = json.loads(row.extra_json or "{}").get("ig_user_id")
+    if not ig_user_id:
+        raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
+    return token, ig_user_id
+
+
 def post_photo(
     db: Session,
     *,
-    image_url: str,
+    image_url: MediaURL,
     caption: str,
     alt_text: str | None = None,
     collaborators: list[str] | None = None,
+    checkpoint: ContainerCheckpoint | None = None,
+    on_checkpoint: Checkpoint | None = None,
 ) -> dict:
     """Container → poll → publish. Returns {remote_id, url, collaborators}.
 
@@ -414,59 +533,51 @@ def post_photo(
     Accepted invitations put the post on THEIR profile and in their followers' feeds —
     roughly double the impressions of a solo post, which is why this is worth the extra
     failure handling below. Feed images, carousels and Reels only (never Stories).
+
+    checkpoint/on_checkpoint make the publish crash-safe; see _publish_resumable. The
+    result carries recovered=True when an earlier attempt's publish turned out to have
+    gone through, in which case remote_id may be None (see _find_published).
     """
-    row = _load_credential(db)
-    _maybe_refresh(db, row)
-    token = decrypt_token(row.access_token)
-    ig_user_id = json.loads(row.extra_json or "{}").get("ig_user_id")
-    if not ig_user_id:
-        raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
+    token, ig_user_id = _credential_parts(db)
+    caption_text = (caption or "")[:MAX_CAPTION]
 
-    # Step 1: create the media container. Meta fetches image_url during this call, so a
-    # dead/non-JPEG/oversized URL or bad aspect ratio surfaces here as a 400.
-    data = {
-        "image_url": image_url,
-        "caption": (caption or "")[:MAX_CAPTION],
-        "access_token": token,
-    }
-    alt = (alt_text or "").strip()
-    if alt:
-        data["alt_text"] = alt[:MAX_ALT_TEXT]
+    def create() -> tuple[str, list[str], list[str]]:
+        # Step 1: create the media container. Meta fetches image_url during this call,
+        # so a dead/non-JPEG/oversized URL or bad aspect ratio surfaces here as a 400.
+        data = {
+            "image_url": _resolve(image_url),
+            "caption": caption_text,
+            "access_token": token,
+        }
+        alt = (alt_text or "").strip()
+        if alt:
+            data["alt_text"] = alt[:MAX_ALT_TEXT]
+        # Co-authors. Meta validates every handle and rejects the WHOLE container if any
+        # one is private, misspelled, or gone — so a stale handle in the performer roster
+        # would otherwise cost us the entire post. _create_container drops the named
+        # offenders and retries, so the photo always ships even if a credit doesn't.
+        container_id, used, rejected = _create_container(
+            ig_user_id, data, _wanted_collaborators(collaborators)
+        )
+        if rejected:
+            log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
+        return container_id, used, rejected
 
-    # Co-authors. Meta validates every handle and rejects the WHOLE container if any one
-    # is private, misspelled, or gone — so a stale handle in the performer roster would
-    # otherwise cost us the entire post. _create_container drops the named offenders and
-    # retries, so the photo always ships even if a credit doesn't.
-    wanted_collabs = [
-        h.lstrip("@").strip()
-        for h in (collaborators or [])
-        if h and h.strip()
-    ][:MAX_COLLABORATORS]
-
-    container_id, used_collabs, rejected = _create_container(
-        ig_user_id, data, wanted_collabs
+    return _publish_resumable(
+        ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
+        create=create, describing="photo", caption=caption_text, media_types=("IMAGE",),
     )
-    if rejected:
-        log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
-
-    _await_container(container_id, token, describing=f"url={image_url}")
-    media_id, permalink = _publish_container(ig_user_id, container_id, token)
-
-    return {
-        "remote_id": str(media_id),
-        "url": permalink,
-        "collaborators": used_collabs,
-        "collaborators_rejected": rejected,
-    }
 
 
 def post_reel(
     db: Session,
     *,
-    video_url: str,
+    video_url: MediaURL,
     caption: str,
     collaborators: list[str] | None = None,
     share_to_feed: bool = True,
+    checkpoint: ContainerCheckpoint | None = None,
+    on_checkpoint: Checkpoint | None = None,
 ) -> dict:
     """Publish a reel from a publicly fetchable MP4. Returns {remote_id, url, ...}.
 
@@ -482,46 +593,34 @@ def post_reel(
     `share_to_feed` also puts the reel in the main grid. Left on: a reel that appears
     only under the Reels tab is invisible to the followers who browse the profile, and
     reach is the entire reason for posting one.
+
+    Checkpointed like post_photo — and it matters most here: a reel's container spends
+    minutes transcoding, which is the widest window any publish has for a crash.
     """
-    row = _load_credential(db)
-    _maybe_refresh(db, row)
-    token = decrypt_token(row.access_token)
-    ig_user_id = json.loads(row.extra_json or "{}").get("ig_user_id")
-    if not ig_user_id:
-        raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
+    token, ig_user_id = _credential_parts(db)
+    caption_text = (caption or "")[:MAX_CAPTION]
 
-    data = {
-        "media_type": "REELS",
-        "video_url": video_url,
-        "caption": (caption or "")[:MAX_CAPTION],
-        "share_to_feed": "true" if share_to_feed else "false",
-        "access_token": token,
-    }
+    def create() -> tuple[str, list[str], list[str]]:
+        data = {
+            "media_type": "REELS",
+            "video_url": _resolve(video_url),
+            "caption": caption_text,
+            "share_to_feed": "true" if share_to_feed else "false",
+            "access_token": token,
+        }
+        container_id, used, rejected = _create_container(
+            ig_user_id, data, _wanted_collaborators(collaborators)
+        )
+        if rejected:
+            log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
+        return container_id, used, rejected
 
-    wanted_collabs = [
-        h.lstrip("@").strip()
-        for h in (collaborators or [])
-        if h and h.strip()
-    ][:MAX_COLLABORATORS]
-
-    container_id, used_collabs, rejected = _create_container(
-        ig_user_id, data, wanted_collabs
-    )
-    if rejected:
-        log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
-
-    _await_container(
-        container_id, token, describing=f"reel url={video_url}",
+    return _publish_resumable(
+        ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
+        create=create, describing="reel", caption=caption_text,
+        media_types=("VIDEO", "REELS"),
         tries=REEL_POLL_TRIES, interval=REEL_POLL_INTERVAL,
     )
-    media_id, permalink = _publish_container(ig_user_id, container_id, token)
-
-    return {
-        "remote_id": str(media_id),
-        "url": permalink,
-        "collaborators": used_collabs,
-        "collaborators_rejected": rejected,
-    }
 
 
 def post_carousel(
@@ -532,6 +631,8 @@ def post_carousel(
     collaborators: list[str] | None = None,
     resume: Sequence[str] = (),
     on_child: Callable[[list[str]], None] | None = None,
+    checkpoint: ContainerCheckpoint | None = None,
+    on_checkpoint: Checkpoint | None = None,
 ) -> dict:
     """Publish 2..MAX_CAROUSEL images as one carousel. Returns the same shape as
     post_photo.
@@ -543,6 +644,10 @@ def post_carousel(
     through, so a long carousel may need several attempts. on_child is called with the
     children built so far after each one; passing them back as resume next time lets a
     carousel finish across several attempts instead of restarting forever.
+
+    checkpoint/on_checkpoint do the same for the PARENT container, the one that actually
+    publishes. A resumable parent short-circuits the whole child build: Meta already has
+    every frame, so none is fetched again.
 
     Three steps rather than two: a container per image (is_carousel_item, no caption of
     its own), then a parent container listing them, then publish the parent. The caption
@@ -559,63 +664,61 @@ def post_carousel(
             permanent=True,
         )
 
-    row = _load_credential(db)
-    _maybe_refresh(db, row)
-    token = decrypt_token(row.access_token)
-    ig_user_id = json.loads(row.extra_json or "{}").get("ig_user_id")
-    if not ig_user_id:
-        raise InstagramError("Credential is missing ig_user_id — reconnect Instagram.", permanent=True)
+    token, ig_user_id = _credential_parts(db)
+    caption_text = (caption or "")[:MAX_CAPTION]
 
-    # Children an earlier attempt already built, in frame order. Meta keeps a container
-    # for 24h, far longer than the gap between retry attempts.
-    child_ids: list[str] = [c for c in resume if c]
-    if len(child_ids) > len(images):
-        raise InstagramError(
-            f"carousel has {len(images)} frames but {len(child_ids)} children were "
-            f"carried over — the group changed underneath the schedule.",
-            permanent=True,
-        )
-    for i, img in enumerate(images):
-        if i < len(child_ids):
-            continue
-        data = {
-            "image_url": img.url,
-            "is_carousel_item": "true",
+    def create() -> tuple[str, list[str], list[str]]:
+        # Children an earlier attempt already built, in frame order. Meta keeps a
+        # container for 24h, far longer than the gap between retry attempts.
+        child_ids: list[str] = [c for c in resume if c]
+        if len(child_ids) > len(images):
+            raise InstagramError(
+                f"carousel has {len(images)} frames but {len(child_ids)} children were "
+                f"carried over — the group changed underneath the schedule.",
+                permanent=True,
+            )
+        for i, img in enumerate(images):
+            if i < len(child_ids):
+                continue
+            url = _resolve(img.url)
+            data = {
+                "image_url": url,
+                "is_carousel_item": "true",
+                "access_token": token,
+            }
+            alt = (img.alt or "").strip()
+            if alt:
+                data["alt_text"] = alt[:MAX_ALT_TEXT]
+            # No collaborators on children — the caption and the co-author invitations
+            # belong to the parent. One fetch attempt only: see _create_container.
+            child_id, _, _ = _create_container(ig_user_id, data, [], fetch_attempts=1)
+            _await_container(child_id, token, describing=f"child {i + 1}/{len(images)}, url={url}")
+            child_ids.append(child_id)
+            if on_child:
+                on_child(list(child_ids))
+
+        parent_data = {
+            "media_type": "CAROUSEL",
+            "children": ",".join(child_ids),
+            "caption": caption_text,
             "access_token": token,
         }
-        alt = (img.alt or "").strip()
-        if alt:
-            data["alt_text"] = alt[:MAX_ALT_TEXT]
-        # No collaborators on children — the caption and the co-author invitations
-        # belong to the parent. One fetch attempt only: see _create_container.
-        child_id, _, _ = _create_container(ig_user_id, data, [], fetch_attempts=1)
-        _await_container(child_id, token, describing=f"child {i + 1}/{len(images)}, url={img.url}")
-        child_ids.append(child_id)
-        if on_child:
-            on_child(list(child_ids))
+        parent_id, used, rejected = _create_container(
+            ig_user_id, parent_data, _wanted_collaborators(collaborators)
+        )
+        if rejected:
+            log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
+        return parent_id, used, rejected
 
-    parent_data = {
-        "media_type": "CAROUSEL",
-        "children": ",".join(child_ids),
-        "caption": (caption or "")[:MAX_CAPTION],
-        "access_token": token,
-    }
-    wanted_collabs = [
-        h.lstrip("@").strip()
-        for h in (collaborators or [])
-        if h and h.strip()
-    ][:MAX_COLLABORATORS]
-    parent_id, used_collabs, rejected = _create_container(
-        ig_user_id, parent_data, wanted_collabs
+    result = _publish_resumable(
+        ig_user_id, token, checkpoint=checkpoint, on_checkpoint=on_checkpoint,
+        create=create, describing=f"carousel of {len(images)}", caption=caption_text,
+        media_types=("CAROUSEL_ALBUM",),
     )
-    if rejected:
-        log.warning("instagram: dropped un-taggable collaborator(s) %s and retried", rejected)
 
-    _await_container(parent_id, token, describing=f"carousel of {len(child_ids)}")
-    media_id, permalink = _publish_container(ig_user_id, parent_id, token)
-
-    published = _count_children(media_id, token)
-    if published is not None and published != len(child_ids):
+    media_id = result["remote_id"]
+    published = _count_children(media_id, token) if media_id else None
+    if published is not None and published != len(images):
         # Meta accepted the parent, published it, and returned 200 while quietly
         # producing fewer frames than the children list named. It happened on
         # 2026-09-14: seven children sent, six live, retry_count 0, no error anywhere.
@@ -626,17 +729,244 @@ def post_carousel(
         # loudly, so the caller can record it against the post.
         log.error(
             "instagram: carousel %s published %d of %d frames — Meta dropped %d",
-            media_id, published, len(child_ids), len(child_ids) - published,
+            media_id, published, len(images), len(images) - published,
         )
 
+    result["frames_sent"] = len(images)
+    result["frames_published"] = published
+    return result
+
+
+# -----------------------------------------------------------------------------
+# Crash-safe publish: checkpoint the container, never publish twice
+# -----------------------------------------------------------------------------
+
+def _publish_resumable(
+    ig_user_id: str,
+    token: str,
+    *,
+    checkpoint: ContainerCheckpoint | None,
+    on_checkpoint: Checkpoint | None,
+    create: Callable[[], tuple[str, list[str], list[str]]],
+    describing: str,
+    caption: str,
+    media_types: tuple[str, ...],
+    tries: int = STATUS_POLL_TRIES,
+    interval: float = STATUS_POLL_INTERVAL,
+) -> dict:
+    """Publish via a container, resuming the checkpointed one when there is one.
+
+    On a resumed attempt Meta is asked what became of the container first:
+
+      PUBLISHED    it went out. Never publish again; recover the media id (best effort)
+                   and report success.
+      FINISHED     ready and unpublished: publish THIS container. No re-fetch of the
+                   image, and the collaborators it was created with stand.
+      IN_PROGRESS  still ingesting (reels transcode for minutes): wait, then publish.
+      anything else (ERROR, EXPIRED, unknown, gone) → discard it, build a fresh one.
+
+    When the last attempt SENT media_publish without learning the outcome, FINISHED is
+    not trusted on its own — the account's recent media is checked for the post first,
+    and a failure to look is a reason to wait, not to publish blind.
+
+    The caller clears the checkpoint when it records the success (in the same commit),
+    not this function: clearing first and crashing before the record would leave the
+    next attempt with neither a record nor a checkpoint, which is how duplicates happen.
+    """
+    save = on_checkpoint or (lambda _cp: None)
+    cp = checkpoint
+    if cp is not None:
+        resumed = _resume_checkpoint(
+            ig_user_id, token, cp, save=save, describing=describing, caption=caption,
+            media_types=media_types, tries=tries, interval=interval,
+        )
+        if resumed is not None:
+            return resumed
+        save(None)
+
+    container_id, used, rejected = create()
+    cp = ContainerCheckpoint(container_id=container_id, created_at=_utcnow(),
+                             collaborators=list(used), rejected=list(rejected))
+    save(cp)
+    _await_container(container_id, token, describing=describing, tries=tries, interval=interval)
+    return _publish_checkpointed(ig_user_id, token, cp, save=save)
+
+
+def _resume_checkpoint(
+    ig_user_id: str, token: str, cp: ContainerCheckpoint, *, save: Checkpoint,
+    describing: str, caption: str, media_types: tuple[str, ...],
+    tries: int, interval: float,
+) -> dict | None:
+    """Act on a checkpoint. Returns the publish result, or None to build a fresh one."""
+    fresh = _utcnow() - cp.created_at < CONTAINER_REUSE_WINDOW
+    if not fresh and not cp.publish_sent_at:
+        log.info("instagram: checkpointed container %s is past Meta's 24h window — "
+                 "building a new one", cp.container_id)
+        return None
+
+    status = _container_status(cp.container_id, token)
+    log.info("instagram: resuming container %s (%s, publish %s)", cp.container_id,
+             status, "sent" if cp.publish_sent_at else "not sent")
+
+    if status == "PUBLISHED":
+        try:
+            found = _find_published(ig_user_id, token, cp, caption, media_types)
+        except Exception as e:  # noqa: BLE001 — it is live either way; the id is a nicety
+            log.warning("instagram: container %s is published but its media id could not "
+                        "be looked up: %s", cp.container_id, e)
+            found = None
+        return _recovered(cp, found)
+
+    if cp.publish_sent_at:
+        # A publish went out last time and nobody heard back. If it landed, it is among
+        # the newest media; look before sending another. A failed lookup means we still
+        # don't know — so wait for the next attempt rather than risk a duplicate.
+        try:
+            found = _find_published(ig_user_id, token, cp, caption, media_types)
+        except Exception as e:  # noqa: BLE001
+            raise PublishUnconfirmed(
+                f"media publish outcome still unconfirmed for container {cp.container_id} "
+                f"(status {status}); recent-media lookup failed: {e}"
+            ) from e
+        if found:
+            return _recovered(cp, found)
+        log.info("instagram: container %s was sent for publish but isn't live — "
+                 "Meta didn't take it", cp.container_id)
+        cp.publish_sent_at = None
+        save(cp)
+
+    if not fresh:
+        return None
+    if status == "FINISHED":
+        return _publish_checkpointed(ig_user_id, token, cp, save=save)
+    if status == "IN_PROGRESS":
+        _await_container(cp.container_id, token, describing=f"resumed {describing}",
+                         tries=tries, interval=interval)
+        return _publish_checkpointed(ig_user_id, token, cp, save=save)
+    log.info("instagram: discarding container %s (status %r)", cp.container_id, status)
+    return None
+
+
+def _publish_checkpointed(
+    ig_user_id: str, token: str, cp: ContainerCheckpoint, *, save: Checkpoint,
+) -> dict:
+    """media_publish, with the "sent" mark made durable before the request goes out."""
+    cp.publish_sent_at = _utcnow()
+    save(cp)
+    try:
+        media_id, permalink = _publish_container(ig_user_id, cp.container_id, token)
+    except PublishUnconfirmed:
+        raise
+    except InstagramError as e:
+        if e.http_status is not None and 400 <= e.http_status < 500:
+            # Meta answered, and the answer was no: nothing went out. Keep the container
+            # (it may be publishable next time) but drop the "sent" mark, so the retry
+            # doesn't go hunting for a post that was refused.
+            cp.publish_sent_at = None
+            save(cp)
+            raise
+        raise PublishUnconfirmed(
+            f"media publish outcome unconfirmed for container {cp.container_id} ({e}) — "
+            f"the next attempt checks the container before publishing again"
+        ) from e
+    except Exception as e:  # noqa: BLE001 — timeout, reset, garbage body: we don't know
+        raise PublishUnconfirmed(
+            f"media publish outcome unconfirmed for container {cp.container_id} "
+            f"({type(e).__name__}: {e}) — the next attempt checks the container before "
+            f"publishing again"
+        ) from e
     return {
         "remote_id": str(media_id),
         "url": permalink,
-        "collaborators": used_collabs,
-        "collaborators_rejected": rejected,
-        "frames_sent": len(child_ids),
-        "frames_published": published,
+        "collaborators": list(cp.collaborators),
+        "collaborators_rejected": list(cp.rejected),
     }
+
+
+def _recovered(cp: ContainerCheckpoint, found: tuple[str, str | None] | None) -> dict:
+    if found:
+        log.warning("instagram: container %s had already published as %s — not publishing "
+                    "again", cp.container_id, found[0])
+    else:
+        log.error("instagram: container %s had already published but its media id could "
+                  "not be matched — recorded as posted without one", cp.container_id)
+    return {
+        "remote_id": found[0] if found else None,
+        "url": found[1] if found else None,
+        "collaborators": list(cp.collaborators),
+        "collaborators_rejected": list(cp.rejected),
+        "recovered": True,
+    }
+
+
+def _container_status(container_id: str, token: str) -> str | None:
+    """status_code of a container, or None when Meta no longer knows it.
+
+    A token problem or a 5xx raises: neither says anything about the container, and
+    discarding it on that basis could publish a second copy of a post already live.
+    """
+    with _client() as c:
+        r = c.get(f"/{container_id}", params={"fields": "status_code", "access_token": token})
+    if r.status_code >= 500:
+        _raise_api_error(r, "container status check")
+    if r.status_code >= 400:
+        try:
+            code = (r.json().get("error") or {}).get("code")
+        except Exception:  # noqa: BLE001
+            code = None
+        if r.status_code in (401, 403) or code in (190, 10, 200):
+            _raise_api_error(r, "container status check")
+        return None
+    return r.json().get("status_code")
+
+
+def _parse_ig_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z").astimezone(
+            timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _find_published(
+    ig_user_id: str, token: str, cp: ContainerCheckpoint, caption: str,
+    media_types: tuple[str, ...],
+) -> tuple[str, str | None] | None:
+    """The media a checkpointed container became, found among the account's newest.
+
+    Meta documents no field on a container that names the media it published as (the
+    IG Container reference lists status_code values only; media_publish's response is the
+    one place the id is returned). So the only way back is to match: media of the right
+    type, published no earlier than the container was created, with the same caption.
+    The earliest match wins — if a duplicate did slip out, the original is the one to
+    track. Raises when the lookup itself fails; returns None when nothing matches.
+    """
+    with _client() as c:
+        r = c.get(f"/{ig_user_id}/media", params={
+            "fields": "id,caption,media_type,timestamp,permalink",
+            "limit": RECOVERY_LOOKBACK,
+            "access_token": token,
+        })
+    if r.status_code >= 400:
+        _raise_api_error(r, "recent media lookup")
+    since = cp.created_at - RECOVERY_SKEW
+    want = " ".join((caption or "").split())
+    matches = []
+    for m in r.json().get("data") or []:
+        ts = _parse_ig_time(m.get("timestamp"))
+        if ts is None or ts < since:
+            continue
+        if media_types and m.get("media_type") not in media_types:
+            continue
+        if want and " ".join((m.get("caption") or "").split()) != want:
+            continue
+        matches.append((ts, str(m.get("id")), m.get("permalink")))
+    if not matches:
+        return None
+    matches.sort()
+    return matches[0][1], matches[0][2]
 
 
 def _count_children(media_id: str, token: str) -> int | None:

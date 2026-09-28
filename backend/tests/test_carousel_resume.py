@@ -72,7 +72,7 @@ def _fake_ig(monkeypatch, *, children_allowed: int | None = None) -> list[dict]:
     monkeypatch.setattr(ig, "_load_credential", lambda db: cred)
     monkeypatch.setattr(ig, "_maybe_refresh", lambda db, row: None)
     monkeypatch.setattr(ig, "decrypt_token", lambda t: "tok")
-    monkeypatch.setattr(ig, "_await_container", lambda cid, tok, describing="": None)
+    monkeypatch.setattr(ig, "_await_container", lambda cid, tok, describing="", **kw: None)
     monkeypatch.setattr(
         ig, "_publish_container", lambda uid, pid, tok: ("media1", "https://instagram.com/p/x/")
     )
