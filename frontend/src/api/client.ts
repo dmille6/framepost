@@ -1463,6 +1463,9 @@ export type ReelCreate = {
   photos: ReelPhoto[];
   /** Omit to take the Settings default; null for an ordinary reel. */
   trial_graduation?: TrialGraduation | null;
+  /** Frames are unposted drafts: the server keeps their Instagram targeting in step
+   *  with the reel (off for an ordinary reel, on for a Trial Reel). */
+  frames_from_drafts?: boolean;
 };
 
 export const createReel = (body: ReelCreate) =>

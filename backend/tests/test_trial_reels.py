@@ -346,7 +346,7 @@ def test_the_reels_summary_reports_both_groups_separately(db, tmp_path):
 
 # --- the migration -------------------------------------------------------------------
 
-def test_migration_0036_up_and_down(tmp_path, monkeypatch):
+def test_migrations_0036_and_0037_up_and_down(tmp_path, monkeypatch):
     """Existing reels come through as ordinary reels, and the column goes away cleanly."""
     import sqlalchemy as sa
     from alembic import command
@@ -366,6 +366,14 @@ def test_migration_0036_up_and_down(tmp_path, monkeypatch):
     command.upgrade(cfg, "0036_reel_trial")
     with eng.connect() as c:
         assert c.execute(sa.text("SELECT trial_graduation FROM reels")).scalar_one() is None
+
+    command.upgrade(cfg, "0037_reel_frame_ig_follows")
+    with eng.begin() as c:
+        c.execute(sa.text("INSERT INTO reel_photos (reel_id, position, post_id) "
+                          "VALUES ('r1', 0, 'p1')"))
+        assert c.execute(sa.text("SELECT ig_follows_reel FROM reel_photos")).scalar_one() == 0
+    command.downgrade(cfg, "0036_reel_trial")
+    assert "ig_follows_reel" not in {c["name"] for c in sa.inspect(eng).get_columns("reel_photos")}
 
     command.downgrade(cfg, "0035_group_audience_size")
     cols = {c["name"] for c in sa.inspect(eng).get_columns("reels")}
@@ -498,3 +506,115 @@ def test_an_ordinary_reel_gets_no_trial_hint(db, meta):
     with pytest.raises(ig.InstagramError) as e:
         _reel_post(db, on_checkpoint=Store())
     assert ig.TRIAL_HINT not in str(e.value)
+
+
+# --- user decision: a trial reel's draft frames still go to Instagram ----------------
+
+def _connect_instagram(db):
+    from models import PlatformCredential
+    db.add(PlatformCredential(id=uuid.uuid4().hex, platform="instagram", access_token="x"))
+    db.commit()
+
+
+def _drafts(db, n=2, targets=None):
+    out = []
+    for i in range(n):
+        p = Post(id=uuid.uuid4().hex, status="pending", title=f"f{i}",
+                 target_platforms=json.dumps(targets) if targets is not None else None)
+        db.add(p)
+        out.append(p)
+    db.commit()
+    return out
+
+
+def _build_from_drafts(db, frames, **fields):
+    from routes import reels as routes_reels
+    crop = {"x": 0, "y": 0, "width": 9, "height": 16}
+    body = routes_reels.ReelCreate(
+        cover_post_id=frames[0].id, frames_from_drafts=True,
+        photos=[{"post_id": f.id, "position": i, "crop_start": crop}
+                for i, f in enumerate(frames)], **fields)
+    return routes_reels.create_reel(body, BackgroundTasks(), db, None)
+
+
+def _ig(db, post):
+    from services import preflight
+    from models import PlatformCredential
+    db.refresh(post)
+    return "instagram" in preflight.targets_for(
+        post, list(db.query(PlatformCredential).all()))
+
+
+def test_an_ordinary_reel_from_drafts_takes_instagram_off_the_frames(db):
+    _connect_instagram(db)
+    frames = _drafts(db)
+    _build_from_drafts(db, frames, trial_graduation=None)
+    assert not any(_ig(db, f) for f in frames)
+    assert json.loads(frames[0].target_platforms) == ["flickr"], "everything else kept"
+
+
+def test_a_trial_reel_from_drafts_leaves_the_frames_on_instagram(db):
+    _connect_instagram(db)
+    frames = _drafts(db)
+    _build_from_drafts(db, frames, trial_graduation="SS_PERFORMANCE")
+    assert all(_ig(db, f) for f in frames)
+
+
+def test_switching_a_drafts_reel_retargets_its_frames_both_ways(db):
+    _connect_instagram(db)
+    frames = _drafts(db)
+    reel = _build_from_drafts(db, frames, trial_graduation="MANUAL")
+    _patch(db, reel.id, trial_graduation=None)
+    assert not any(_ig(db, f) for f in frames)
+    _patch(db, reel.id, trial_graduation="SS_PERFORMANCE")
+    assert all(_ig(db, f) for f in frames)
+
+
+def test_a_frame_that_already_posted_is_never_retargeted(db):
+    _connect_instagram(db)
+    frames = _drafts(db)
+    reel = _build_from_drafts(db, frames, trial_graduation="MANUAL")
+    frames[1].status = "posted"
+    frames[1].posted_at = datetime.utcnow()
+    db.commit()
+    _patch(db, reel.id, trial_graduation=None)
+    assert not _ig(db, frames[0]) and _ig(db, frames[1])
+
+
+def test_a_frame_that_never_targeted_instagram_is_not_given_it(db):
+    _connect_instagram(db)
+    frames = _drafts(db, targets=["flickr", "bluesky"])
+    reel = _build_from_drafts(db, frames, trial_graduation=None)
+    _patch(db, reel.id, trial_graduation="MANUAL")
+    assert not any(_ig(db, f) for f in frames)
+
+
+def test_a_reel_not_built_from_drafts_never_touches_its_frames(db):
+    """The Reel tab builds from published history (or the post it is open on); its
+    frames' targeting is not the reel's to manage."""
+    _connect_instagram(db)
+    frames = _drafts(db, n=1)
+    reel = _create_for(db, frames[0])
+    _patch(db, reel.id, trial_graduation="MANUAL")
+    _patch(db, reel.id, trial_graduation=None)
+    assert _ig(db, frames[0]) and frames[0].target_platforms is None
+
+
+def _create_for(db, post):
+    from routes import reels as routes_reels
+    crop = {"x": 0, "y": 0, "width": 9, "height": 16}
+    body = routes_reels.ReelCreate(cover_post_id=post.id, photos=[
+        {"post_id": post.id, "position": 0, "crop_start": crop}])
+    return routes_reels.create_reel(body, BackgroundTasks(), db, None)
+
+
+def test_replacing_the_photos_keeps_a_frames_follow_flag(db):
+    from routes import reels as routes_reels
+    _connect_instagram(db)
+    frames = _drafts(db)
+    reel = _build_from_drafts(db, frames, trial_graduation="MANUAL")
+    crop = {"x": 0, "y": 0, "width": 9, "height": 16}
+    _patch(db, reel.id, photos=[routes_reels.ReelPhotoIn(post_id=frames[1].id, position=0,
+                                                         crop_start=crop)])
+    _patch(db, reel.id, trial_graduation=None)
+    assert not _ig(db, frames[1])

@@ -22,9 +22,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, get_session
-from models import AppConfig, Post, Reel, ReelPhoto, User
+from models import AppConfig, PlatformCredential, Post, PostPlatform, Reel, ReelPhoto, User
 from routes.auth import current_user
-from services import storage
+from services import events, preflight, storage
 from services.reel import CropRect, PhotoSegment, ReelGenerationError, generate
 
 log = logging.getLogger("framepost.reels")
@@ -59,6 +59,9 @@ class ReelCreate(BaseModel):
     # Omitted: the Settings default (reel_trial_default) decides. Sent, even as null:
     # the caller has decided, and null means an ordinary reel.
     trial_graduation: TrialGraduation | None = None
+    # The frames are unposted drafts (the Draft Queue's "Reel" button). Their Instagram
+    # targeting then follows the reel's kind; see _sync_frame_instagram.
+    frames_from_drafts: bool = False
 
 
 class ReelPhotoOut(BaseModel):
@@ -124,6 +127,52 @@ class ReelPatch(BaseModel):
 
 
 # --- helpers ---------------------------------------------------------------
+
+def _frame_is_posted(db: Session, post: Post) -> bool:
+    """Has this photograph gone out anywhere? Then its targeting is history, not a plan,
+    and the reel never touches it."""
+    if post.posted_at is not None or post.status in ("posted", "late"):
+        return True
+    return db.execute(
+        select(PostPlatform.post_id).where(
+            PostPlatform.post_id == post.id, PostPlatform.remote_id.is_not(None))
+    ).first() is not None
+
+
+def _sync_frame_instagram(db: Session, reel: Reel) -> list[str]:
+    """Make each drafts-built frame's Instagram targeting match the reel's kind.
+
+    Ordinary reel: Instagram off — the reel carries these photographs there, and without
+    this they would go out as a reel AND as separate posts. Trial Reel: Instagram on —
+    a trial is shown to non-followers first, so followers would otherwise get none of
+    the photos unless it graduated; the photographer wants the trial as extra reach.
+
+    Only frames flagged ig_follows_reel (drafts aimed at Instagram when the reel was
+    built), and never one that has already posted. Returns the post ids changed.
+    """
+    want_ig = reel.trial_graduation is not None
+    creds = list(db.execute(select(PlatformCredential)).scalars())
+    changed: list[str] = []
+    frames = db.execute(
+        select(ReelPhoto).where(ReelPhoto.reel_id == reel.id, ReelPhoto.ig_follows_reel.is_(True))
+    ).scalars().all()
+    for frame in frames:
+        post = db.get(Post, frame.post_id)
+        if post is None or _frame_is_posted(db, post):
+            continue
+        targets = preflight.targets_for(post, creds)
+        if want_ig == ("instagram" in targets):
+            continue
+        targets = targets + ["instagram"] if want_ig else [t for t in targets if t != "instagram"]
+        post.target_platforms = json.dumps(targets)
+        events.log_event(db, post_id=post.id, event_type="edited", actor="system", details={
+            "fields": ["target_platforms"], "reel_id": reel.id,
+            "reason": "trial reel: frame also posts to Instagram" if want_ig
+            else "reel carries this photo to Instagram",
+        })
+        changed.append(post.id)
+    return changed
+
 
 def default_trial_graduation(db: Session) -> str | None:
     """What a new reel is created as, from Settings. Anything but a known strategy —
@@ -226,14 +275,23 @@ def create_reel(
                           else default_trial_graduation(db)),
     )
     db.add(reel)
+    creds = list(db.execute(select(PlatformCredential)).scalars()) if body.frames_from_drafts else []
     for p in body.photos:
+        follows = False
+        if body.frames_from_drafts:
+            post = db.get(Post, p.post_id)
+            follows = (not _frame_is_posted(db, post)
+                       and "instagram" in preflight.targets_for(post, creds))
         db.add(ReelPhoto(
             reel_id=reel_id,
             position=p.position,
             post_id=p.post_id,
             crop_start_json=json.dumps(p.crop_start.model_dump()),
             crop_end_json=json.dumps(p.crop_end.model_dump()) if p.crop_end else None,
+            ig_follows_reel=follows,
         ))
+    db.flush()
+    _sync_frame_instagram(db, reel)
     db.commit()
     db.refresh(reel)
     photos = _load_photos(db, reel_id)
@@ -321,6 +379,7 @@ def update_reel(
     if not reel:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "reel not found")
 
+    retarget = False
     if "trial_graduation" in body.model_fields_set \
             and body.trial_graduation != reel.trial_graduation:
         # Once it is live the kind of media is a fact about Instagram, not a setting, and
@@ -343,6 +402,7 @@ def update_reel(
                 "can't change until that attempt finishes or fails.",
             )
         reel.trial_graduation = body.trial_graduation
+        retarget = True
     if body.caption is not None:
         reel.caption = body.caption
     if body.total_duration_seconds is not None:
@@ -352,6 +412,12 @@ def update_reel(
         reel.cover_post_id = body.cover_post_id
     if body.photos is not None:
         _validate_posts_exist(db, {p.post_id for p in body.photos})
+        # Rows are replaced wholesale; a frame that stays keeps its Instagram-follows
+        # flag, or a later trial toggle would stop retargeting it.
+        following = set(db.execute(
+            select(ReelPhoto.post_id).where(ReelPhoto.reel_id == reel_id,
+                                            ReelPhoto.ig_follows_reel.is_(True))
+        ).scalars())
         db.execute(delete(ReelPhoto).where(ReelPhoto.reel_id == reel_id))
         for p in body.photos:
             db.add(ReelPhoto(
@@ -360,8 +426,12 @@ def update_reel(
                 post_id=p.post_id,
                 crop_start_json=json.dumps(p.crop_start.model_dump()),
                 crop_end_json=json.dumps(p.crop_end.model_dump()) if p.crop_end else None,
+                ig_follows_reel=p.post_id in following,
             ))
 
+    if retarget:
+        db.flush()
+        _sync_frame_instagram(db, reel)
     reel.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(reel)

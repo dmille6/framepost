@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     Date,
     Column,
     DateTime,
@@ -454,6 +455,12 @@ class ReelPhoto(Base):
     post_id = Column(String, ForeignKey("posts.id", ondelete="RESTRICT"), nullable=False, index=True)
     crop_start_json = Column(Text)
     crop_end_json = Column(Text)
+    # (0037) This frame was a draft aimed at Instagram when the reel was built from it,
+    # so its Instagram targeting follows the reel: off for an ordinary reel (the reel
+    # carries the photo there), on for a Trial Reel (followers still get the photo as a
+    # feed post; the trial is extra reach). False for reels built from published
+    # history, whose frames are never retargeted.
+    ig_follows_reel = Column(Boolean, nullable=False, server_default="0")
 
 
 class FlickrEngagement(Base):

@@ -12,11 +12,14 @@
  * assemble one out of posts that already went out. The API never required published
  * posts; only that UI did.
  *
- * The frames also stop targeting Instagram individually. A carousel groups its members
- * so they publish as one post; a reel does not group anything, so without this the same
- * five photographs would go out as a reel AND as five separate Instagram posts. They
- * keep every other destination -- Flickr and Bluesky want the single frames, and only
- * Instagram is receiving the assembled version.
+ * For an ordinary reel the frames also stop targeting Instagram individually. A carousel
+ * groups its members so they publish as one post; a reel does not group anything, so
+ * without this the same five photographs would go out as a reel AND as five separate
+ * Instagram posts. They keep every other destination -- Flickr and Bluesky want the
+ * single frames. A Trial Reel is different: it is shown to non-followers first, so the
+ * frames keep Instagram and followers still get them as feed posts; the trial is extra
+ * reach. The server does this (frames_from_drafts), and redoes it if the reel is later
+ * switched between the two -- see routes/reels._sync_frame_instagram.
  *
  * Crops are centred 9:16 and landscape frames are excluded rather than warned about.
  * That is stricter than the Reel tab deliberately: nobody is looking at a per-frame
@@ -25,16 +28,14 @@
  * a row of audience heads.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   createReel,
   fetchAppConfig,
   getReel,
-  listConnectedPlatforms,
   scheduleReel,
   thumbnailUrl,
-  updatePost,
   type Post,
   type Reel,
   type TrialGraduation,
@@ -104,17 +105,7 @@ export default function ReelFromDraftsDialog({
     return () => clearInterval(t);
   }, [reel]);
 
-  const { data: connected = [] } = useQuery({
-    queryKey: ["platforms"],
-    queryFn: listConnectedPlatforms,
-  });
-
-  /** This post's destinations as they stand, resolving the "use defaults" null. */
-  function effectiveTargets(p: Post): string[] {
-    // A non-null list is an explicit choice, empty included; null means "use defaults".
-    if (p.target_platforms) return p.target_platforms;
-    return connected.filter((c) => c.default_target).map((c) => c.platform);
-  }
+  const qc = useQueryClient();
 
   const build = useMutation({
     mutationFn: () =>
@@ -125,6 +116,7 @@ export default function ReelFromDraftsDialog({
         // Sent explicitly (null included) so what the dialog showed is what is built;
         // left out only if Settings never loaded, when the server applies the default.
         ...(trial !== undefined ? { trial_graduation: trial } : {}),
+        frames_from_drafts: true,
         photos: usable.map((p, i) => ({
           post_id: p.id,
           position: i,
@@ -132,23 +124,10 @@ export default function ReelFromDraftsDialog({
           crop_end: null,
         })),
       }),
-    onSuccess: async (created) => {
-      // Take Instagram off each frame, so the photographs reach Instagram once — as the
-      // reel — and still go everywhere else on their own.
-      try {
-        await Promise.all(
-          usable.map((p) =>
-            updatePost(p.id, {
-              target_platforms: effectiveTargets(p).filter((t) => t !== "instagram"),
-            }),
-          ),
-        );
-      } catch {
-        setError(
-          "The reel was built, but these photos still target Instagram individually — " +
-            "untick Instagram on each before they publish, or you'll post them twice.",
-        );
-      }
+    onSuccess: (created) => {
+      // The server retargeted the frames in the same transaction; show it.
+      void qc.invalidateQueries({ queryKey: ["drafts"] });
+      void qc.invalidateQueries({ queryKey: ["scheduled"] });
       setReel(created);
     },
     onError: (e) => setError((e as Error).message),
@@ -182,8 +161,10 @@ export default function ReelFromDraftsDialog({
             Reels are shown to people who don't follow you; a carousel only reaches
             existing followers. Performers in any frame are invited as collaborators
             (except on a Trial Reel).
-            These photos will stop posting to Instagram on their own — Instagram gets
-            the reel instead. Flickr, Bluesky and the rest are unaffected.
+            {trial
+              ? " As a Trial Reel it's extra reach: these photos still post to Instagram on their own, so followers get them too."
+              : " These photos will stop posting to Instagram on their own — Instagram gets the reel instead."}{" "}
+            Flickr, Bluesky and the rest are unaffected.
           </div>
         </div>
 

@@ -879,6 +879,9 @@ function ReelSchedule({ reel }: { reel: Reel }) {
     onSuccess: (updated) => {
       qc.setQueryData(["reel", reel.id], updated);
       void qc.invalidateQueries({ queryKey: ["reels"] });
+      // A reel built from drafts retargets its unposted frames' Instagram to match.
+      void qc.invalidateQueries({ queryKey: ["drafts"] });
+      void qc.invalidateQueries({ queryKey: ["scheduled"] });
     },
   });
   const trialField = (
