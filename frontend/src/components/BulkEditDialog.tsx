@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   fetchRecentCities,
@@ -7,6 +7,7 @@ import {
   getPost,
   getPostPerformers,
   listAlbums,
+  listDrafts,
   listConnectedPlatforms,
   listGroups,
   listProfiles,
@@ -34,6 +35,7 @@ type Props = {
 type Apply = "off" | "on";  // per-section toggle
 
 export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) {
+  const qc = useQueryClient();
   // Field values
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -112,19 +114,15 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   });
 
   const [progress, setProgress] = useState<{ done: number; failed: number; total: number } | null>(null);
+  const { data: drafts = [] } = useQuery({ queryKey: ["drafts"], queryFn: listDrafts });
+  const [failures, setFailures] = useState<{ id: string; label: string; error: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onCancel();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
 
   const apply = useMutation({
-    mutationFn: async () => {
-      const total = postIds.length;
+    mutationFn: async (ids: string[]) => {
+      const total = ids.length;
+      const failedDrafts: typeof failures = [];
       setProgress({ done: 0, failed: 0, total });
       setError(null);
 
@@ -146,7 +144,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
       let failed = 0;
 
       // Iterate sequentially so the backend isn't slammed and progress is accurate.
-      for (const postId of postIds) {
+      for (const postId of ids) {
         try {
           // Tags handling: append (merge with existing, dedup) vs replace.
           let body: PostUpdate = { ...baseBody };
@@ -183,20 +181,36 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
           done += 1;
         } catch (e) {
           failed += 1;
-          console.error(`bulk edit failed for post ${postId}`, e);
+          const post = drafts.find((p) => p.id === postId);
+          failedDrafts.push({
+            id: postId,
+            label: post?.title || post?.original_filename || postId,
+            error: e instanceof Error ? e.message : "Update failed",
+          });
         }
         setProgress({ done: done + failed, failed, total });
       }
 
+      setFailures(failedDrafts);
       if (failed > 0) {
         setError(`${failed} of ${total} draft${total === 1 ? "" : "s"} failed to update.`);
       }
+      return failedDrafts;
     },
-    onSuccess: () => {
-      // Small settle delay so the user can see "10 of 10" before the dialog closes.
-      setTimeout(() => onApplied(), 300);
+    onSuccess: (failedDrafts) => {
+      void qc.invalidateQueries({ queryKey: ["drafts"] });
+      if (failedDrafts.length === 0) onApplied();
     },
   });
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !apply.isPending) onCancel();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel, apply.isPending]);
+
 
   const willChangeAnything =
     !!title.trim() ||
@@ -620,6 +634,11 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
               }}
             >
               {error}
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+                {failures.map((failure) => (
+                  <li key={failure.id}>{failure.label}: {failure.error}</li>
+                ))}
+              </ul>
             </div>
           )}
         </div>
@@ -651,11 +670,11 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
             </button>
             <button
               className="fp-btn"
-              onClick={() => apply.mutate()}
+              onClick={() => apply.mutate(failures.length ? failures.map((f) => f.id) : postIds)}
               disabled={busy || !willChangeAnything}
             >
               {busy && <span className="fp-spinner" />}
-              {busy ? "Applying" : `Apply to ${postIds.length}`}
+              {busy ? "Applying" : failures.length ? "Retry failed" : `Apply to ${postIds.length}`}
             </button>
           </div>
         </div>
