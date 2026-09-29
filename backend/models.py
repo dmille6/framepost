@@ -10,10 +10,12 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    event,
     func,
 )
 
 from database import Base
+from services.redact import redact
 
 
 class User(Base):
@@ -493,3 +495,27 @@ class FlickrEngagement(Base):
     views = Column(Integer, nullable=False, server_default="0")
     faves = Column(Integer, nullable=False, server_default="0")
     comments = Column(Integer, nullable=False, server_default="0")
+
+
+# -----------------------------------------------------------------------------
+# Error text is masked on the way into the database
+# -----------------------------------------------------------------------------
+# These columns hold text that came from somewhere else — an exception, a platform's
+# response body — and are shown back in the UI. The error builders already mask secrets
+# (services/redact.py); this is the backstop for the paths that don't go through one
+# (`str(e)` of an httpx error, a new caller next year). It fires on every ORM assignment,
+# constructor kwargs included. Core update() statements bypass it; today those only
+# ever write NULL here.
+_MASKED_COLUMNS = (
+    Post.error_message, PostGroup.error_message, PostPlatform.error_message,
+    PostEvent.details, PlatformCredential.last_error, PlatformCredential.auth_error,
+    Reel.error_message, Reel.publish_error,
+)
+
+
+def _mask_on_set(target, value, oldvalue, initiator):
+    return redact(value) if isinstance(value, str) else value
+
+
+for _column in _MASKED_COLUMNS:
+    event.listen(_column, "set", _mask_on_set, retval=True)

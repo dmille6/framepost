@@ -33,7 +33,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
-from services import http_client
+from services import http_client, redact
 
 REQUEST_TOKEN_URL = "https://www.flickr.com/services/oauth/request_token"
 AUTHORIZE_URL = "https://www.flickr.com/services/oauth/authorize"
@@ -48,7 +48,8 @@ KEY_VERSION = 1
 class FlickrError(Exception):
     """Raised on a Flickr-side failure. .permanent=True means don't retry (HTTP 4xx, validation)."""
     def __init__(self, message: str, *, code: int | None = None, permanent: bool = False):
-        super().__init__(message)
+        # Masked at birth: wrapped transport errors ({e}) can quote a signed request.
+        super().__init__(redact.redact(message))
         self.code = code
         self.permanent = permanent
 

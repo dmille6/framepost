@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from models import PlatformCredential, Post
+from services.redact import redact
 
 
 def _now() -> datetime:
@@ -32,6 +33,7 @@ def flag_reauth(db: Session, platform: str, message: str) -> bool:
     row = db.execute(
         select(PlatformCredential).where(PlatformCredential.platform == platform)
     ).scalars().first()
+    message = redact(message)   # shown in the Settings banner; callers pass error text
     if row is None or not row.access_token:
         # Nothing to reconnect: the user disconnected it (the row is kept only for its
         # post history), or it was never connected. Flagging it would put a "reconnect"

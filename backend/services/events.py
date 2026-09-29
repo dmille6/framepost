@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import PostEvent
+from services.redact import redact
 
 
 def log_event(
@@ -24,7 +25,9 @@ def log_event(
             post_id=post_id,
             event_type=event_type,
             actor=actor,
-            details=json.dumps(details, default=str) if details else None,
+            # Details carry raw exception text (`"error": str(e)`) from a dozen callers;
+            # masking the serialised row covers all of them, nested values included.
+            details=redact(json.dumps(details, default=str)) if details else None,
         )
     )
 

@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, NamedTuple, Sequence, Union
 
 import httpx
-from services import http_client
+from services import http_client, redact
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -171,7 +171,10 @@ UNCONFIRMED_RETRY_SECONDS = 420
 class InstagramError(Exception):
     def __init__(self, message: str, *, permanent: bool = False,
                  http_status: int | None = None):
-        super().__init__(message)
+        # Masked at birth: this text is logged, stored as error_message and shown in
+        # Settings, and wrapped transport errors ({e}) can quote a URL carrying the
+        # token (the refresh call still does). Subclasses inherit it.
+        super().__init__(redact.redact(message))
         self.permanent = permanent
         # Set when Meta actually answered. A 4xx is Meta saying no; no status at all
         # (timeout, reset, unparseable 200) means we don't know what Meta did.

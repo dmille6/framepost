@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from services.redact import redact
+
 
 class FailureCategory(str, Enum):
     RETRY = "retry"
@@ -179,7 +181,10 @@ _FALLBACK: list[tuple[str, FailureCategory, str]] = [
 
 def classify(platform: str, err: BaseException) -> PublishFailure:
     """Map a platform exception onto a category and a message worth showing a human."""
-    text = str(err) or err.__class__.__name__
+    # `detail` is stored and shown; an exception that isn't one of the platform errors
+    # (an httpx error that escaped an adapter) can still quote a URL with a token in it.
+    # The rules below never match on a secret, so masking first changes no category.
+    text = redact(str(err)) or err.__class__.__name__
     low = text.lower()
     code = getattr(err, "code", None)
 

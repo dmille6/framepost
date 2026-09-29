@@ -1,5 +1,7 @@
 """FastAPI entrypoint. Phase 1: /health, auth (login/logout/me), CSRF middleware."""
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from middleware import CSRFMiddleware
 from routes import activity, ai, albums, analytics, auth, carousels, groups, health, history, performers, platforms, posts, profiles, reels, schedule, system, tags, title_templates, venues
@@ -14,6 +16,16 @@ redact.install_logging()
 
 app = FastAPI(title="FramePost", version="0.1.0")
 app.add_middleware(CSRFMiddleware)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _masked_http_exception(request: Request, exc: StarletteHTTPException):
+    """Routes turn platform failures into HTTPException(detail=str(e)) in ~40 places;
+    mask the detail once here rather than at each of them. Otherwise FastAPI's own
+    handler, unchanged."""
+    if isinstance(exc.detail, str):
+        exc.detail = redact.redact(exc.detail)
+    return await http_exception_handler(request, exc)
 
 # /health stays at the root (no /api prefix) so Nginx can pass it through cleanly.
 app.include_router(health.router)

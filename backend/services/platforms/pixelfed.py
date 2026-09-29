@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from services import http_client
+from services import http_client, redact
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -44,7 +44,9 @@ SCOPES = "read write"
 
 class PixelfedError(Exception):
     def __init__(self, message: str, *, permanent: bool = False):
-        super().__init__(message)
+        # Masked at birth: this text is logged, stored as error_message and shown in
+        # Settings, and it can quote a request or a platform's echo of one.
+        super().__init__(redact.redact(message))
         self.permanent = permanent
 
 

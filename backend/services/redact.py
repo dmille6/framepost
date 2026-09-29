@@ -44,9 +44,12 @@ _KEYS = "|".join(re.escape(k) for k in _SECRET_KEYS)
 # character is alphanumeric and so would otherwise read as the middle of a word.
 _KV = re.compile(
     rf"(?i)(?:(?<![A-Za-z0-9])|(?<=%3F)|(?<=%26))({_KEYS})(=|%3D)(\"?)"
-    rf"((?:(?!%26)[^&\s\"'<>,;])+)")
-# "key": "value" / 'key': 'value' — JSON bodies and Python dict reprs.
-_JSONISH = re.compile(rf"(?i)([\"']({_KEYS})[\"']\s*:\s*[\"'])([^\"']*)")
+    rf"((?:(?!%26)[^&\s\"'<>,;\\])+)")
+# "key": "value" / 'key': 'value' — JSON bodies and Python dict reprs, and JSON quoted
+# inside JSON (\"key\": \"value\"), which is how a response body lands in post_events.
+# Neither pattern consumes a backslash, so masking never breaks a JSON escape.
+_JSONISH = re.compile(
+    rf"(?i)(\\?[\"']({_KEYS})\\?[\"']\s*:\s*\\?[\"'])([^\"'\\]*)")
 # Authorization header values. The 16-char floor keeps prose intact: Meta's own error
 # says "Invalid OAuth 2.0 access token", and publish_errors matches on that wording.
 # An OAuth1 header ("OAuth oauth_consumer_key=...") is left to _KV, field by field.

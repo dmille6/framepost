@@ -17,6 +17,7 @@ from database import get_session
 from models import PlatformCredential, Post, User
 from routes.auth import current_user
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
+from services.redact import redact
 
 log = logging.getLogger("framepost.platforms")
 router = APIRouter()
@@ -130,9 +131,11 @@ def flickr_disconnect(
 
 
 def _redirect_back(_request: Request, reason: str) -> RedirectResponse:
+    # `reason` is exception text and it travels in a URL — into the browser's history
+    # and the access log — so it is masked here and in the two helpers like this below.
     from urllib.parse import quote
     return RedirectResponse(
-        url=f"/settings/flickr?error={quote(reason)}",
+        url=f"/settings/flickr?error={quote(redact(reason))}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
@@ -322,7 +325,7 @@ def pixelfed_disconnect(
 def _pixelfed_redirect_back(reason: str) -> RedirectResponse:
     from urllib.parse import quote
     return RedirectResponse(
-        url=f"/settings/platforms?error={quote(reason)}",
+        url=f"/settings/platforms?error={quote(redact(reason))}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
@@ -344,7 +347,7 @@ def _pinterest_signer() -> URLSafeTimedSerializer:
 def _pinterest_redirect_back(reason: str) -> RedirectResponse:
     from urllib.parse import quote
     return RedirectResponse(
-        url=f"/settings/platforms?error={quote(reason)}",
+        url=f"/settings/platforms?error={quote(redact(reason))}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 
