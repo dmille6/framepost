@@ -31,11 +31,12 @@ test('changes disable Schedule through debounce and refresh; superseded response
   await page.settle();
   tree = page.render(props);
   button(tree, 'Schedule').props.onClick();
+  await new Promise(setImmediate);
   assert.deepEqual(requests[3].request, {
     ...requests[2].request, confirm: true,
     slots: [{ post_id: 'b', scheduled_at: '2026-10-02T11:00:00' }],
   });
-  requests[3].resolve({});
+  requests[3].resolve(preview('b', '2026-10-02T11:00:00'));
   await page.settle();
   assert.equal(confirmed, 1);
   page.unmount();

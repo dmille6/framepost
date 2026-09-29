@@ -16,7 +16,7 @@ export function compile(path, load = require) {
 
 // Like draft-queue.test: execute the real component and handlers, stubbing only
 // hooks, network and children. Effects run after render, with dependency cleanup.
-export function harness(path, { api = {}, queries = {}, imports = {}, queryClient = {} } = {}) {
+export function harness(path, { api = {}, queries = {}, imports = {}, queryClient = {}, queryStates = {} } = {}) {
   const state = [], effects = [], pending = [];
   let cursor = 0, changed = false;
   const react = {
@@ -44,12 +44,14 @@ export function harness(path, { api = {}, queries = {}, imports = {}, queryClien
     useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
   };
   const empty = [];
+  const qc = { invalidateQueries() {}, setQueryData() {}, ...queryClient };
+  let autosaves;
   function load(name) {
     if (name in imports) return imports[name];
     if (name === 'react') return react;
     if (name === '@tanstack/react-query') return {
-      useQueryClient: () => ({ invalidateQueries() {}, ...queryClient }),
-      useQuery: ({ queryKey }) => ({ data: queries[queryKey.join(':')] ?? queries[queryKey[0]] ?? empty }),
+      useQueryClient: () => qc,
+      useQuery: ({ queryKey }) => ({ data: queries[queryKey.join(':')] ?? queries[queryKey[0]] ?? empty, isSuccess: true, ...queryStates[queryKey[0]] }),
       useMutation: options => {
         const [busy, setBusy] = react.useState(false);
         const mutateAsync = async variables => {
@@ -65,6 +67,8 @@ export function harness(path, { api = {}, queries = {}, imports = {}, queryClien
           mutate: variables => pending.push(mutateAsync(variables).catch(() => {})) };
       },
     };
+    if (name === '../hooks/useDraftAutosaves') return autosaves ??= compile('../src/hooks/useDraftAutosaves.ts', load);
+    if (name === '../lib/draftAutosave') return compile('../src/lib/draftAutosave.ts');
     if (name === '../api/client') return { ApiError: Error, thumbnailUrl: id => id, ...api };
     if (name.startsWith('./')) return { __esModule: true, default: name.slice(2), ...imports[name] };
     return require(name);

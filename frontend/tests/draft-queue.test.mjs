@@ -28,6 +28,8 @@ function harness() {
       });
       return this.sessions.get(id);
     },
+    async schedule(id) { if (!await this.get(id).flush()) throw new Error("Save failed"); calls.push(["schedule", id]); this.remove([id]); },
+    remove(ids) { for (const id of ids) this.sessions.delete(id); },
     release(id, session) { calls.push(["release", id]); void session.flush(); },
   };
   const api = new Proxy({
@@ -188,4 +190,16 @@ test('Schedule waits for a successful flush before opening the scheduling dialog
   editor(page.render()).props.onSchedule();
   await page.settle();
   assert.ok(elements(page.render()).find(e => e.type === 'ScheduleDialog'));
+});
+
+
+test('successful scheduling clears the editor selection before the drafts refetch resolves', async () => {
+  const page = harness();
+  cards(page.render())[0].props.onSelect();
+  editor(page.render()).props.onSchedule(); await page.settle();
+  const dialog = elements(page.render()).find(e => e.type === 'ScheduleDialog');
+  await dialog.props.onSubmit('2026-10-01T10:00:00Z');
+  // This harness deliberately retains the stale drafts query result.
+  assert.equal(editor(page.render()), undefined);
+  assert.ok(page.calls.some(([action]) => action === 'schedule'));
 });

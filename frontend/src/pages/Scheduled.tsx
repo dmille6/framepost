@@ -4,7 +4,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   fetchAppConfig,
   listScheduled,
-  schedulePost,
   type ScheduledItem,
   unschedulePost,
 } from "../api/client";
@@ -19,6 +18,8 @@ import ScheduledItemModal from "../components/ScheduledItemModal";
 import Topbar from "../components/Topbar";
 import { usePageTitle } from "../hooks/usePageTitle";
 
+import { useDraftAutosaves } from "../hooks/useDraftAutosaves";
+
 type View = "calendar" | "list" | "shoots";
 
 type DragSchedule = { postId: string; date: Date };
@@ -26,6 +27,7 @@ type DragSchedule = { postId: string; date: Date };
 export default function Scheduled() {
   usePageTitle("Scheduled");
   const qc = useQueryClient();
+  const saves = useDraftAutosaves(qc);
   const [view, setView] = useState<View>(() => {
     const saved = localStorage.getItem("framepost.scheduled.view");
     return saved === "list" || saved === "shoots" ? saved : "calendar";
@@ -81,7 +83,7 @@ export default function Scheduled() {
   });
 
   const rescheduleMutation = useMutation({
-    mutationFn: ({ id, iso }: { id: string; iso: string }) => schedulePost(id, iso),
+    mutationFn: ({ id, iso }: { id: string; iso: string }) => saves.schedule(id, iso),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["schedule"] });
       void qc.invalidateQueries({ queryKey: ["drafts"] });

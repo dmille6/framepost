@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import {
   getPost, setPostAlbums, setPostGroups, setPostPerformers, setPostProfiles, updatePost,
+  schedulePost, smartFill, type SmartFillRequest,
   type Post, type PostUpdate,
 } from "../api/client";
 import type { EditorChanges } from "../components/MetadataEditor";
@@ -13,7 +14,21 @@ class DraftSaves {
   sessions = new Map<string, EditorAutosave>();
   private listeners = new Set<() => void>();
   private revision = 0;
-  constructor(private qc: QueryClient) {}
+  constructor(private qc: QueryClient) {
+    // The store outlives route mounts, including a failed save left on the calendar.
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", () => { void this.flushAll(); });
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") void this.flushAll();
+      });
+      window.addEventListener("beforeunload", (event) => {
+        if ([...this.sessions.values()].some((session) => session.status !== "saved")) {
+          event.preventDefault();
+          event.returnValue = "";
+        }
+      });
+    }
+  }
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -35,17 +50,23 @@ class DraftSaves {
         const saved = Object.keys(patch).length
           ? await updatePost(id, patch as PostUpdate, { autosave: true })
           : await getPost(id);
-        await this.qc.cancelQueries({ queryKey: ["drafts"] });
         this.qc.setQueryData<Post[]>(["drafts"], (old) =>
           (old ?? []).map((post) => post.id === id ? saved : post),
         );
         this.qc.setQueryData(["post", id], saved);
+        // Restart an outstanding list refresh instead of cancelling and losing it.
+        void this.qc.invalidateQueries({ queryKey: ["drafts"] });
         for (const key of ["post-albums", "post-groups", "post-profiles", "post-performers", "merged-tags"]) {
           void this.qc.invalidateQueries({ queryKey: [key, id] });
         }
       });
       const created = session;
+      let status = created.status;
+      let error = created.error;
       session.subscribe(() => {
+        if (status === created.status && error === created.error) return;
+        status = created.status;
+        error = created.error;
         if (!created.attached && created.status === "saved" && this.sessions.get(id) === created) {
           this.sessions.delete(id);
         }
@@ -56,7 +77,51 @@ class DraftSaves {
     }
     return session;
   }
-  flushAll() { for (const session of this.sessions.values()) void session.flush(); }
+  async flushAll() {
+    return (await Promise.all([...this.sessions.values()].map((session) => session.flush()))).every(Boolean);
+  }
+  async prepare(ids: string[]) {
+    const results = await Promise.all(ids.map((id) => this.sessions.get(id)?.flush() ?? true));
+    if (results.some((ok) => !ok)) {
+      const error = ids.map((id) => this.sessions.get(id)?.error).find(Boolean);
+      throw new Error(error || "Couldn't save. Retry before scheduling.");
+    }
+  }
+  remove(ids: string[]) {
+    for (const id of ids) {
+      void this.sessions.get(id)?.cancel();
+      this.sessions.delete(id);
+    }
+    this.qc.setQueryData<Post[]>(["drafts"], (old) => old?.filter((post) => !ids.includes(post.id)));
+    // Replace any list request whose snapshot predates scheduling/deletion.
+    void this.qc.invalidateQueries({ queryKey: ["drafts"] });
+  }
+  private async scheduling<R>(ids: string[], action: () => Promise<R>, completed: (result: R) => string[]) {
+    await this.prepare(ids);
+    const sessions = ids.map((id) => this.sessions.get(id)).filter((s) => s !== undefined);
+    await Promise.all(sessions.map((session) => session.cancel()));
+    try {
+      const result = await action();
+      const removed = completed(result);
+      this.remove(removed);
+      for (const id of ids) if (!removed.includes(id)) this.sessions.get(id)?.resume();
+      return result;
+    } catch (error) {
+      for (const session of sessions) session.resume();
+      throw error;
+    }
+  }
+  schedule(id: string, iso: string) {
+    return this.scheduling([id], () => schedulePost(id, iso), () => [id]);
+  }
+  async smartFill(body: SmartFillRequest) {
+    if (!body.confirm) {
+      await this.prepare(body.post_ids);
+      return smartFill(body);
+    }
+    return this.scheduling(body.post_ids, () => smartFill(body),
+      (result) => result.slots.filter((slot) => slot.scheduled_at && !slot.skipped_reason).map((slot) => slot.post_id));
+  }
   release(id: string, session: EditorAutosave) {
     void session.flush().then((ok) => {
       if (ok && !session.pending && !session.attached && this.sessions.get(id) === session) {
@@ -72,6 +137,6 @@ export function useDraftAutosaves(qc: QueryClient) {
   let store = stores.get(qc);
   if (!store) { store = new DraftSaves(qc); stores.set(qc, store); }
   useSyncExternalStore(store.subscribe, store.snapshot);
-  useEffect(() => () => store.flushAll(), [store]);
+  useEffect(() => () => { void store.flushAll(); }, [store]);
   return store;
 }

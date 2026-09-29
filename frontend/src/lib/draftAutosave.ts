@@ -11,6 +11,7 @@ export class DraftAutosave<T extends object> {
   attached = false;
   private saved: Partial<T> = {};
   private current: Partial<T> = {};
+  private uncertain = new Set<keyof T>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running: Promise<boolean> | undefined;
   private due = false;
@@ -33,7 +34,7 @@ export class DraftAutosave<T extends object> {
   get patch(): Partial<T> {
     const patch: Partial<T> = {};
     for (const key of Object.keys(this.current) as (keyof T)[]) {
-      if (!equal(this.current[key], this.saved[key])) patch[key] = this.current[key];
+      if (this.uncertain.has(key) || !equal(this.current[key], this.saved[key])) patch[key] = this.current[key];
     }
     return patch;
   }
@@ -64,8 +65,12 @@ export class DraftAutosave<T extends object> {
     this.error = null;
     this.running = Promise.resolve().then(() => this.save(sent, values)).then(() => {
       Object.assign(this.saved, sent);
+      for (const key of Object.keys(sent) as (keyof T)[]) this.uncertain.delete(key);
       return true;
     }, (error) => {
+      // A multi-endpoint save may have written some fields before failing. Even
+      // a reversion to the old baseline must be sent until acknowledged.
+      for (const key of Object.keys(sent) as (keyof T)[]) this.uncertain.add(key);
       this.error = error instanceof Error ? error.message : "Could not save this draft.";
       return false;
     }).finally(() => {

@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   ApiError,
   fetchPopularHours,
-  smartFill,
   type SmartFillRequest,
   type SmartFillResponse,
   thumbnailUrl,
 } from "../api/client";
+
+import { useDraftAutosaves } from "../hooks/useDraftAutosaves";
 
 function formatHour(h: number): string {
   if (h === 0) return "12 AM";
@@ -26,6 +27,7 @@ type Props = {
 type Mode = "sequential" | "random_scatter";
 
 export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Props) {
+  const saves = useDraftAutosaves(useQueryClient());
   const [mode, setMode] = useState<Mode>("sequential");
   const [time, setTime] = useState("10:00");
   const [cadence, setCadence] = useState(1);
@@ -63,7 +65,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
   const confirmMutation = useMutation({
     mutationFn: () => {
       if (stale || !proposal) throw new Error("Wait for the current preview.");
-      return smartFill({
+      return saves.smartFill({
         ...proposal.request,
         confirm: true,
         slots: proposal.response.slots
@@ -81,7 +83,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
     setError(null);
     const snapshot: SmartFillRequest = JSON.parse(requestKey);
     const t = setTimeout(() => {
-      void smartFill(snapshot).then((response) => {
+      void saves.smartFill(snapshot).then((response) => {
         if (!current) return;
         setProposal({ request: snapshot, response, key: requestKey });
         setRefreshing(false);
@@ -91,7 +93,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
     }, 250);
     // Superseded responses must never replace the proposal for the current controls.
     return () => { current = false; clearTimeout(t); };
-  }, [requestKey]);
+  }, [requestKey, saves]);
 
   return (
     <div

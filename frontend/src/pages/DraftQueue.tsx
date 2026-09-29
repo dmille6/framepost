@@ -8,7 +8,6 @@ import {
   listHistory,
   listScheduled,
   type Post,
-  schedulePost,
   uploadFileWithProgress,
 } from "../api/client";
 
@@ -235,11 +234,12 @@ export default function DraftQueue() {
   }
 
   const scheduleMutation = useMutation({
-    mutationFn: ({ id, iso }: { id: string; iso: string }) => schedulePost(id, iso),
+    mutationFn: ({ id, iso }: { id: string; iso: string }) => saves.schedule(id, iso),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["drafts"] });
       void qc.invalidateQueries({ queryKey: ["schedule"] });
       setScheduling(null);
+      setSelectedId(null);
     },
   });
 
@@ -261,7 +261,7 @@ export default function DraftQueue() {
       setActionError(error instanceof Error ? error.message : "Could not delete the draft.");
     },
     onSuccess: (_data, id) => {
-      void qc.invalidateQueries({ queryKey: ["drafts"] });
+      saves.remove([id]);
       void qc.invalidateQueries({ queryKey: ["schedule"] });
       void qc.invalidateQueries({ queryKey: ["published"] });
       if (selectedId === id) setSelectedId(null);

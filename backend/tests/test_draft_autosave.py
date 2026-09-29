@@ -1,5 +1,7 @@
 """Autosave preserves sparse PATCH semantics without flooding the activity feed."""
 import json
+import pytest
+from fastapi import HTTPException
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -64,7 +66,23 @@ def test_old_bursts_and_live_scheduled_edits_are_not_coalesced(db):
     assert len(rows(db)) == 2
     post.scheduled_at = datetime.utcnow() + timedelta(days=1)
     db.commit()
-    patch(db, title="Live 1")
-    patch(db, title="Live 2")
+    update_post("draft", PostUpdate(title="Live 1"), db=db, _user=None)
+    update_post("draft", PostUpdate(title="Live 2"), db=db, _user=None)
     assert len(rows(db)) == 4
     assert "autosave" not in json.loads(rows(db)[-1].details)
+
+
+@pytest.mark.parametrize("state,scheduled", [("pending", True), ("posted", False), ("failed", False)])
+@pytest.mark.parametrize("changes", [{"title": "Stale edit"}, {}])
+def test_autosave_rejects_posts_that_are_no_longer_drafts(db, state, scheduled, changes):
+    post = make_post(db)
+    post.status = state
+    post.scheduled_at = datetime.utcnow() if scheduled else None
+    db.commit()
+    with pytest.raises(HTTPException) as exc:
+        patch(db, **changes)
+    assert exc.value.status_code == 409
+    assert "no longer a draft" in exc.value.detail
+    db.refresh(post)
+    assert post.title == "Original"
+    assert rows(db) == []
