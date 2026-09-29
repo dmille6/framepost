@@ -7,6 +7,16 @@
 # pattern lets a shell-set-but-empty variable beat the .env value, which is a common
 # footgun in dev shells (e.g. an exported empty ANTHROPIC_API_KEY).
 
+# Log rotation: Docker's json-file driver keeps every line forever unless told
+# otherwise, so anything that once reached a log (the Instagram token did, via httpx's
+# request lines, until services/redact.py) stayed on disk indefinitely. 10 MB x 5 files
+# per container is weeks of worker output at the current volume, and bounds the rest.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   backend:
     build:
@@ -28,6 +38,7 @@ services:
     expose:
       - "8000"
     restart: unless-stopped
+    logging: *default-logging
 
   worker:
     image: framepost-backend:dev   # built by `backend` service — don't double-build
@@ -47,6 +58,7 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    logging: *default-logging
 
   nginx:
     build:
@@ -59,3 +71,4 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    logging: *default-logging
