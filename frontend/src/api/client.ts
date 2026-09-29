@@ -268,8 +268,8 @@ export type PostUpdate = Partial<{
   include_exif: boolean;
 }>;
 
-export const updatePost = (id: string, body: PostUpdate) =>
-  apiFetch<Post>(`/api/posts/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+export const updatePost = (id: string, body: PostUpdate, options?: { autosave?: boolean }) =>
+  apiFetch<Post>(`/api/posts/${id}${options?.autosave ? "?autosave=true" : ""}`, { method: "PATCH", body: JSON.stringify(body) });
 
 /** Live preview URL for the Instagram auto-transform (crop slider in the editor).
  *  Plain <img src> — auth rides on the session cookie. */

@@ -407,6 +407,7 @@ def update_post(
     body: PostUpdate,
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
+    autosave: bool = False,
 ):
     post = db.get(Post, post_id)
     if not post:
@@ -425,12 +426,9 @@ def update_post(
         else:
             setattr(post, field, value)
     post.updated_at = datetime.now(timezone.utc)
-    events.log_event(
-        db,
-        post_id=post_id,
-        event_type="edited",
-        actor="user",
-        details={"fields": list(changed.keys())},
+    events.log_edit(
+        db, post_id=post_id, fields=list(changed.keys()),
+        autosave=autosave and post.status == "pending" and post.scheduled_at is None,
     )
     db.commit()
     db.refresh(post)
