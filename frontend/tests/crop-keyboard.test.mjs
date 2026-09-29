@@ -19,7 +19,7 @@ test('focal marker consumes arrow keys while nudging its point', () => {
   } finally { globalThis.window = oldWindow; }
 });
 
-test('filmstrip skips handled events and focused interactive descendants', () => {
+test('filmstrip protects text and arrow-owning controls but allows navigation from buttons and links', () => {
   const oldWindow = globalThis.window;
   let onKey;
   globalThis.window = { addEventListener: (_type, fn) => { onKey = fn; }, removeEventListener() {} };
@@ -29,7 +29,7 @@ test('filmstrip skips handled events and focused interactive descendants', () =>
     const current = tree => elements(tree).find(e => e.type === 'IgCropStudio').props.postId;
     page.render(props);
     for (const target of [
-      { closest: selector => { assert.match(selector, /button/); return {}; } },
+      { closest: selector => { assert.match(selector, /textarea/); return {}; } },
       { isContentEditable: true },
       { closest: () => ({ role: 'slider' }) },
     ]) {
@@ -40,6 +40,11 @@ test('filmstrip skips handled events and focused interactive descendants', () =>
     assert.equal(current(page.render(props)), 'a');
     onKey({ key: 'ArrowRight', target: { closest: () => null } });
     assert.equal(current(page.render(props)), 'b');
+    onKey({ key: 'ArrowLeft', target: { closest: selector => {
+      assert.ok(!selector.includes('button,') && !selector.includes('a[href]') && !selector.includes('[role],'));
+      return null; // A plain button/link or a non-arrow-owning role.
+    } } });
+    assert.equal(current(page.render(props)), 'a');
     page.unmount();
   } finally { globalThis.window = oldWindow; }
 });

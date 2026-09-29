@@ -65,7 +65,7 @@ export default function IgCropFilmstrip({
       if (e.defaultPrevented) return;
       const t = e.target as HTMLElement | null;
       if (t?.isContentEditable || t?.closest(
-        "input, textarea, select, button, a[href], [role], [contenteditable]:not([contenteditable='false'])",
+        "input:not([type=button]):not([type=submit]):not([type=reset]):not([type=checkbox]):not([type=radio]), textarea, select, [role=slider], [role=spinbutton], [role=listbox], [role=radiogroup], [role=tablist], [role=menu], [role=grid], [role=tree], [role=combobox], [contenteditable]:not([contenteditable='false'])",
       )) {
         if (e.key === "Escape") onClose();
         return;
