@@ -120,6 +120,18 @@ def redact(text: str | None) -> str | None:
     return out
 
 
+def redact_obj(value):
+    """redact() every string inside a JSON-shaped value (dicts, lists, tuples), keys
+    included; anything else is returned as is."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {redact_obj(k): redact_obj(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(redact_obj(v) for v in value)
+    return value
+
+
 def clip(text: str | None, limit: int) -> str:
     """Mask, then cut to `limit` characters — never the other way round.
 

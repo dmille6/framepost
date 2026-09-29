@@ -1,6 +1,9 @@
 """FastAPI entrypoint. Phase 1: /health, auth (login/logout/me), CSRF middleware."""
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from middleware import CSRFMiddleware
@@ -26,6 +29,17 @@ async def _masked_http_exception(request: Request, exc: StarletteHTTPException):
     if isinstance(exc.detail, str):
         exc.detail = redact.redact(exc.detail)
     return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def _masked_validation_error(request: Request, exc: RequestValidationError):
+    """FastAPI's 422 echoes each rejected value back as `input`, so a pasted Instagram
+    token one character over max_length came back whole in the response. `input` is
+    dropped from every error (nothing in the UI reads it; loc/msg/type say what was
+    wrong) and the rest is masked. Same status and shape as FastAPI's own handler."""
+    errors = [{k: v for k, v in err.items() if k != "input"} for err in exc.errors()]
+    return JSONResponse(status_code=422,
+                        content={"detail": redact.redact_obj(jsonable_encoder(errors))})
 
 # /health stays at the root (no /api prefix) so Nginx can pass it through cleanly.
 app.include_router(health.router)

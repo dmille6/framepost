@@ -656,3 +656,44 @@ def test_pinning_a_value_already_remembered_moves_it_out_of_the_queue():
     assert TOKEN not in redact._known and TOKEN in redact._pinned
     _churn(redact._MAX_REMEMBERED * 2)
     assert redact.redact(TOKEN) == MASK
+
+
+# -----------------------------------------------------------------------------
+# 422 validation errors echo the rejected input
+# -----------------------------------------------------------------------------
+
+def test_a_rejected_instagram_token_is_not_echoed_in_the_422(monkeypatch):
+    """routes/platforms caps the pasted token at 2000 chars; FastAPI's own 422 handler
+    would send an overlong one straight back as `input`."""
+    from fastapi.testclient import TestClient
+
+    import main
+    from routes.auth import current_user
+
+    main.app.dependency_overrides[current_user] = lambda: types.SimpleNamespace(id=1)
+    try:
+        client = TestClient(main.app)
+        csrf = "csrf-test-value"
+        client.cookies.set("framepost_csrf", csrf)
+        too_long = "IGQWR" + "x" * 2100
+        r = client.post("/api/platforms/instagram/connect",
+                        json={"access_token": too_long},
+                        headers={"X-CSRF-Token": csrf})
+    finally:
+        main.app.dependency_overrides.pop(current_user, None)
+    assert r.status_code == 422
+    assert "IGQWR" not in r.text and "x" * 50 not in r.text
+    detail = r.json()["detail"]
+    assert detail and all("input" not in e for e in detail)
+    assert detail[0]["loc"][-1] == "access_token" and detail[0]["type"] == "string_too_long"
+
+
+def test_validation_messages_are_masked_too():
+    import main
+    from fastapi.exceptions import RequestValidationError
+
+    exc = RequestValidationError([{"type": "value_error", "loc": ("body", "url"),
+                                   "msg": f"bad url https://x/?access_token={TOKEN}",
+                                   "input": TOKEN}])
+    resp = asyncio.run(main._masked_validation_error(None, exc))
+    assert resp.status_code == 422 and TOKEN not in resp.body.decode()
