@@ -31,7 +31,8 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
   const [cadence, setCadence] = useState(1);
   const [startDate, setStartDate] = useState(() => formatLocalDate(tomorrow()));
   const [skipWeekends, setSkipWeekends] = useState(false);
-  const [preview, setPreview] = useState<SmartFillResponse | null>(null);
+  const [proposal, setProposal] = useState<{ request: SmartFillRequest; response: SmartFillResponse; key: string } | null>(null);
+  const preview = proposal?.response;
   const [error, setError] = useState<string | null>(null);
 
   // The hour pool random_scatter will actually use. Ranked by Instagram engagement at a
@@ -45,45 +46,52 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
     .map(formatHour)
     .join(", ");
 
-  const buildRequest = (confirm: boolean): SmartFillRequest => ({
+  const request: SmartFillRequest = {
     post_ids: postIds,
     time_of_day: time,
     cadence_days: cadence,
     start_date: startDate,
     skip_weekends: skipWeekends,
-    confirm,
+    confirm: false,
     mode,
-    // Confirming commits the slots on screen. Without this the server builds a fresh
-    // proposal — different random days, different jitter — and saves that instead, so
-    // the dates reviewed here were never the dates written.
-    slots: confirm
-      ? (preview?.slots ?? [])
-          .filter((s) => s.scheduled_at)
-          .map((s) => ({ post_id: s.post_id, scheduled_at: s.scheduled_at as string }))
-      : undefined,
-  });
-
-  const previewMutation = useMutation({
-    mutationFn: () => smartFill(buildRequest(false)),
-    onSuccess: (resp) => {
-      setPreview(resp);
-      setError(null);
-    },
-    onError: (e) => setError(e instanceof ApiError ? e.message : "preview failed"),
-  });
+  };
+  const requestKey = JSON.stringify(request);
+  const [refreshing, setRefreshing] = useState(true);
+  // Compare during render, including the debounce window before the request starts.
+  const stale = refreshing || proposal?.key !== requestKey;
 
   const confirmMutation = useMutation({
-    mutationFn: () => smartFill(buildRequest(true)),
+    mutationFn: () => {
+      if (stale || !proposal) throw new Error("Wait for the current preview.");
+      return smartFill({
+        ...proposal.request,
+        confirm: true,
+        slots: proposal.response.slots
+          .filter((s) => s.scheduled_at)
+          .map((s) => ({ post_id: s.post_id, scheduled_at: s.scheduled_at as string })),
+      });
+    },
     onSuccess: () => onConfirmed(),
-    onError: (e) => setError(e instanceof ApiError ? e.message : "schedule failed"),
+    onError: (e) => setError(e instanceof Error ? e.message : "schedule failed"),
   });
 
-  // Auto-preview on first open and on form changes (light debounce).
   useEffect(() => {
-    const t = setTimeout(() => previewMutation.mutate(), 250);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, time, cadence, startDate, skipWeekends, postIds.length]);
+    let current = true;
+    setRefreshing(true);
+    setError(null);
+    const snapshot: SmartFillRequest = JSON.parse(requestKey);
+    const t = setTimeout(() => {
+      void smartFill(snapshot).then((response) => {
+        if (!current) return;
+        setProposal({ request: snapshot, response, key: requestKey });
+        setRefreshing(false);
+      }, (e) => {
+        if (current) setError(e instanceof ApiError ? e.message : "preview failed");
+      });
+    }, 250);
+    // Superseded responses must never replace the proposal for the current controls.
+    return () => { current = false; clearTimeout(t); };
+  }, [requestKey]);
 
   return (
     <div
@@ -246,13 +254,14 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
             onClick={() => confirmMutation.mutate()}
             disabled={
               confirmMutation.isPending
+              || stale
               || !preview
               || preview.scheduled === 0
             }
           >
             {confirmMutation.isPending
               ? "Scheduling…"
-              : preview ? `Schedule ${preview.scheduled}` : "Preview…"}
+              : stale ? "Refreshing preview…" : preview ? `Schedule ${preview.scheduled}` : "Preview…"}
           </button>
         </div>
       </div>
