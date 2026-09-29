@@ -32,11 +32,14 @@ MASK = redact.MASK
 @pytest.fixture(autouse=True)
 def _fresh_memory():
     """remember() is process-wide; keep this module's secrets out of other tests."""
-    saved = dict(redact._known)
+    saved, pinned = dict(redact._known), dict(redact._pinned)
     redact._known.clear()
+    redact._pinned.clear()
     yield
     redact._known.clear()
     redact._known.update(saved)
+    redact._pinned.clear()
+    redact._pinned.update(pinned)
 
 
 @pytest.fixture()
@@ -614,3 +617,42 @@ def test_the_connection_check_state_row_is_masked(db, monkeypatch):
     cc.run(db, now=now)
     state = db.get(AppConfig, cc.STATE_KEY).value
     assert "error" in state and FRAGMENT not in state
+
+
+# -----------------------------------------------------------------------------
+# Remembered values: settings secrets pinned, the token in use kept fresh
+# -----------------------------------------------------------------------------
+
+def _churn(n: int) -> None:
+    for i in range(n):
+        redact.remember(f"churned-jwt-{i:06d}-padding")
+
+
+def test_settings_secrets_survive_any_amount_of_churn(monkeypatch):
+    monkeypatch.setattr(settings, "flickr_api_secret", "flickr-app-secret-value")
+    monkeypatch.setattr(settings, "token_encryption_key", "fernet-key-one-xxxxx,fernet-key-two-yyyyy")
+    redact.remember_settings()
+    _churn(redact._MAX_REMEMBERED * 3)
+    out = redact.redact("flickr-app-secret-value fernet-key-one-xxxxx fernet-key-two-yyyyy")
+    assert out == f"{MASK} {MASK} {MASK}"
+    assert len(redact._known) == redact._MAX_REMEMBERED       # the cap still holds
+
+
+def test_a_re_remembered_value_moves_to_the_back_of_the_queue():
+    redact.remember(TOKEN)
+    for i in range(redact._MAX_REMEMBERED * 2):
+        redact.remember(f"churned-jwt-{i:06d}-padding")
+        if i % 100 == 0:
+            redact.remember(TOKEN)          # the token in use is decrypted regularly
+    assert redact.redact(TOKEN) == MASK
+    redact.remember(NEW_TOKEN)
+    _churn(redact._MAX_REMEMBERED)          # a value nobody touches again does age out
+    assert redact.redact(NEW_TOKEN) == NEW_TOKEN
+
+
+def test_pinning_a_value_already_remembered_moves_it_out_of_the_queue():
+    redact.remember(TOKEN)
+    redact.remember(TOKEN, pin=True)
+    assert TOKEN not in redact._known and TOKEN in redact._pinned
+    _churn(redact._MAX_REMEMBERED * 2)
+    assert redact.redact(TOKEN) == MASK

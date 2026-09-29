@@ -67,16 +67,26 @@ _AUTH = re.compile(r"(?i)\b(bearer|oauth)(\s+|%20|\+)(?!oauth_)([A-Za-z0-9._~+/\
 # empty setting) would mask ordinary words everywhere it happened to occur.
 _MIN_SECRET_LEN = 12
 _MAX_REMEMBERED = 256
-# secret -> its URL-encoded form. A dict for insertion order, so the oldest can go first.
+# secret -> its URL-encoded form, least recently used first, so the stalest goes first.
 _known: dict[str, str] = {}
+# The .env secrets. Never evicted: they are loaded once, at install, and nothing would
+# ever remember them again — while Bluesky alone mints a fresh JWT pair per session
+# refresh, so a capped list would drop them within weeks.
+_pinned: dict[str, str] = {}
 
 
-def remember(secret: str | None) -> None:
+def remember(secret: str | None, *, pin: bool = False) -> None:
     """Mask this exact value from now on, wherever it appears. Called by crypto.py for
-    every token it encrypts or decrypts, so 'currently known credentials' costs nothing."""
-    if not secret or len(secret) < _MIN_SECRET_LEN or secret in _known:
+    every token it encrypts or decrypts, so 'currently known credentials' costs nothing.
+    A value remembered again moves to the back of the eviction queue: the token in
+    daily use is decrypted daily, and must outlive the churn around it."""
+    if not secret or len(secret) < _MIN_SECRET_LEN or secret in _pinned:
         return
-    _known[secret] = quote(secret, safe="")
+    if pin:
+        _known.pop(secret, None)
+        _pinned[secret] = quote(secret, safe="")
+        return
+    _known[secret] = _known.pop(secret, None) or quote(secret, safe="")
     while len(_known) > _MAX_REMEMBERED:
         _known.pop(next(iter(_known)))
 
@@ -88,7 +98,7 @@ def remember_settings() -> None:
     for name in ("secret_key", "token_encryption_key", "flickr_api_secret",
                  "anthropic_api_key", "openai_api_key", "pinterest_app_secret"):
         for part in str(getattr(settings, name, "") or "").split(","):
-            remember(part.strip())
+            remember(part.strip(), pin=True)
 
 
 def redact(text: str | None) -> str | None:
@@ -97,7 +107,8 @@ def redact(text: str | None) -> str | None:
         return text
     out = text
     # Longest first, so a secret that contains another is masked whole.
-    for secret, encoded in sorted(_known.items(), key=lambda kv: len(kv[0]), reverse=True):
+    every = [*_known.items(), *_pinned.items()]
+    for secret, encoded in sorted(every, key=lambda kv: len(kv[0]), reverse=True):
         if secret in out:
             out = out.replace(secret, MASK)
         if encoded != secret and encoded in out:
