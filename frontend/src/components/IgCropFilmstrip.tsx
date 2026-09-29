@@ -61,11 +61,12 @@ export default function IgCropFilmstrip({
   // Arrow keys step the strip — this is a review flow, not a form.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // The zoom control is a range input: left/right already mean something there.
-      // Without this guard, one arrow press both nudged the zoom on the frame being
-      // left AND advanced the strip, quietly committing a crop nobody asked for.
+      // Focused controls own their arrow keys, including custom sliders and editors.
+      if (e.defaultPrevented) return;
       const t = e.target as HTMLElement | null;
-      if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) {
+      if (t?.isContentEditable || t?.closest(
+        "input, textarea, select, button, a[href], [role], [contenteditable]:not([contenteditable='false'])",
+      )) {
         if (e.key === "Escape") onClose();
         return;
       }

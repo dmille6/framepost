@@ -298,6 +298,7 @@ export default function IgCropStudio({
     const move = d[e.key];
     if (!move || anchorX == null || anchorY == null) return;
     e.preventDefault();
+    e.stopPropagation();
     onFocalChange({
       x: Math.min(1, Math.max(0, anchorX + move[0])),
       y: Math.min(1, Math.max(0, anchorY + move[1])),
