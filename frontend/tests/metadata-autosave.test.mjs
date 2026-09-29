@@ -147,3 +147,39 @@ test('Cmd/Ctrl+Enter is ignored inside editor dialogs and while a dialog is open
   tree.props.onKeyDown({ key: 'Enter', metaKey: true, preventDefault() {} });
   assert.equal(next, 0);
 });
+
+test('cached successful relationships stay locked through a slow bulk invalidation refetch', async () => {
+  const sent = [];
+  const save = new DraftAutosave(async patch => sent.push(patch), 10000);
+  const states = Object.fromEntries(['albums', 'groups', 'profiles', 'performers'].map(key =>
+    [`post-${key}`, { isSuccess: true, isFetching: true }]));
+  const { page, props, queries } = setup(save, states);
+  button(page.render(props), 'More fields').props.onClick();
+  let tree = page.render(props);
+  assert.equal(elements(tree).filter(e => e.type === 'fieldset' && e.props.disabled).length, 4);
+  elements(tree).find(e => e.type === 'PerformersField').props.onChange([{ id: 'stale' }]);
+  for (const chips of elements(tree).filter(e => e.type === 'MultiSelectChips')) chips.props.onChange(new Set(['stale']));
+  for (const routing of elements(tree).filter(e => e.type === 'RoutedGroups')) routing.props.onOverride();
+  await save.flush(); assert.deepEqual(sent, []);
+  queries['post-performers'] = [{ id: 'bulk', display_name: 'Bulk result' }];
+  for (const state of Object.values(states)) state.isFetching = false;
+  tree = page.render(props);
+  const performers = elements(tree).find(e => e.type === 'PerformersField');
+  assert.equal(performers.props.selected[0].id, 'bulk');
+  performers.props.onChange([...performers.props.selected, { id: 'new' }]);
+  await save.flush();
+  assert.deepEqual(sent, [{ performer_ids: ['bulk', 'new'] }]);
+});
+
+test('a scheduled-post conflict offers an explicit discard action in the editor', async () => {
+  const save = new DraftAutosave(async () => { throw Object.assign(new Error('No longer a draft'), { status: 409 }); }, 10000);
+  const { page, props } = setup(save);
+  let discarded = 0;
+  props.onDiscardEdits = () => discarded++;
+  titleInput(page.render(props)).props.onChange({ target: { value: 'Unsaved' } });
+  await save.flush();
+  const tree = page.render(props);
+  assert.equal(button(tree, 'Retry'), undefined);
+  button(tree, 'Post was scheduled — discard these edits').props.onClick();
+  assert.equal(discarded, 1);
+});

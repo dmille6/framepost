@@ -128,6 +128,7 @@ export type Post = {
   safety_level: string | null;
   content_type: string | null;
   status: string;
+  scheduled_at: string | null;
   posted_to_instagram_at: string | null;
   reddit_posted_at: string | null;
   target_platforms: string[] | null;
@@ -933,8 +934,8 @@ export const triggerAlbumSync = () =>
   apiFetch<{ synced: number }>("/api/albums/sync", { method: "POST" });
 export const getPostAlbums = (postId: string) =>
   apiFetch<string[]>(`/api/albums/post/${postId}`);
-export const setPostAlbums = (postId: string, albumIds: string[]) =>
-  apiFetch<string[]>(`/api/albums/post/${postId}`, {
+export const setPostAlbums = (postId: string, albumIds: string[], options?: { autosave?: boolean }) =>
+  apiFetch<string[]>(`/api/albums/post/${postId}${options?.autosave ? "?autosave=true" : ""}`, {
     method: "PUT",
     body: JSON.stringify({ album_ids: albumIds }),
   });
@@ -986,8 +987,8 @@ export const getPostGroups = (postId: string) =>
   apiFetch<string[]>(`/api/groups/post/${postId}`);
 /** `useRouting` hands the post back to automatic routing; the id list is then ignored.
  *  Without it an empty list means "no groups", which is a different thing. */
-export const setPostGroups = (postId: string, groupIds: string[], useRouting = false) =>
-  apiFetch<string[]>(`/api/groups/post/${postId}`, {
+export const setPostGroups = (postId: string, groupIds: string[], useRouting = false, options?: { autosave?: boolean }) =>
+  apiFetch<string[]>(`/api/groups/post/${postId}${options?.autosave ? "?autosave=true" : ""}`, {
     method: "PUT",
     body: JSON.stringify({ group_ids: groupIds, use_routing: useRouting }),
   });
@@ -1236,8 +1237,8 @@ export const deleteProfile = (id: string) =>
 
 export const getPostProfiles = (postId: string) =>
   apiFetch<string[]>(`/api/profiles/post/${postId}`);
-export const setPostProfiles = (postId: string, profileIds: string[]) =>
-  apiFetch<string[]>(`/api/profiles/post/${postId}`, {
+export const setPostProfiles = (postId: string, profileIds: string[], options?: { autosave?: boolean }) =>
+  apiFetch<string[]>(`/api/profiles/post/${postId}${options?.autosave ? "?autosave=true" : ""}`, {
     method: "PUT",
     body: JSON.stringify({ profile_ids: profileIds }),
   });
@@ -1417,8 +1418,8 @@ export const deletePerformer = (id: string) =>
 export const getPostPerformers = (post_id: string) =>
   apiFetch<Performer[]>(`/api/performers/by-post/${post_id}`);
 
-export const setPostPerformers = (post_id: string, performer_ids: string[]) =>
-  apiFetch<Performer[]>(`/api/performers/by-post/${post_id}`, {
+export const setPostPerformers = (post_id: string, performer_ids: string[], options?: { autosave?: boolean }) =>
+  apiFetch<Performer[]>(`/api/performers/by-post/${post_id}${options?.autosave ? "?autosave=true" : ""}`, {
     method: "PUT",
     body: JSON.stringify({ performer_ids }),
   });

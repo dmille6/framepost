@@ -18,7 +18,7 @@ function harness() {
   const pending = [];
   const effects = [];
   const calls = [];
-  const drafts = [{ id: 'blocked', title: 'In a reel', created_at: '2026-09-28' }, { id: 'free', title: 'Free', created_at: '2026-09-27' }];
+  let drafts = [{ id: 'blocked', status: 'pending', scheduled_at: null, title: 'In a reel', created_at: '2026-09-28' }, { id: 'free', status: 'pending', scheduled_at: null, title: 'Free', created_at: '2026-09-27' }];
   const saves = {
     sessions: new Map(),
     get(id) {
@@ -30,6 +30,7 @@ function harness() {
     },
     async schedule(id) { if (!await this.get(id).flush()) throw new Error("Save failed"); calls.push(["schedule", id]); this.remove([id]); },
     remove(ids) { for (const id of ids) this.sessions.delete(id); },
+    async discard(id) { calls.push(["discard", id]); this.sessions.delete(id); },
     release(id, session) { calls.push(["release", id]); void session.flush(); },
   };
   const api = new Proxy({
@@ -57,7 +58,7 @@ function harness() {
     };
     if (name === '@tanstack/react-query') return {
       useQueryClient: () => ({ invalidateQueries() {}, setQueryData() {}, getQueryData: () => drafts }),
-      useQuery: ({ queryKey }) => ({ data: queryKey[0] === 'drafts' ? drafts : [] }),
+      useQuery: ({ queryKey }) => ({ data: queryKey[0] === 'drafts' ? drafts : [], isSuccess: true }),
       useMutation: options => {
         const mutateAsync = async (id) => {
           try {
@@ -81,7 +82,7 @@ function harness() {
   new Function('require', 'module', 'exports', compiled)(load, module, module.exports);
   return {
     render: () => { cursor = 0; const tree = module.exports.default(); effects.splice(0).forEach(fn => fn()); return tree; },
-    calls, saves,
+    calls, saves, drafts, setDrafts: next => { drafts = next; },
     unmount: () => state.forEach(s => s?.cleanup?.()),
     settle: async () => { await Promise.all(pending); await new Promise(setImmediate); },
   };
@@ -202,4 +203,45 @@ test('successful scheduling clears the editor selection before the drafts refetc
   // This harness deliberately retains the stale drafts query result.
   assert.equal(editor(page.render()), undefined);
   assert.ok(page.calls.some(([action]) => action === 'schedule'));
+});
+
+test('scheduling prunes checked IDs immediately and keeps the underlying editor inert', async () => {
+  const page = harness();
+  button(page.render(), 'Select multiple').props.onClick();
+  button(page.render(), 'Select all visible').props.onClick();
+  cards(page.render())[0].props.onSelect();
+  editor(page.render()).props.onSchedule(); await page.settle();
+  let tree = page.render();
+  assert.equal(elements(tree).find(e => e.props.className === 'fp-page fp-fade-in').props.inert, true);
+  await elements(tree).find(e => e.type === 'ScheduleDialog').props.onSubmit('tomorrow');
+  tree = page.render();
+  assert.ok(button(tree, 'Bulk Edit (1)'));
+  assert.equal(cards(tree)[0].props.isChecked, false);
+});
+
+test('a refreshed drafts list prunes remotely scheduled and deleted checked IDs', () => {
+  const page = harness();
+  button(page.render(), 'Select multiple').props.onClick();
+  button(page.render(), 'Select all visible').props.onClick();
+  page.setDrafts([{ ...page.drafts[1], scheduled_at: 'tomorrow' }]);
+  page.render();
+  assert.ok(button(page.render(), 'Bulk Edit (0)'));
+});
+
+test('a remotely scheduled selected post keeps a discard banner after it leaves the draft list', async () => {
+  const page = harness();
+  cards(page.render())[0].props.onSelect();
+  page.render();
+  const save = page.saves.get('blocked');
+  save.conflict = true;
+  save.error = 'No longer a draft';
+  page.setDrafts([page.drafts[1]]);
+  let tree = page.render();
+  assert.equal(editor(tree), undefined);
+  const discard = button(tree, 'Post was scheduled — discard these edits');
+  assert.ok(discard, 'the stale selectedId must not hide the failed session');
+  discard.props.onClick(); await page.settle();
+  tree = page.render();
+  assert.equal(button(tree, 'Post was scheduled — discard these edits'), undefined);
+  assert.ok(page.calls.some(([action, id]) => action === 'discard' && id === 'blocked'));
 });

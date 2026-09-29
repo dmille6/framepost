@@ -19,6 +19,7 @@ export class DraftAutosave<T extends object> {
   private listeners = new Set<() => void>();
   private revision = 0;
   error: string | null = null;
+  conflict = false;
 
   constructor(private save: (patch: Partial<T>, values: Partial<T>) => Promise<void>, private delay = 800) {}
 
@@ -50,14 +51,14 @@ export class DraftAutosave<T extends object> {
       this.current[key] = next[key];
     }
     clearTimeout(this.timer);
-    if (!this.pending && !this.running) this.error = null;
+    if (!this.pending && !this.running && !this.conflict) this.error = null;
     if (!this.cancelled) this.timer = setTimeout(() => { this.due = true; void this.saveOnce(); }, this.delay);
     this.notify();
   }
 
   private saveOnce(): Promise<boolean> {
     if (this.running) return this.running;
-    if (this.cancelled) return Promise.resolve(false);
+    if (this.cancelled || this.conflict) return Promise.resolve(false);
     this.due = false;
     const sent = this.patch;
     const values = { ...this.current };
@@ -71,6 +72,7 @@ export class DraftAutosave<T extends object> {
       // A multi-endpoint save may have written some fields before failing. Even
       // a reversion to the old baseline must be sent until acknowledged.
       for (const key of Object.keys(sent) as (keyof T)[]) this.uncertain.add(key);
+      this.conflict = (error as { status?: number })?.status === 409;
       this.error = error instanceof Error ? error.message : "Could not save this draft.";
       return false;
     }).finally(() => {
@@ -85,15 +87,22 @@ export class DraftAutosave<T extends object> {
   async flush(): Promise<boolean> {
     clearTimeout(this.timer);
     this.due = false;
-    if (this.cancelled) return false;
+    if (this.cancelled || this.conflict) return false;
     // Include edits made while an earlier PATCH is in flight before scheduling.
     while (this.running || this.pending) {
       if (!await (this.running ?? this.saveOnce())) return false;
       clearTimeout(this.timer);
       this.due = false;
-      if (this.cancelled) return false;
+      if (this.cancelled || this.conflict) return false;
     }
     return true;
+  }
+
+  markConflict(message: string) {
+    this.conflict = true;
+    this.error = message;
+    clearTimeout(this.timer);
+    this.notify();
   }
 
   async cancel() {

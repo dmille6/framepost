@@ -7,6 +7,7 @@ function setup(api, client) {
   const cache = new Map([[JSON.stringify(['drafts']), [{ id: 'a', preflight: { ready: false } }]]]);
   const invalidated = [];
   const qc = client ?? {
+    isFetching: () => 0,
     cancelQueries: async () => { throw new Error("Refresh cancelled without replacement"); },
     invalidateQueries({ queryKey }) { invalidated.push(queryKey); },
     setQueryData(key, update) {
@@ -41,7 +42,7 @@ test('sparse PATCH updates card preflight and an in-flight session survives rout
   await new Promise(setImmediate);
   assert.equal(page.reopen().get('a'), save);
   assert.deepEqual(calls, [{ id: 'a', body: { title: 'New' }, options: { autosave: true } }]);
-  resolve({ id: 'a', title: 'New', preflight: { ready: true, deliverable: true } });
+  resolve({ id: 'a', status: 'pending', title: 'New', preflight: { ready: true, deliverable: true } });
   await save.flush();
   assert.equal(page.cache.get('["drafts"]')[0].preflight.ready, true);
   assert.equal(page.store.sessions.has('a'), false);
@@ -51,7 +52,7 @@ test('relationship-only edits use changed endpoints and refresh readiness withou
   const calls = [];
   const page = setup({
     setPostGroups: async (...args) => calls.push(['groups', ...args]),
-    getPost: async id => { calls.push(['get', id]); return { id, preflight: { ready: true } }; },
+    getPost: async id => { calls.push(['get', id]); return { id, status: "pending", preflight: { ready: true } }; },
     updatePost: async () => { throw new Error('Unexpected PATCH'); },
   });
   const save = page.store.get('a');
@@ -59,7 +60,7 @@ test('relationship-only edits use changed endpoints and refresh readiness withou
   save.change('manualGroups', true, { use_routing: false, group_ids: ['g'] },
     { use_routing: true, group_ids: ['g'] });
   assert.equal(await save.flush(), true);
-  assert.deepEqual(calls, [['groups', 'a', ['g'], false], ['get', 'a']]);
+  assert.deepEqual(calls, [['groups', 'a', ['g'], false, { autosave: true }], ['get', 'a']]);
   assert.equal(page.cache.get('["drafts"]')[0].preflight.ready, true);
 });
 
@@ -72,7 +73,7 @@ test('a successful relationship PUT followed by a failed GET still sends a corre
   const puts = [];
   const page = setup({
     setPostPerformers: async (_id, ids) => { server = ids; puts.push(ids); },
-    getPost: async id => { if (fail) throw new Error('Readiness unavailable'); return { id }; },
+    getPost: async id => { if (fail) throw new Error('Readiness unavailable'); return { id, status: "pending", scheduled_at: null }; },
   });
   const save = page.store.get('a');
   save.attached = true;
@@ -96,7 +97,7 @@ test('saving B restarts the list refresh after scheduling A and never restores A
   const observer = new QueryObserver(qc, { queryKey: ['drafts'], queryFn: ({ signal }) =>
     new Promise(resolve => requests.push({ signal, resolve })) });
   const unsubscribe = observer.subscribe(() => {});
-  const page = setup({ schedulePost: async () => ({}), updatePost: async id => ({ id, title: 'Saved B' }) }, qc);
+  const page = setup({ schedulePost: async () => ({}), updatePost: async id => ({ id, status: 'pending', title: 'Saved B' }) }, qc);
   await page.store.schedule('a', 'tomorrow');
   assert.deepEqual(qc.getQueryData(['drafts']).map(p => p.id), ['b']);
   const refresh = requests.at(-1);
@@ -123,7 +124,7 @@ for (const entry of ['schedule', 'smart-fill-preview', 'smart-fill-confirm']) {
         calls.push(patch.title);
         if (fail) throw new Error('409: This post is no longer a draft');
         if (patch.title === 'First') await new Promise(yes => { resolve = yes; });
-        return { id };
+        return { id, status: "pending", scheduled_at: null };
       },
       schedulePost: async () => { calls.push('schedule'); return {}; },
       smartFill: async () => { calls.push('schedule'); return { slots: [{ post_id: 'a', scheduled_at: 'tomorrow' }] }; },
@@ -158,7 +159,7 @@ test('hide and pagehide flush saves; beforeunload warns for pending, in-flight a
       sent.push(patch.title);
       if (fail) throw new Error('Offline');
       await new Promise(yes => { resolve = yes; });
-      return { id };
+      return { id, status: "pending", scheduled_at: null };
     } });
     const save = page.store.get('a'); save.attached = true;
     const warned = () => {
@@ -182,11 +183,99 @@ test('hide and pagehide flush saves; beforeunload warns for pending, in-flight a
 });
 
 test('grid subscribers receive only status or error changes while editor subscribers receive every edit', async () => {
-  const page = setup({ updatePost: async id => ({ id }) });
+  const page = setup({ updatePost: async id => ({ id, status: "pending", scheduled_at: null }) });
   const save = page.store.get('a'); save.attached = true;
   let grid = 0, editor = 0;
   page.store.subscribe(() => grid++); save.subscribe(() => editor++);
   edit(save, 'A'); edit(save, 'AB'); edit(save, 'ABC');
   assert.equal(grid, 1); assert.equal(editor, 3);
   await save.flush(); assert.equal(grid, 2);
+});
+
+test('every autosave relationship request carries the draft-only marker', async () => {
+  const calls = [];
+  const api = { getPost: async id => ({ id, status: 'pending', scheduled_at: null }) };
+  for (const key of ['Albums', 'Groups', 'Profiles', 'Performers']) {
+    api[`setPost${key}`] = async (...args) => calls.push([key, ...args]);
+  }
+  const { store } = setup(api);
+  const save = store.get('a'); save.attached = true;
+  save.change('relations', ['new'], { album_ids: ['a'], group_ids: ['g'], profile_ids: ['t'], performer_ids: ['p'] },
+    { album_ids: [], group_ids: [], profile_ids: [], performer_ids: [] });
+  assert.equal(await save.flush(), true);
+  assert.equal(calls.length, 4);
+  for (const call of calls) assert.deepEqual(call.at(-1), { autosave: true });
+});
+
+for (const post of [{ status: 'pending', scheduled_at: 'tomorrow' }, { status: 'posted', scheduled_at: null }]) {
+  test(`relationship-only readiness response for ${post.status}/${post.scheduled_at} cannot report Saved`, async () => {
+    const { store } = setup({ setPostAlbums: async () => {}, getPost: async id => ({ id, ...post }) });
+    const save = store.get('a'); save.attached = true;
+    save.change('albums', ['new'], { album_ids: ['new'] }, { album_ids: [] });
+    assert.equal(await save.flush(), false);
+    assert.equal(save.status, 'error');
+    assert.equal(save.conflict, true);
+    assert.equal(save.pending, true);
+    assert.equal(store.sessions.get('a'), save);
+  });
+}
+
+test('ordinary autosaves update cached readiness without refetching the drafts list', async () => {
+  const { QueryClient, QueryObserver } = await import('@tanstack/react-query');
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+  qc.setQueryData(['drafts'], [{ id: 'a', status: 'pending', scheduled_at: null }]);
+  let fetched = 0;
+  const observer = new QueryObserver(qc, { queryKey: ['drafts'], staleTime: Infinity,
+    queryFn: async () => { fetched++; return []; } });
+  const unsubscribe = observer.subscribe(() => {});
+  try {
+    const page = setup({ updatePost: async (id, patch) => ({ id, status: 'pending', scheduled_at: null, ...patch, preflight: { ready: true } }) }, qc);
+    const save = page.store.get('a'); save.attached = true;
+    for (const title of ['One', 'Two']) { edit(save, title); assert.equal(await save.flush(), true); }
+    assert.equal(fetched, 0);
+    assert.equal(qc.getQueryData(['drafts'])[0].title, 'Two');
+    assert.equal(qc.getQueryData(['drafts'])[0].preflight.ready, true);
+    page.store.remove(['a']);
+    await tick();
+    assert.equal(fetched, 1, 'membership changes still refresh');
+  } finally { unsubscribe(); qc.clear(); }
+});
+
+test('discarding a scheduled-post 409 clears its banner session and unload protection', async () => {
+  const oldWindow = globalThis.window, oldDocument = globalThis.document;
+  const listeners = {};
+  globalThis.window = { addEventListener: (type, fn) => { listeners[type] = fn; } };
+  globalThis.document = { addEventListener() {} };
+  try {
+    let sent = 0, notifications = 0;
+    const { store } = setup({ updatePost: async () => { sent++; throw Object.assign(new Error('No longer a draft'), { status: 409 }); } });
+    const save = store.get('a'); save.attached = true;
+    store.subscribe(() => notifications++);
+    const warned = () => { let blocked = false; listeners.beforeunload({ preventDefault() { blocked = true; } }); return blocked; };
+    edit(save, 'Keep until discarded');
+    assert.equal(await save.flush(), false);
+    assert.equal(warned(), true);
+    assert.equal(save.view.get('title'), 'Keep until discarded');
+    assert.equal(await store.flushAll(), false);
+    assert.equal(sent, 1, 'terminal conflicts do not loop on hide/retry');
+    const before = notifications;
+    await store.discard('a');
+    assert.equal(store.sessions.size, 0);
+    assert.ok(notifications > before);
+    assert.equal(warned(), false);
+  } finally { globalThis.window = oldWindow; globalThis.document = oldDocument; }
+});
+
+test('unexpected edits during a paused schedule are retained with a visible conflict', async () => {
+  let complete;
+  const { store } = setup({ schedulePost: () => new Promise(resolve => { complete = resolve; }) });
+  const save = store.get('a'); save.attached = true;
+  const scheduling = store.schedule('a', 'tomorrow');
+  await tick();
+  edit(save, 'Arrived during schedule');
+  complete({}); await scheduling;
+  assert.equal(store.sessions.get('a'), save);
+  assert.equal(save.view.get('title'), 'Arrived during schedule');
+  assert.equal(save.status, 'error');
+  assert.match(save.error, /1 unsaved field.*now-scheduled/);
 });

@@ -60,7 +60,7 @@ export default function ScheduleDialog({ postTitle, initial, onCancel, onSubmit 
         position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
         display: "grid", placeItems: "center", zIndex: 100,
       }}
-      onClick={onCancel}
+      onClick={submitting ? undefined : onCancel}
     >
       <div
         className="fp-card"
@@ -77,6 +77,7 @@ export default function ScheduleDialog({ postTitle, initial, onCancel, onSubmit 
           <label style={{ display: "grid", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
             Date
             <input
+              disabled={submitting}
               type="date"
               className="fp-input"
               value={date}
@@ -86,6 +87,7 @@ export default function ScheduleDialog({ postTitle, initial, onCancel, onSubmit 
           <label style={{ display: "grid", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
             Time
             <input
+              disabled={submitting}
               type="time"
               className="fp-input"
               value={time}
@@ -98,7 +100,7 @@ export default function ScheduleDialog({ postTitle, initial, onCancel, onSubmit 
         </div>
         {error && <div style={{ color: "var(--danger)", fontSize: 13 }}>{error}</div>}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button className="fp-btn-ghost" onClick={onCancel}>Cancel</button>
+          <button disabled={submitting} className="fp-btn-ghost" onClick={submitting ? undefined : onCancel}>Cancel</button>
           <button className="fp-btn" onClick={handleSubmit} disabled={submitting}>
             {submitting ? "Saving…" : initial ? "Reschedule" : "Schedule"}
           </button>

@@ -116,6 +116,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
   const [progress, setProgress] = useState<{ done: number; failed: number; total: number } | null>(null);
   const { data: drafts = [] } = useQuery({ queryKey: ["drafts"], queryFn: listDrafts });
   const [failures, setFailures] = useState<{ id: string; label: string; error: string }[]>([]);
+  const [skipped, setSkipped] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
 
@@ -123,6 +124,8 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
     mutationFn: async (ids: string[]) => {
       const total = ids.length;
       const failedDrafts: typeof failures = [];
+      const skippedDrafts: string[] = [];
+      setSkipped([]);
       setProgress({ done: 0, failed: 0, total });
       setError(null);
 
@@ -146,23 +149,26 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
       // Iterate sequentially so the backend isn't slammed and progress is accurate.
       for (const postId of ids) {
         try {
+          const existingPost = await getPost(postId);
+          if (existingPost.status !== "pending" || existingPost.scheduled_at != null) {
+            throw Object.assign(new Error("Post is no longer a draft"), { status: 409 });
+          }
           // Tags handling: append (merge with existing, dedup) vs replace.
           let body: PostUpdate = { ...baseBody };
           if (tags.trim()) {
             if (tagsMode === "replace") {
               body.tags = tags.trim();
             } else {
-              const existing = await getPost(postId);
-              body.tags = mergeTags(existing.tags, tags);
+              body.tags = mergeTags(existingPost.tags, tags);
             }
           }
 
           if (Object.keys(body).length > 0) {
-            await updatePost(postId, body);
+            await updatePost(postId, body, { autosave: true });
           }
-          if (applyAlbums === "on") await setPostAlbums(postId, [...albumIds]);
-          if (applyGroups === "on") await setPostGroups(postId, [...groupIds]);
-          if (applyProfiles === "on") await setPostProfiles(postId, [...profileIds]);
+          if (applyAlbums === "on") await setPostAlbums(postId, [...albumIds], { autosave: true });
+          if (applyGroups === "on") await setPostGroups(postId, [...groupIds], false, { autosave: true });
+          if (applyProfiles === "on") await setPostProfiles(postId, [...profileIds], { autosave: true });
 
           // Performers: append (union by performer.id) or replace.
           if (bulkPerformers.length > 0) {
@@ -175,35 +181,41 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
               const additions = bulkPerformers.filter((p) => !seen.has(p.id));
               finalIds = [...existing.map((p) => p.id), ...additions.map((p) => p.id)];
             }
-            await setPostPerformers(postId, finalIds);
+            await setPostPerformers(postId, finalIds, { autosave: true });
           }
 
           done += 1;
         } catch (e) {
-          failed += 1;
           const post = drafts.find((p) => p.id === postId);
-          failedDrafts.push({
-            id: postId,
-            label: post?.title || post?.original_filename || postId,
-            error: e instanceof Error ? e.message : "Update failed",
-          });
+          const status = (e as { status?: number })?.status;
+          if (status === 409 || status === 404) {
+            skippedDrafts.push(post?.title || post?.original_filename || postId);
+            setSkipped([...skippedDrafts]);
+          } else {
+            failed += 1;
+            failedDrafts.push({
+              id: postId,
+              label: post?.title || post?.original_filename || postId,
+              error: e instanceof Error ? e.message : "Update failed",
+            });
+          }
         }
         // Earlier endpoints may have succeeded even when this draft failed later.
         for (const key of ["post", "post-albums", "post-groups", "post-profiles", "post-performers", "merged-tags"]) {
           void qc.invalidateQueries({ queryKey: [key, postId] });
         }
-        setProgress({ done: done + failed, failed, total });
+        setProgress({ done: done + failed + skippedDrafts.length, failed, total });
       }
 
       setFailures(failedDrafts);
       if (failed > 0) {
         setError(`${failed} of ${total} draft${total === 1 ? "" : "s"} failed to update.`);
       }
-      return failedDrafts;
+      return { failedDrafts, skippedDrafts };
     },
-    onSuccess: (failedDrafts) => {
+    onSuccess: ({ failedDrafts, skippedDrafts }) => {
       void qc.invalidateQueries({ queryKey: ["drafts"] });
-      if (failedDrafts.length === 0) onApplied();
+      if (failedDrafts.length === 0 && skippedDrafts.length === 0) onApplied();
     },
   });
 
@@ -626,6 +638,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
             </SectionToggle>
           )}
 
+          {skipped.length > 0 && <div role="status">Skipped {skipped.length} post(s) that were scheduled, deleted, or are no longer drafts: {skipped.join(", ")}. Open scheduled posts from the calendar to edit.</div>}
           {error && (
             <div
               style={{

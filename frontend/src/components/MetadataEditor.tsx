@@ -109,6 +109,7 @@ type Props = {
   scheduleLabel?: string;
   saving: boolean;
   autosave?: EditorAutosave;
+  onDiscardEdits?: () => void;
   onSaveNext?: () => void;
 };
 
@@ -166,7 +167,7 @@ function useEditorField<T>(
 const subscribeIdle = () => () => {};
 const idleSnapshot = () => 0;
 
-export default function MetadataEditor({ post, onSave, onSchedule, onDelete, scheduleLabel, saving, autosave, onSaveNext }: Props) {
+export default function MetadataEditor({ post, onSave, onSchedule, onDelete, scheduleLabel, saving, autosave, onSaveNext, onDiscardEdits }: Props) {
   useSyncExternalStore(autosave?.subscribe ?? subscribeIdle, autosave?.snapshot ?? idleSnapshot);
   const [title, setTitle, loadTitle] = useEditorField(autosave, "title", post.title ?? "", (v) => ({ title: v.trim() || null }));
   const [description, setDescription, loadDescription] = useEditorField(autosave, "description", post.description ?? "", (v) => ({ description: v.trim() || null }));
@@ -244,22 +245,26 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const { data: albums = [] } = useQuery({ queryKey: ["albums"], queryFn: listAlbums });
   const { data: groups = [] } = useQuery({ queryKey: ["groups"], queryFn: listGroups });
   const { data: profiles = [] } = useQuery({ queryKey: ["profiles"], queryFn: listProfiles });
-  const { data: postAlbums = [], isSuccess: albumsLoaded } = useQuery({
+  const { data: postAlbums = [], isSuccess: albumsSuccess, isFetching: albumsFetching } = useQuery({
     queryKey: ["post-albums", post.id],
     queryFn: () => getPostAlbums(post.id),
   });
-  const { data: postGroups = [], isSuccess: groupsLoaded } = useQuery({
+  const { data: postGroups = [], isSuccess: groupsSuccess, isFetching: groupsFetching } = useQuery({
     queryKey: ["post-groups", post.id],
     queryFn: () => getPostGroups(post.id),
   });
-  const { data: postProfiles = [], isSuccess: profilesLoaded } = useQuery({
+  const { data: postProfiles = [], isSuccess: profilesSuccess, isFetching: profilesFetching } = useQuery({
     queryKey: ["post-profiles", post.id],
     queryFn: () => getPostProfiles(post.id),
   });
-  const { data: postPerformers = [], isSuccess: performersLoaded } = useQuery({
+  const { data: postPerformers = [], isSuccess: performersSuccess, isFetching: performersFetching } = useQuery({
     queryKey: ["post-performers", post.id],
     queryFn: () => getPostPerformers(post.id),
   });
+  const albumsLoaded = albumsSuccess && !albumsFetching;
+  const groupsLoaded = groupsSuccess && !groupsFetching;
+  const profilesLoaded = profilesSuccess && !profilesFetching;
+  const performersLoaded = performersSuccess && !performersFetching;
   const { data: merged } = useQuery({
     queryKey: ["merged-tags", post.id],
     queryFn: () => getMergedTags(post.id),
@@ -456,7 +461,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <span style={{ fontSize: 14, fontWeight: 500 }}>Edit draft</span>
           <span role="status" style={{ fontSize: 12, color: autosave.error ? "var(--danger)" : "var(--text-dim)" }}>
-            {autosave.status === "error" ? <>Couldn't save · <button className="fp-link" onClick={() => void autosave.flush()}>Retry</button></>
+            {autosave.status === "error" ? <>Couldn't save · <button className="fp-link" onClick={autosave.conflict ? onDiscardEdits : () => void autosave.flush()}>{autosave.conflict ? "Post was scheduled — discard these edits" : "Retry"}</button></>
               : autosave.status === "saving" ? "Saving…" : "Saved"}
           </span>
         </div>

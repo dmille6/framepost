@@ -116,6 +116,11 @@ export default function DraftQueue() {
   const [scheduling, setScheduling] = useState<Post | null>(null);
   const [multiSelect, setMultiSelect] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!draftsQuery.isSuccess) return;
+    const ids = new Set(drafts.filter((post) => post.status === "pending" && post.scheduled_at == null).map((post) => post.id));
+    setCheckedIds((prev) => [...prev].every((id) => ids.has(id)) ? prev : new Set([...prev].filter((id) => ids.has(id))));
+  }, [drafts, draftsQuery.isSuccess]);
   const [smartFillOpen, setSmartFillOpen] = useState(false);
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
   const [filmstripOpen, setFilmstripOpen] = useState(false);
@@ -235,7 +240,8 @@ export default function DraftQueue() {
 
   const scheduleMutation = useMutation({
     mutationFn: ({ id, iso }: { id: string; iso: string }) => saves.schedule(id, iso),
-    onSuccess: () => {
+    onSuccess: (_data, { id }) => {
+      setCheckedIds((prev) => new Set([...prev].filter((checked) => checked !== id)));
       void qc.invalidateQueries({ queryKey: ["drafts"] });
       void qc.invalidateQueries({ queryKey: ["schedule"] });
       setScheduling(null);
@@ -375,7 +381,7 @@ export default function DraftQueue() {
   return (
     <>
       <Topbar />
-      <div className="fp-page fp-fade-in">
+      <div className="fp-page fp-fade-in" inert={!!scheduling}>
         <PageHeader
           title="Draft Queue"
           subtitle="Lightroom export → import pipeline → review → schedule. The pipeline pre-fills title, description, and tags from any IPTC metadata it finds."
@@ -388,10 +394,10 @@ export default function DraftQueue() {
           </div>
         )}
 
-        {[...saves.sessions].filter(([id, session]) => id !== selectedId && session.error).map(([id, session]) => (
+        {[...saves.sessions].filter(([id, session]) => id !== selected?.id && session.error).map(([id, session]) => (
           <div key={id} role="alert" style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>
             Couldn't save {drafts.find((p) => p.id === id)?.title || drafts.find((p) => p.id === id)?.original_filename || id}: {session.error}
-            <button className="fp-btn-ghost" onClick={() => void session.flush()} style={{ marginLeft: 8 }}>Retry</button>
+            <button className="fp-btn-ghost" onClick={() => void (session.conflict ? saves.discard(id) : session.flush())} style={{ marginLeft: 8 }}>{session.conflict ? "Post was scheduled — discard these edits" : "Retry"}</button>
           </div>
         ))}
 
@@ -669,6 +675,7 @@ export default function DraftQueue() {
                   post={selected}
                   saving={false}
                   autosave={selectedSave}
+                  onDiscardEdits={() => { void saves.discard(selected.id); setSelectedId(null); }}
                   onSave={async () => { await selectedSave?.flush(); }}
                   onSaveNext={saveNext}
                   onSchedule={() => {

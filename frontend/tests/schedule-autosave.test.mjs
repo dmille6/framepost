@@ -12,7 +12,7 @@ for (const entry of ['calendar sidebar drop', 'calendar reschedule']) {
     try {
       let fail = true, scheduled = 0;
       const api = {
-        updatePost: async id => { if (fail) throw new Error('Save is offline'); return { id }; },
+        updatePost: async id => { if (fail) throw new Error('Save is offline'); return { id, status: "pending", scheduled_at: null }; },
         schedulePost: async () => { scheduled++; return {}; },
       };
       const hooks = compile('../src/hooks/useDraftAutosaves.ts', name => {
@@ -51,3 +51,26 @@ for (const entry of ['calendar sidebar drop', 'calendar reschedule']) {
     } finally { qc.clear(); globalThis.localStorage = previous; }
   });
 }
+
+test('pending schedule blocks Cancel and backdrop until success or failure settles', async () => {
+  const { button } = await import('./component-harness.mjs');
+  for (const fail of [false, true]) {
+    let resolve, reject, cancelled = 0;
+    const page = harness('../src/components/ScheduleDialog.tsx');
+    const props = { postTitle: 'Photo', onCancel: () => cancelled++, onSubmit: () => new Promise((yes, no) => { resolve = yes; reject = no; }) };
+    let tree = page.render(props);
+    const submitting = button(tree, 'Schedule').props.onClick();
+    tree = page.render(props);
+    assert.equal(button(tree, 'Cancel').props.disabled, true);
+    button(tree, 'Cancel').props.onClick?.();
+    tree.props.onClick?.();
+    assert.equal(cancelled, 0);
+    assert.ok(elements(tree).filter(e => e.type === 'input').every(e => e.props.disabled));
+    if (fail) reject(new Error('Schedule failed')); else resolve();
+    await submitting;
+    tree = page.render(props);
+    assert.equal(button(tree, 'Cancel').props.disabled, false);
+    tree.props.onClick();
+    assert.equal(cancelled, 1);
+  }
+});

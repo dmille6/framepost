@@ -10,7 +10,7 @@ test('partial failures stay visible with names/errors, and retry targets only fa
     let fail = true, closed = 0, invalidated = [];
     const page = harness('../src/components/BulkEditDialog.tsx', {
       queries: { drafts: [{ id: 'a', title: 'First photo' }, { id: 'b', original_filename: 'second.jpg' }] },
-      api: { updatePost: async (id) => {
+      api: { getPost: async id => ({ id, status: "pending", scheduled_at: null }), updatePost: async (id) => {
         updated.push(id);
         if (id === 'b' && fail) throw new Error('Disk unavailable');
       } },
@@ -47,6 +47,7 @@ test('relationship caches refresh after a PUT succeeds and a later endpoint fail
     const invalidated = [], calls = [];
     const page = harness('../src/components/BulkEditDialog.tsx', {
       api: {
+        getPost: async id => ({ id, status: "pending", scheduled_at: null }),
         setPostAlbums: async () => { calls.push('albums saved'); },
         setPostPerformers: async () => { throw new Error('Performers unavailable'); },
         getPostPerformers: async () => [],
@@ -66,6 +67,47 @@ test('relationship caches refresh after a PUT succeeds and a later endpoint fail
     for (const key of ['post-albums', 'post-groups', 'post-profiles', 'post-performers']) {
       assert.ok(invalidated.some(query => query[0] === key && query[1] === 'a'));
     }
+    page.unmount();
+  } finally { globalThis.window = oldWindow; }
+});
+
+test('bulk edit skips stale live/deleted targets visibly and marks all remaining writes', async () => {
+  const oldWindow = globalThis.window;
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  try {
+    const calls = [];
+    let closed = 0;
+    const api = {
+      getPost: async id => {
+        if (id === 'deleted') throw Object.assign(new Error('Missing'), { status: 404 });
+        return { id, status: 'pending', scheduled_at: id === 'live' ? 'tomorrow' : null };
+      },
+      getPostPerformers: async () => [],
+    };
+    for (const method of ['updatePost', 'setPostAlbums', 'setPostGroups', 'setPostProfiles', 'setPostPerformers']) {
+      api[method] = async (...args) => {
+        calls.push([method, ...args]);
+        if (args[0] === 'raced') throw Object.assign(new Error('Scheduled since GET'), { status: 409 });
+      };
+    }
+    const page = harness('../src/components/BulkEditDialog.tsx', { api });
+    const props = { postIds: ['live', 'deleted', 'raced', 'draft'], onCancel() {}, onApplied() { closed++; } };
+    let tree = page.render(props);
+    elements(tree).find(e => e.type === 'input').props.onChange({ target: { value: 'New title' } });
+    for (const label of ['Albums', 'Groups', 'Tag profiles']) {
+      elements(tree).find(e => e.props.label === label).props.onToggle(true);
+    }
+    elements(tree).find(e => e.type === 'PerformersField').props.onChange([{ id: 'p' }]);
+    button(page.render(props), 'Apply to 4').props.onClick(); await page.settle();
+    assert.equal(calls.length, 6);
+    assert.equal(calls.filter(call => call[1] === 'draft').length, 5);
+    assert.equal(calls.filter(call => call[1] === 'raced').length, 1);
+    for (const call of calls) {
+      assert.ok(!['live', 'deleted'].includes(call[1]));
+      assert.deepEqual(call.at(-1), { autosave: true });
+    }
+    assert.equal(closed, 0, 'skip note stays visible');
+    assert.match(text(page.render(props)), /Skipped 3 post\(s\).*live, deleted, raced/);
     page.unmount();
   } finally { globalThis.window = oldWindow; }
 });
