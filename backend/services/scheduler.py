@@ -24,9 +24,13 @@ from database import SessionLocal
 from models import Album, AppConfig, DiskSample, PlatformCredential, Post, PostAlbum, PostEvent, PostGroup, PostPlatform, Group, Venue
 from services import carousel as carousel_svc, alt_text as alt_text_svc, caption_text, publish_errors, channel_health, feed_claim, backup, cleanup, comments as comments_sync, duplicate, engagement, events, flickr_sync, group_routing, group_throttle, ig_variant, image, media_probe, r2, retry, storage, tags, trending, watcher
 from services import performers as performers_svc
+from services import redact
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# httpx logs each request URL at INFO; the Instagram token refresh still carries the
+# token in its URL. Mask secrets in every record before any handler sees it.
+redact.install_logging()
 log = logging.getLogger("framepost.worker")
 
 LATE_THRESHOLD = timedelta(minutes=5)

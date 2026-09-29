@@ -7,6 +7,7 @@ Generate keys with: docker compose exec backend python -m admin generate-encrypt
 from cryptography.fernet import Fernet, MultiFernet
 
 from config import settings
+from services import redact
 
 
 def _build_fernet() -> MultiFernet:
@@ -22,9 +23,16 @@ def _build_fernet() -> MultiFernet:
     return MultiFernet(keys)
 
 
+# Every credential passes through here on its way in or out of the database, so this is
+# where redact() learns the exact values to mask — a token with no `access_token=` next
+# to it (a JWT echoed in an error body) is still recognised.
+
 def encrypt_token(plaintext: str) -> str:
+    redact.remember(plaintext)
     return _build_fernet().encrypt(plaintext.encode()).decode()
 
 
 def decrypt_token(ciphertext: str) -> str:
-    return _build_fernet().decrypt(ciphertext.encode()).decode()
+    plaintext = _build_fernet().decrypt(ciphertext.encode()).decode()
+    redact.remember(plaintext)
+    return plaintext

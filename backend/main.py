@@ -4,6 +4,13 @@ from fastapi import FastAPI
 from middleware import CSRFMiddleware
 from routes import activity, ai, albums, analytics, auth, carousels, groups, health, history, performers, platforms, posts, profiles, reels, schedule, system, tags, title_templates, venues
 from routes import config as config_routes
+from services import redact
+
+# Before anything logs: uvicorn's access log records the Flickr OAuth callback's
+# oauth_token/oauth_verifier query string, and any warning from a platform call can
+# quote a URL. uvicorn has already built its handlers by the time it imports this
+# module; a record factory covers them and anything configured later.
+redact.install_logging()
 
 app = FastAPI(title="FramePost", version="0.1.0")
 app.add_middleware(CSRFMiddleware)
