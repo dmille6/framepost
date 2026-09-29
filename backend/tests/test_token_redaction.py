@@ -412,3 +412,117 @@ def test_nginx_access_log_records_no_query_string_or_referer():
         assert m.group(1).strip() == "off" or m.group(1).split()[-1] == "framepost"
     # The proxied request is unchanged: the backend still gets the query string.
     assert "proxy_pass http://$backend_host:8000$request_uri;" in code
+
+
+# -----------------------------------------------------------------------------
+# First-use credentials: known to redact() before the first request goes out
+# -----------------------------------------------------------------------------
+
+def _serve(monkeypatch, handler):
+    """Route every http_client.client through `handler` (real httpx, no network)."""
+    transport = httpx.MockTransport(handler)
+    real_client = http_client.client
+    monkeypatch.setattr(http_client, "client",
+                        lambda **kw: real_client(transport=transport, **kw))
+
+
+def _echo_bearer(request: httpx.Request) -> str:
+    return request.headers.get("Authorization", "").removeprefix("Bearer ")
+
+
+def test_a_pasted_instagram_token_is_masked_when_me_rejects_it(monkeypatch, logs, db):
+    """Meta's error text echoes the token in prose; crypto hasn't seen it yet."""
+    _serve(monkeypatch, lambda req: httpx.Response(400, json={"error": {
+        "message": f"Cannot parse access token {_echo_bearer(req)}", "code": 190}}))
+    with pytest.raises(InstagramError) as exc:
+        ig.connect(db, access_token=f"  {TOKEN}  ")
+    assert TOKEN not in str(exc.value)
+    assert TOKEN not in _everything_logged(logs)
+
+
+def test_a_new_bluesky_app_password_is_masked_when_create_session_fails(monkeypatch, logs):
+    from services.platforms import bluesky
+
+    password = "abcd-efgh-ijkl-mnop"
+    _serve(monkeypatch, lambda req: httpx.Response(500, text=(
+        f"upstream said: bad login for {json.loads(req.content)['password']}")))
+    with pytest.raises(bluesky.BlueskyError) as exc:
+        bluesky._create_session("dmp.bsky.social", password)
+    assert password not in str(exc.value)
+    assert password not in _everything_logged(logs)
+
+
+def test_fresh_bluesky_jwts_are_known_before_they_are_stored(monkeypatch):
+    from services.platforms import bluesky
+
+    jwt_a, jwt_r = "eyJhbGciOi.access." + "a" * 20, "eyJhbGciOi.refresh." + "b" * 20
+    _serve(monkeypatch, lambda req: httpx.Response(200, json={
+        "did": "did:plc:x", "handle": "dmp.bsky.social",
+        "accessJwt": jwt_a, "refreshJwt": jwt_r}))
+    bluesky._create_session("dmp.bsky.social", "abcd-efgh-ijkl-mnop")
+    assert redact.redact(f"{jwt_a} {jwt_r}") == f"{MASK} {MASK}"
+
+
+def _pending_row(db, platform, pending):
+    from services.platforms import credentials
+
+    row = credentials.upsert(db, platform)
+    credentials.set_pending_oauth(row, pending)
+    db.commit()
+    return row
+
+
+def test_a_fresh_pinterest_token_is_masked_when_user_account_fails(monkeypatch, logs, db):
+    from services.platforms import pinterest
+
+    monkeypatch.setattr(settings, "pinterest_app_id", "app-id")
+    monkeypatch.setattr(settings, "pinterest_app_secret", "app-secret-value")
+    _pending_row(db, "pinterest", {"state": "s1", "redirect_uri": "https://fp/cb"})
+
+    def handler(req):
+        if req.url.path.endswith("/oauth/token"):
+            return httpx.Response(200, json={"access_token": TOKEN, "refresh_token": NEW_TOKEN,
+                                             "expires_in": 3600})
+        return httpx.Response(500, text=f"no account for token {_echo_bearer(req)}")
+    _serve(monkeypatch, handler)
+
+    code = "pinterest-auth-code-123"
+    with pytest.raises(pinterest.PinterestError) as exc:
+        pinterest.complete_connect(db, code=code, state="s1")
+    assert TOKEN not in str(exc.value)
+    assert redact.redact(f"{NEW_TOKEN} {code}") == f"{MASK} {MASK}"
+    assert TOKEN not in _everything_logged(logs)
+
+
+def test_a_fresh_pixelfed_token_is_masked_when_verify_credentials_fails(monkeypatch, logs, db):
+    import crypto
+    from services.platforms import pixelfed
+
+    monkeypatch.setattr(settings, "token_encryption_key", Fernet.generate_key().decode())
+    _pending_row(db, "pixelfed", {
+        "instance_url": "https://pixelfed.test", "client_id": "cid", "state": "s1",
+        "client_secret": crypto.encrypt_token("pixelfed-client-secret"),
+        "redirect_uri": "https://fp/cb"})
+
+    def handler(req):
+        if req.url.path == "/oauth/token":
+            return httpx.Response(200, json={"access_token": TOKEN})
+        return httpx.Response(500, text=f"token {_echo_bearer(req)} is not valid here")
+    _serve(monkeypatch, handler)
+
+    with pytest.raises(pixelfed.PixelfedError) as exc:
+        pixelfed.complete_connect(db, code="pixelfed-auth-code-1", state="s1")
+    assert TOKEN not in str(exc.value)
+    assert TOKEN not in _everything_logged(logs)
+
+
+def test_a_new_pixelfed_client_secret_is_known_at_registration(monkeypatch, db):
+    import crypto
+    from services.platforms import pixelfed
+
+    monkeypatch.setattr(settings, "token_encryption_key", Fernet.generate_key().decode())
+    _serve(monkeypatch, lambda req: httpx.Response(200, json={
+        "client_id": "cid", "client_secret": "brand-new-client-secret"}))
+    pixelfed.begin_connect(db, instance_url="https://pixelfed.test",
+                           redirect_uri="https://fp/cb")
+    assert redact.redact("brand-new-client-secret") == MASK

@@ -105,6 +105,7 @@ def begin_connect(db: Session, *, redirect_uri: str) -> tuple[str, str]:
 
 def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredential:
     """Exchange the authorization code for an access token, persist it, fetch account info."""
+    redact.remember(code)   # single-use, but the exchange's error text can quote it
     row = credentials.get(db, PLATFORM)
     pending = credentials.pending_oauth(row)
     if not pending:
@@ -139,6 +140,10 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
     token_body = r.json()
     access_token = token_body["access_token"]
     refresh_token = token_body.get("refresh_token")
+    # Fresh from the exchange: redact() must know them before user_account is asked —
+    # crypto only sees them at encryption, after that call (and its error text).
+    redact.remember(access_token)
+    redact.remember(refresh_token)
     expires_in = token_body.get("expires_in")
 
     # Fetch user account.
@@ -248,6 +253,7 @@ def _refresh_if_needed(db: Session, row: PlatformCredential) -> str:
         )
     body = r.json()
     access_token = body["access_token"]
+    redact.remember(body.get("refresh_token"))
     row.access_token = encrypt_token(access_token)
     # A freshly stored token means the channel is authorised again — drop any
     # "needs reconnecting" flag so the health banner clears immediately rather

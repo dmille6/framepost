@@ -366,6 +366,9 @@ def _raise_api_error(r: httpx.Response, doing: str) -> None:
 def connect(db: Session, *, access_token: str) -> PlatformCredential:
     """Validate a pasted long-lived token via GET /me and persist it encrypted."""
     access_token = access_token.strip()
+    # Known to redact() before it is ever sent: crypto only learns it at encryption,
+    # after /me — and a /me that fails can echo the token into the error shown here.
+    redact.remember(access_token)
     try:
         with _client() as c:
             r = c.get("/me", params={"fields": "user_id,username,account_type"},

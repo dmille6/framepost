@@ -106,6 +106,7 @@ def begin_connect(
     app = r.json()
     client_id = app["client_id"]
     client_secret = app["client_secret"]
+    redact.remember(client_secret)
     state = uuid.uuid4().hex
 
     # Park the in-flight OAuth state beside the live connection, never in place of it.
@@ -140,6 +141,7 @@ def begin_connect(
 
 def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredential:
     """Exchange the authorization code for an access token, persist it, fetch account info."""
+    redact.remember(code)   # single-use, but the exchange's error text can quote it
     row = credentials.get(db, PLATFORM)
     pending = credentials.pending_oauth(row)
     if not pending:
@@ -172,6 +174,9 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
         )
     token_body = r.json()
     access_token = token_body["access_token"]
+    # Fresh from the exchange: redact() must know it before verify_credentials is asked —
+    # crypto only sees it at encryption, after that call (and its error text).
+    redact.remember(access_token)
 
     # Verify by fetching the account.
     with _client(instance_url) as c:

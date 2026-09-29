@@ -72,6 +72,9 @@ def _create_session(handle: str, app_password: str, pds: str = DEFAULT_PDS) -> _
     """Exchange handle+app_password → session JWTs. Bluesky returns 401 on bad creds; we map
     those to permanent errors so the operator gets a clear "wrong password" rather than a
     background retry storm."""
+    # A first connect's password has never been through crypto, so redact() learns it
+    # here, before anything can echo it.
+    redact.remember(app_password)
     with _client(pds) as c:
         r = c.post(
             "/xrpc/com.atproto.server.createSession",
@@ -82,6 +85,7 @@ def _create_session(handle: str, app_password: str, pds: str = DEFAULT_PDS) -> _
     if r.status_code >= 400:
         raise BlueskyError(f"createSession failed (HTTP {r.status_code}): {r.text[:200]}")
     body = r.json()
+    _remember_session(body)
     return _Session(
         pds=pds,
         did=body["did"],
@@ -89,6 +93,12 @@ def _create_session(handle: str, app_password: str, pds: str = DEFAULT_PDS) -> _
         access_jwt=body["accessJwt"],
         refresh_jwt=body["refreshJwt"],
     )
+
+
+def _remember_session(body: dict) -> None:
+    """Fresh JWTs are in use before they are encrypted and stored; mask them from now."""
+    redact.remember(body.get("accessJwt"))
+    redact.remember(body.get("refreshJwt"))
 
 
 def _refresh_session(refresh_jwt: str, pds: str = DEFAULT_PDS) -> _Session:
@@ -103,6 +113,7 @@ def _refresh_session(refresh_jwt: str, pds: str = DEFAULT_PDS) -> _Session:
             permanent=(r.status_code == 401),
         )
     body = r.json()
+    _remember_session(body)
     return _Session(
         pds=pds,
         did=body["did"],
