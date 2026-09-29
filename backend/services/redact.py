@@ -45,6 +45,14 @@ _KEYS = "|".join(re.escape(k) for k in _SECRET_KEYS)
 _KV = re.compile(
     rf"(?i)(?:(?<![A-Za-z0-9])|(?<=%3F)|(?<=%26))({_KEYS})(=|%3D)(\"?)"
     rf"((?:(?!%26)[^&\s\"'<>,;\\])+)")
+# An OAuth authorization code: `code=` only as a query/form parameter (right after ?, &
+# or their encoded forms) and only when the value has a letter in it. That is the shape
+# Pinterest's and Pixelfed's callbacks arrive in, and it leaves alone everything else
+# that says "code": Meta's `"code": 190`, "error code=98" (publish_errors classifies on
+# `code.?:?\s*190`), status_code=, zipcode=, a caption about a promo code.
+_QUERY_CODE = re.compile(
+    r"(?i)(?:(?<=[?&])|(?<=%3F)|(?<=%26))(code)(=|%3D)"
+    r"(?=(?:(?!%26)[^&\s\"'<>,;\\])*[A-Za-z])((?:(?!%26)[^&\s\"'<>,;\\])+)")
 # "key": "value" / 'key': 'value' — JSON bodies and Python dict reprs, and JSON quoted
 # inside JSON (\"key\": \"value\"), which is how a response body lands in post_events.
 # Neither pattern consumes a backslash, so masking never breaks a JSON escape.
@@ -95,6 +103,7 @@ def redact(text: str | None) -> str | None:
         if encoded != secret and encoded in out:
             out = out.replace(encoded, MASK)
     out = _KV.sub(lambda m: f"{m[1]}{m[2]}{m[3]}{MASK}", out)
+    out = _QUERY_CODE.sub(lambda m: f"{m[1]}{m[2]}{MASK}", out)
     out = _JSONISH.sub(lambda m: f"{m[1]}{MASK}", out)
     out = _AUTH.sub(lambda m: f"{m[1]}{m[2]}{MASK}", out)
     return out

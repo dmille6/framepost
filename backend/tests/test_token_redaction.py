@@ -346,3 +346,69 @@ def test_oauth_redirect_reasons_are_masked():
 
     resp = platforms._pixelfed_redirect_back(f"Pixelfed exchange failed: client_secret={TOKEN}")
     assert TOKEN not in resp.headers["location"]
+
+
+# -----------------------------------------------------------------------------
+# OAuth callback codes — nginx and uvicorn access logs
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    f"/api/platforms/pinterest/callback?code={TOKEN}&state=s1",
+    f"/api/platforms/pixelfed/callback?state=s1&code={TOKEN}",
+    "/cb?code=9f8e7d6c",
+    f"next=https%3A%2F%2Fx%2Fcb%3Fcode%3D{TOKEN}%26state%3Dz",
+])
+def test_an_oauth_code_in_a_query_string_is_masked(text):
+    out = redact.redact(text)
+    assert TOKEN not in out and "9f8e7d6c" not in out and MASK in out
+
+
+@pytest.mark.parametrize("text", [
+    "Use promo code SAVE20 at checkout",                 # a caption
+    "Scan the QR code=link in bio",
+    "flickr error code=98: Invalid auth token",          # publish_errors classifies on it
+    '{"error": {"message": "x", "code": 190}}',
+    '{"code": "abcdef"}',
+    "?code=190&fields=status_code",                        # numeric: an error code, not OAuth
+    "status_code=FINISHED",
+    "zipcode=abc12",
+    "code=abc",                                            # not in a query string
+])
+def test_text_that_merely_says_code_is_untouched(text):
+    assert redact.redact(text) == text
+
+
+def test_uvicorn_masks_the_pinterest_callback_code(logs):
+    from uvicorn.logging import AccessFormatter
+
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d', "10.0.0.2:5000", "GET",
+        f"/api/platforms/pinterest/callback?code={TOKEN}&state=abc", "1.1", 303)
+    line = AccessFormatter(use_colors=False).format(logs.records[-1])
+    assert TOKEN not in line and "callback?code=" in line
+
+
+def test_nginx_access_log_records_no_query_string_or_referer():
+    """Tests run in the backend container, which has no nginx/; skip there."""
+    import pathlib
+    import re as _re
+
+    conf_path = pathlib.Path(__file__).resolve().parents[2] / "nginx" / "nginx.conf"
+    if not conf_path.exists():
+        pytest.skip("nginx/nginx.conf is not mounted here")
+    conf = conf_path.read_text()
+    code = "\n".join(line.split("#", 1)[0] for line in conf.splitlines())   # drop comments
+
+    fmt = _re.search(r"log_format\s+framepost\s+((?:'[^']*'\s*)+);", code)
+    assert fmt, "framepost log_format missing"
+    fields = fmt.group(1)
+    for leaky in ("$request ", "$request\"", "$request_uri", "$args", "$query_string",
+                  "$http_referer", "$arg_"):
+        assert leaky not in fields, leaky
+    assert "$uri" in fields
+    assert _re.search(r"^\s*access_log\s+\S+\s+framepost\s*;", code, _re.M)
+    # Every access_log either uses the safe format or is off.
+    for m in _re.finditer(r"access_log\s+([^;]+);", code):
+        assert m.group(1).strip() == "off" or m.group(1).split()[-1] == "framepost"
+    # The proxied request is unchanged: the backend still gets the query string.
+    assert "proxy_pass http://$backend_host:8000$request_uri;" in code
