@@ -76,11 +76,12 @@ def set_post_albums(
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
     autosave: bool = False,
+    draft_only: bool = False,
 ):
     post = db.get(Post, post_id)
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
-    if autosave and (post.status != "pending" or post.scheduled_at is not None):
+    if (autosave or draft_only) and (post.status != "pending" or post.scheduled_at is not None):
         raise HTTPException(status.HTTP_409_CONFLICT, "This post is no longer a draft. Reopen it from the calendar to edit.")
     valid_ids = {
         r for r in db.execute(select(Album.id)).scalars().all()

@@ -73,24 +73,28 @@ def test_old_bursts_and_live_scheduled_edits_are_not_coalesced(db):
 
 
 @pytest.mark.parametrize("state,scheduled", [("pending", True), ("posted", False), ("failed", False)])
-@pytest.mark.parametrize("changes", [{"title": "Stale edit"}, {}])
-def test_autosave_rejects_posts_that_are_no_longer_drafts(db, state, scheduled, changes):
+@pytest.mark.parametrize("marker", ["autosave", "draft_only"])
+@pytest.mark.parametrize("changes", [{"title": "Stale edit"}, {"ig_fit": "pad", "ig_crop_x": 0.2}, {}])
+def test_autosave_rejects_posts_that_are_no_longer_drafts(db, state, scheduled, changes, marker):
     post = make_post(db)
     post.status = state
     post.scheduled_at = datetime.utcnow() if scheduled else None
     db.commit()
     with pytest.raises(HTTPException) as exc:
-        patch(db, **changes)
+        update_post("draft", PostUpdate(**changes), db=db, _user=None, **{marker: True})
     assert exc.value.status_code == 409
     assert "no longer a draft" in exc.value.detail
     db.refresh(post)
     assert post.title == "Original"
+    assert post.ig_fit is None
+    assert post.ig_crop_x is None
     assert rows(db) == []
 
 
 @pytest.mark.parametrize("state,scheduled", [("pending", True), ("posted", False), ("failed", False)])
+@pytest.mark.parametrize("marker", ["autosave", "draft_only"])
 @pytest.mark.parametrize("relationship", ["albums", "groups", "routing", "profiles", "performers"])
-def test_relationship_autosaves_reject_non_drafts_before_mutation(db, state, scheduled, relationship):
+def test_relationship_autosaves_reject_non_drafts_before_mutation(db, state, scheduled, relationship, marker):
     from models import Album, Group, TagProfile, Performer, PostAlbum, PostGroup, PostProfile, PostPerformer
     from routes.albums import set_post_albums, PostAlbumsUpdate
     from routes.groups import set_post_groups, PostGroupsUpdate
@@ -117,7 +121,7 @@ def test_relationship_autosaves_reject_non_drafts_before_mutation(db, state, sch
     }
     endpoint, body = endpoints[relationship]
     with pytest.raises(HTTPException) as exc:
-        endpoint(post.id, body, db=db, _user=None, autosave=True)
+        endpoint(post.id, body, db=db, _user=None, **{marker: True})
     assert exc.value.status_code == 409
     db.expire_all()
     for model in [PostAlbum, PostGroup, PostProfile, PostPerformer]:
@@ -132,3 +136,14 @@ def test_post_response_exposes_schedule_for_relationship_only_autosave_validatio
     post = make_post(db, scheduled_at=datetime.utcnow())
     response = get_post(post.id, db=db, _user=None)
     assert response.scheduled_at == post.scheduled_at
+
+
+def test_draft_only_bulk_edits_keep_separate_history_rows(db):
+    make_post(db)
+    patch(db, title="Autosaved")
+    for title in ["Bulk edit one", "Bulk edit two"]:
+        saved = update_post("draft", PostUpdate(title=title), db=db, _user=None, draft_only=True)
+        assert saved.title == title
+    patch(db, title="Autosaved later")
+    assert len(rows(db)) == 4
+    assert [json.loads(row.details).get("autosave", False) for row in rows(db)] == [True, False, False, True]
