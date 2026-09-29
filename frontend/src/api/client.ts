@@ -269,8 +269,16 @@ export type PostUpdate = Partial<{
   include_exif: boolean;
 }>;
 
-export const updatePost = (id: string, body: PostUpdate, options?: { autosave?: boolean }) =>
-  apiFetch<Post>(`/api/posts/${id}${options?.autosave ? "?autosave=true" : ""}`, { method: "PATCH", body: JSON.stringify(body) });
+export type DraftWriteOptions = { autosave?: boolean; draft_only?: boolean };
+function draftWriteQuery(options?: DraftWriteOptions): string {
+  const params = new URLSearchParams();
+  if (options?.autosave) params.set("autosave", "true");
+  if (options?.draft_only) params.set("draft_only", "true");
+  return params.size ? `?${params}` : "";
+}
+
+export const updatePost = (id: string, body: PostUpdate, options?: DraftWriteOptions) =>
+  apiFetch<Post>(`/api/posts/${id}${draftWriteQuery(options)}`, { method: "PATCH", body: JSON.stringify(body) });
 
 /** Live preview URL for the Instagram auto-transform (crop slider in the editor).
  *  Plain <img src> — auth rides on the session cookie. */
@@ -934,8 +942,8 @@ export const triggerAlbumSync = () =>
   apiFetch<{ synced: number }>("/api/albums/sync", { method: "POST" });
 export const getPostAlbums = (postId: string) =>
   apiFetch<string[]>(`/api/albums/post/${postId}`);
-export const setPostAlbums = (postId: string, albumIds: string[], options?: { autosave?: boolean }) =>
-  apiFetch<string[]>(`/api/albums/post/${postId}${options?.autosave ? "?autosave=true" : ""}`, {
+export const setPostAlbums = (postId: string, albumIds: string[], options?: DraftWriteOptions) =>
+  apiFetch<string[]>(`/api/albums/post/${postId}${draftWriteQuery(options)}`, {
     method: "PUT",
     body: JSON.stringify({ album_ids: albumIds }),
   });
@@ -987,8 +995,8 @@ export const getPostGroups = (postId: string) =>
   apiFetch<string[]>(`/api/groups/post/${postId}`);
 /** `useRouting` hands the post back to automatic routing; the id list is then ignored.
  *  Without it an empty list means "no groups", which is a different thing. */
-export const setPostGroups = (postId: string, groupIds: string[], useRouting = false, options?: { autosave?: boolean }) =>
-  apiFetch<string[]>(`/api/groups/post/${postId}${options?.autosave ? "?autosave=true" : ""}`, {
+export const setPostGroups = (postId: string, groupIds: string[], useRouting = false, options?: DraftWriteOptions) =>
+  apiFetch<string[]>(`/api/groups/post/${postId}${draftWriteQuery(options)}`, {
     method: "PUT",
     body: JSON.stringify({ group_ids: groupIds, use_routing: useRouting }),
   });
@@ -1237,8 +1245,8 @@ export const deleteProfile = (id: string) =>
 
 export const getPostProfiles = (postId: string) =>
   apiFetch<string[]>(`/api/profiles/post/${postId}`);
-export const setPostProfiles = (postId: string, profileIds: string[], options?: { autosave?: boolean }) =>
-  apiFetch<string[]>(`/api/profiles/post/${postId}${options?.autosave ? "?autosave=true" : ""}`, {
+export const setPostProfiles = (postId: string, profileIds: string[], options?: DraftWriteOptions) =>
+  apiFetch<string[]>(`/api/profiles/post/${postId}${draftWriteQuery(options)}`, {
     method: "PUT",
     body: JSON.stringify({ profile_ids: profileIds }),
   });
@@ -1418,8 +1426,8 @@ export const deletePerformer = (id: string) =>
 export const getPostPerformers = (post_id: string) =>
   apiFetch<Performer[]>(`/api/performers/by-post/${post_id}`);
 
-export const setPostPerformers = (post_id: string, performer_ids: string[], options?: { autosave?: boolean }) =>
-  apiFetch<Performer[]>(`/api/performers/by-post/${post_id}${options?.autosave ? "?autosave=true" : ""}`, {
+export const setPostPerformers = (post_id: string, performer_ids: string[], options?: DraftWriteOptions) =>
+  apiFetch<Performer[]>(`/api/performers/by-post/${post_id}${draftWriteQuery(options)}`, {
     method: "PUT",
     body: JSON.stringify({ performer_ids }),
   });

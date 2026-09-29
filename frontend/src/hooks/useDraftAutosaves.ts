@@ -14,6 +14,8 @@ class DraftSaves {
   sessions = new Map<string, EditorAutosave>();
   private listeners = new Set<() => void>();
   private revision = 0;
+  private held = new Set<string>();
+  private operation: Promise<unknown> = Promise.resolve();
   constructor(private qc: QueryClient) {
     // The store outlives route mounts, including a failed save left on the calendar.
     if (typeof window !== "undefined") {
@@ -60,8 +62,17 @@ class DraftSaves {
         this.qc.setQueryData(["post", id], saved);
         // Restart an outstanding list refresh instead of cancelling and losing it.
         if (listFetching) void this.qc.invalidateQueries({ queryKey: ["drafts"] });
-        for (const key of ["post-albums", "post-groups", "post-profiles", "post-performers", "merged-tags"]) {
-          void this.qc.invalidateQueries({ queryKey: [key, id] });
+        const relationships = [
+          ["post-albums", album_ids !== undefined],
+          ["post-groups", group_ids !== undefined || use_routing !== undefined],
+          ["post-profiles", profile_ids !== undefined],
+          ["post-performers", performer_ids !== undefined],
+        ] as const;
+        for (const [key, changed] of relationships) {
+          if (changed) void this.qc.invalidateQueries({ queryKey: [key, id] });
+        }
+        if (patch.tags !== undefined || profile_ids !== undefined) {
+          void this.qc.invalidateQueries({ queryKey: ["merged-tags", id] });
         }
       });
       const created = session;
@@ -71,7 +82,7 @@ class DraftSaves {
         if (status === created.status && error === created.error) return;
         status = created.status;
         error = created.error;
-        if (!created.attached && created.status === "saved" && this.sessions.get(id) === created) {
+        if (!this.held.has(id) && !created.attached && created.status === "saved" && this.sessions.get(id) === created) {
           this.sessions.delete(id);
         }
         this.revision++;
@@ -131,20 +142,65 @@ class DraftSaves {
       throw error;
     }
   }
+  private exclusive<R>(action: () => Promise<R>): Promise<R> {
+    const result = this.operation.then(action);
+    this.operation = result.catch(() => {});
+    return result;
+  }
+  saveCrops(edits: { post: Post; patch: PostUpdate }[]) {
+    return this.exclusive(async () => {
+      const ids = edits.map(({ post }) => post.id);
+      ids.forEach((id) => this.held.add(id));
+      const sessions = ids.map((id) => this.get(id));
+      try {
+        await this.prepare(ids);
+        await Promise.all(sessions.map((session) => session.cancel()));
+        for (const { post, patch } of edits) {
+          const latest = await getPost(post.id);
+          if (latest.status !== "pending" || latest.scheduled_at != null) {
+            throw new Error("This post is no longer a draft. Reopen it from the calendar to edit.");
+          }
+          // Never replay an opening snapshot over an acknowledged edit. A retry
+          // may encounter values already saved by an earlier part of this batch.
+          const remaining: PostUpdate = { ...patch };
+          for (const key of Object.keys(patch) as (keyof PostUpdate)[]) {
+            const current = latest[key as keyof Post] ?? null;
+            if (current === patch[key]) delete remaining[key];
+            else if (current !== (post[key as keyof Post] ?? null)) {
+              throw new Error("A crop changed since this filmstrip opened. Close and reopen it to use the latest edits.");
+            }
+          }
+          if (!Object.keys(remaining).length) continue;
+          const saved = await updatePost(post.id, remaining, { draft_only: true });
+          this.qc.setQueryData<Post[]>(["drafts"], (old) => old?.map((p) => p.id === saved.id ? saved : p));
+          this.qc.setQueryData(["post", post.id], saved);
+          // Replace any response whose snapshot predates this explicit crop save.
+          if (this.qc.isFetching({ queryKey: ["drafts"] })) void this.qc.invalidateQueries({ queryKey: ["drafts"] });
+          if (this.qc.isFetching({ queryKey: ["post", post.id] })) void this.qc.invalidateQueries({ queryKey: ["post", post.id] });
+        }
+      } finally {
+        for (const id of ids) this.held.delete(id);
+        for (const [index, session] of sessions.entries()) {
+          session.resume();
+          if (!session.attached && !session.pending && !session.error) this.sessions.delete(ids[index]);
+        }
+      }
+    });
+  }
   schedule(id: string, iso: string) {
-    return this.scheduling([id], () => schedulePost(id, iso), () => [id]);
+    return this.exclusive(() => this.scheduling([id], () => schedulePost(id, iso), () => [id]));
   }
   async smartFill(body: SmartFillRequest) {
     if (!body.confirm) {
       await this.prepare(body.post_ids);
       return smartFill(body);
     }
-    return this.scheduling(body.post_ids, () => smartFill(body),
-      (result) => result.slots.filter((slot) => slot.scheduled_at && !slot.skipped_reason).map((slot) => slot.post_id));
+    return this.exclusive(() => this.scheduling(body.post_ids, () => smartFill(body),
+      (result) => result.slots.filter((slot) => slot.scheduled_at && !slot.skipped_reason).map((slot) => slot.post_id)));
   }
   release(id: string, session: EditorAutosave) {
     void session.flush().then((ok) => {
-      if (ok && !session.pending && !session.attached && this.sessions.get(id) === session) {
+      if (!this.held.has(id) && ok && !session.pending && !session.attached && this.sessions.get(id) === session) {
         this.sessions.delete(id);
       }
     });

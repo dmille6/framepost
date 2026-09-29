@@ -44,7 +44,7 @@ export function harness(path, { api = {}, queries = {}, imports = {}, queryClien
     useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
   };
   const empty = [];
-  const qc = { invalidateQueries() {}, setQueryData() {}, ...queryClient };
+  const qc = { invalidateQueries() {}, setQueryData() {}, cancelQueries: async () => {}, isFetching: () => 0, ...queryClient };
   let autosaves;
   function load(name) {
     if (name in imports) return imports[name];

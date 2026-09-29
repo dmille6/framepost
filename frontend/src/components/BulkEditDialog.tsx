@@ -18,6 +18,7 @@ import {
   updatePost,
   type Performer,
   type PostUpdate,
+  type Post,
   type Venue,
 } from "../api/client";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
@@ -164,11 +165,31 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
           }
 
           if (Object.keys(body).length > 0) {
-            await updatePost(postId, body, { autosave: true });
+            const saved = await updatePost(postId, body, { draft_only: true });
+            // Publish the acknowledged values before the dialog closes. Cancel
+            // older snapshots so a slow list/detail refresh cannot restore them.
+            await Promise.all([
+              qc.cancelQueries({ queryKey: ["drafts"] }),
+              qc.cancelQueries({ queryKey: ["post", postId] }),
+            ]);
+            qc.setQueryData<Post[]>(["drafts"], (old) => old?.map((post) => post.id === postId ? saved : post));
+            qc.setQueryData(["post", postId], saved);
           }
-          if (applyAlbums === "on") await setPostAlbums(postId, [...albumIds], { autosave: true });
-          if (applyGroups === "on") await setPostGroups(postId, [...groupIds], false, { autosave: true });
-          if (applyProfiles === "on") await setPostProfiles(postId, [...profileIds], { autosave: true });
+          if (applyAlbums === "on") {
+            const saved = await setPostAlbums(postId, [...albumIds], { draft_only: true });
+            await qc.cancelQueries({ queryKey: ["post-albums", postId] });
+            qc.setQueryData(["post-albums", postId], saved);
+          }
+          if (applyGroups === "on") {
+            const saved = await setPostGroups(postId, [...groupIds], false, { draft_only: true });
+            await qc.cancelQueries({ queryKey: ["post-groups", postId] });
+            qc.setQueryData(["post-groups", postId], saved);
+          }
+          if (applyProfiles === "on") {
+            const saved = await setPostProfiles(postId, [...profileIds], { draft_only: true });
+            await qc.cancelQueries({ queryKey: ["post-profiles", postId] });
+            qc.setQueryData(["post-profiles", postId], saved);
+          }
 
           // Performers: append (union by performer.id) or replace.
           if (bulkPerformers.length > 0) {
@@ -181,7 +202,9 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
               const additions = bulkPerformers.filter((p) => !seen.has(p.id));
               finalIds = [...existing.map((p) => p.id), ...additions.map((p) => p.id)];
             }
-            await setPostPerformers(postId, finalIds, { autosave: true });
+            const saved = await setPostPerformers(postId, finalIds, { draft_only: true });
+            await qc.cancelQueries({ queryKey: ["post-performers", postId] });
+            qc.setQueryData(["post-performers", postId], saved);
           }
 
           done += 1;

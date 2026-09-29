@@ -24,7 +24,7 @@ test('filmstrip protects text and arrow-owning controls but allows navigation fr
   let onKey;
   globalThis.window = { addEventListener: (_type, fn) => { onKey = fn; }, removeEventListener() {} };
   try {
-    const page = harness('../src/components/IgCropFilmstrip.tsx');
+    const page = harness('../src/components/IgCropFilmstrip.tsx', { imports: { '../hooks/useDraftAutosaves': { useDraftAutosaves: () => ({}) } } });
     const props = { posts: [{ id: 'a' }, { id: 'b' }], onClose() {} };
     const current = tree => elements(tree).find(e => e.type === 'IgCropStudio').props.postId;
     page.render(props);

@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 
@@ -150,17 +150,19 @@ function useEditorField<T>(
   initialChanges?: Partial<EditorChanges>,
   editable: () => boolean = () => true,
 ): [T, (value: T) => void, (value: T) => void] {
+  const touched = useRef(false);
   const [value, setValue] = useState<T>(() =>
     autosave?.view.has(name) ? autosave.view.get(name) as T : initial,
   );
   return [value, (next) => {
     if (!editable()) return;
+    touched.current = true;
     autosave?.change(name, next, changes(next),
       !autosave.view.has(name) && initialChanges ? initialChanges : changes(value));
     setValue(next);
   }, (loaded) => {
     // A query response may hydrate untouched fields, never a photographer's edits.
-    if (!autosave?.view.has(name)) setValue(loaded);
+    if (!touched.current && !autosave?.view.has(name)) setValue(loaded);
   }];
 }
 
@@ -181,10 +183,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const [includeExif, setIncludeExif, loadIncludeExif] = useEditorField(autosave, "includeExif", post.include_exif ?? false, (v) => ({ include_exif: v }));
   const [venue, setVenue, loadVenue] = useEditorField<Venue | null>(autosave, "venue", null, (v) => ({ venue_id: v?.id ?? null }));
   // IG auto-transform: fit mode + crop-window nudge. Offset null = face-anchored auto.
-  const [igFit, setIgFit] = useEditorField<"crop" | "pad" | "pad_blur">(autosave, "igFit", post.ig_fit ?? "crop", (v) => ({ ig_fit: v === "crop" ? null : v }));
-  const [igOffset] = useState<number | null>(post.ig_crop_offset);
+  const [igFit, setIgFit, loadIgFit] = useEditorField<"crop" | "pad" | "pad_blur">(autosave, "igFit", post.ig_fit ?? "crop", (v) => ({ ig_fit: v === "crop" ? null : v }));
+  const [igOffset, loadIgOffset] = useState<number | null>(post.ig_crop_offset);
   // A rect wins over the legacy offset; null means face-anchored auto.
-  const [igRect, setIgRect] = useEditorField<CropRect | null>(autosave, "igRect",
+  const [igRect, setIgRect, loadIgRect] = useEditorField<CropRect | null>(autosave, "igRect",
     post.ig_crop_x != null && post.ig_crop_y != null &&
     post.ig_crop_w != null && post.ig_crop_h != null
       ? { x: post.ig_crop_x, y: post.ig_crop_y, w: post.ig_crop_w, h: post.ig_crop_h }
@@ -195,7 +197,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       ig_crop_w: post.ig_crop_w ?? null, ig_crop_h: post.ig_crop_h ?? null, ig_crop_ratio: post.ig_crop_ratio ?? null },
   );
   // Where auto anchors. null hands it back to face detection.
-  const [igFocal, setIgFocal] = useEditorField<FocalPoint | null>(autosave, "igFocal",
+  const [igFocal, setIgFocal, loadIgFocal] = useEditorField<FocalPoint | null>(autosave, "igFocal",
     post.ig_focal_x != null && post.ig_focal_y != null
       ? { x: post.ig_focal_x, y: post.ig_focal_y }
       : null,
@@ -301,7 +303,18 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     loadCity(post.city ?? "");
     loadAltText(post.alt_text ?? "");
     loadIncludeExif(post.include_exif ?? false);
-  }, [post.id]);
+  }, [post.id, post.title, post.description, post.tags, post.privacy, post.safety_level,
+    post.content_type, post.show, post.city, post.alt_text, post.include_exif]);
+
+  useEffect(() => {
+    loadIgFit(post.ig_fit ?? "crop");
+    loadIgOffset(post.ig_crop_offset);
+    loadIgRect(post.ig_crop_x != null && post.ig_crop_y != null && post.ig_crop_w != null && post.ig_crop_h != null
+      ? { x: post.ig_crop_x, y: post.ig_crop_y, w: post.ig_crop_w, h: post.ig_crop_h } : null);
+    loadIgFocal(post.ig_focal_x != null && post.ig_focal_y != null
+      ? { x: post.ig_focal_x, y: post.ig_focal_y } : null);
+  }, [post.id, post.ig_fit, post.ig_crop_offset, post.ig_crop_x, post.ig_crop_y,
+    post.ig_crop_w, post.ig_crop_h, post.ig_focal_x, post.ig_focal_y]);
 
   useEffect(() => { loadAlbumIds(new Set(postAlbums)); }, [post.id, postAlbums.join(",")]);
   useEffect(() => { loadGroupIds(new Set(postGroups)); }, [post.id, postGroups.join(",")]);

@@ -279,3 +279,102 @@ test('unexpected edits during a paused schedule are retained with a visible conf
   assert.equal(save.status, 'error');
   assert.match(save.error, /1 unsaved field.*now-scheduled/);
 });
+
+test('scalar autosaves leave relationship observers enabled; each relationship save refreshes only its endpoint', async () => {
+  const { QueryClient, QueryObserver } = await import('@tanstack/react-query');
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+  const keys = ['post-albums', 'post-groups', 'post-profiles', 'post-performers'];
+  const fetches = [], subscriptions = [];
+  for (const key of keys) {
+    qc.setQueryData([key, 'a'], ['existing']);
+    const observer = new QueryObserver(qc, { queryKey: [key, 'a'], staleTime: Infinity,
+      queryFn: async () => { fetches.push(key); return ['saved']; } });
+    subscriptions.push(observer.subscribe(() => {}));
+  }
+  try {
+    const api = { updatePost: async (id, patch) => ({ id, status: 'pending', ...patch }),
+      getPost: async id => ({ id, status: 'pending' }) };
+    for (const name of ['Albums', 'Groups', 'Profiles', 'Performers']) api[`setPost${name}`] = async () => {};
+    const { store } = setup(api, qc);
+    const save = store.get('a'); save.attached = true;
+    edit(save, 'Title'); await save.flush();
+    assert.deepEqual(fetches, [], 'a title save must not disable or refetch performer search');
+    for (const [index, field] of ['album_ids', 'group_ids', 'profile_ids', 'performer_ids'].entries()) {
+      fetches.length = 0;
+      save.change(field, ['new'], { [field]: ['new'] }, { [field]: [] });
+      await save.flush(); await tick();
+      assert.deepEqual(fetches, [keys[index]]);
+    }
+  } finally { subscriptions.forEach(unsubscribe => unsubscribe()); qc.clear(); }
+});
+
+test('filmstrip flushes newer autosaves and refuses to replay an older crop snapshot', async () => {
+  let post = { id: 'a', status: 'pending', ig_fit: null };
+  const opening = { ...post }, writes = [];
+  const { store } = setup({
+    getPost: async () => post,
+    updatePost: async (_id, patch, options) => { writes.push({ patch, options }); return post = { ...post, ...patch }; },
+  });
+  const save = store.get('a'); save.attached = true;
+  save.change('igFit', 'pad_blur', { ig_fit: 'pad_blur' }, { ig_fit: null });
+  await assert.rejects(store.saveCrops([{ post: opening, patch: { ig_fit: 'pad' } }]), /crop changed/);
+  assert.deepEqual(writes, [{ patch: { ig_fit: 'pad_blur' }, options: { autosave: true } }]);
+  assert.equal(post.ig_fit, 'pad_blur');
+  assert.equal(await save.flush(), true, 'the writer resumes after a conflict');
+});
+
+for (const first of ['filmstrip', 'schedule']) {
+  test(`${first} holds the shared gate until it settles`, async () => {
+    let release;
+    const posts = new Map(['a', 'b'].map(id => [id, { id, status: 'pending', ig_fit: null }]));
+    const writes = [];
+    const { store } = setup({
+      getPost: async id => posts.get(id),
+      updatePost: async (id, patch, options) => {
+        writes.push(['crop', id, options]);
+        if (id === 'a') await new Promise(resolve => { release = resolve; });
+        const saved = { ...posts.get(id), ...patch }; posts.set(id, saved); return saved;
+      },
+      schedulePost: async id => {
+        writes.push(['schedule', id]);
+        if (first === 'schedule') await new Promise(resolve => { release = resolve; });
+        posts.set(id, { ...posts.get(id), scheduled_at: 'tomorrow' }); return {};
+      },
+    });
+    const edits = [...posts.values()].map(post => ({ post, patch: { ig_fit: 'pad' } }));
+    const crop = () => store.saveCrops(edits);
+    const schedule = () => store.schedule('b', 'tomorrow');
+    const leading = first === 'filmstrip' ? crop() : schedule();
+    await tick();
+    const following = first === 'filmstrip' ? schedule() : crop();
+    // Attach rejection handling before resolving the first operation.
+    const result = following.then(() => null, error => error);
+    await tick();
+    assert.equal(writes.length, 1);
+    release(); await leading; await tick();
+    if (first === 'schedule') { release(); }
+    const error = await result;
+    if (first === 'filmstrip') {
+      assert.equal(error, null);
+      assert.deepEqual(writes, [['crop', 'a', { draft_only: true }], ['crop', 'b', { draft_only: true }], ['schedule', 'b']]);
+    } else {
+      assert.match(error.message, /no longer a draft/);
+      assert.ok(!writes.some(([kind, id]) => kind === 'crop' && id === 'b'));
+    }
+  });
+}
+
+test('a schedule racing the filmstrip GET is rejected by its draft-only PATCH and leaves the gate usable', async () => {
+  let schedule = 0;
+  const { store } = setup({
+    getPost: async id => ({ id, status: 'pending' }),
+    updatePost: async (_id, _patch, options) => {
+      assert.deepEqual(options, { draft_only: true });
+      throw Object.assign(new Error('No longer a draft'), { status: 409 });
+    },
+    schedulePost: async () => { schedule++; return {}; },
+  });
+  await assert.rejects(store.saveCrops([{ post: { id: 'a' }, patch: { ig_fit: 'pad' } }]), /No longer a draft/);
+  await store.schedule('b', 'tomorrow');
+  assert.equal(schedule, 1);
+});

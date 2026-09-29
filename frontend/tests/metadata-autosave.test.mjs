@@ -183,3 +183,35 @@ test('a scheduled-post conflict offers an explicit discard action in the editor'
   button(tree, 'Post was scheduled — discard these edits').props.onClick();
   assert.equal(discarded, 1);
 });
+
+for (const withAutosave of [true, false]) {
+  test(`server scalar refresh hydrates untouched fields and preserves local input (${withAutosave ? 'autosave' : 'explicit'})`, async () => {
+    const sent = [];
+    const save = withAutosave ? new DraftAutosave(async patch => sent.push(patch), 10000) : undefined;
+    const { page, props } = setup(save);
+    // Reopen from an old cached post while the bulk refresh is still running.
+    let tree = page.render(props);
+    button(tree, 'More fields').props.onClick();
+    tree = page.render(props);
+    elements(tree).find(e => e.type === 'input' && e.props.list === 'city-suggestions')
+      .props.onChange({ target: { value: 'My unsaved city' } });
+    props.post = { ...props.post, title: 'Bulk title', description: 'Bulk description', tags: 'bulk',
+      privacy: 'private', safety_level: 'moderate', content_type: 'other', show: 'Bulk show', city: 'Server city',
+      alt_text: 'Bulk alt', include_exif: true, ig_fit: 'pad', ig_focal_x: 0.2, ig_focal_y: 0.8 };
+    tree = page.render(props);
+    const title = elements(tree).find(e => e.type === 'input' && e.props.value === 'Bulk title');
+    assert.ok(title);
+    assert.ok(elements(tree).find(e => e.props.value === 'My unsaved city'));
+    assert.equal(elements(tree).find(e => e.type?.name === 'DescriptionField').props.description, 'Bulk description');
+    assert.equal(elements(tree).find(e => e.type === 'TagsInput').props.value, 'bulk');
+    for (const value of ['private', 'moderate', 'other', 'Bulk show', 'Bulk alt']) {
+      assert.ok(elements(tree).some(e => e.props.value === value), value);
+    }
+    assert.equal(elements(tree).find(e => e.type === 'IgCropStudio').props.fit, 'pad');
+    title.props.onChange({ target: { value: `${title.props.value}!` } });
+    if (save) {
+      await save.flush();
+      assert.deepEqual(sent, [{ city: 'My unsaved city', title: 'Bulk title!' }]);
+    }
+  });
+}

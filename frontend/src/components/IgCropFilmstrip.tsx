@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   fetchAppConfig,
   fetchCropAnchor,
   thumbnailUrl,
-  updatePost,
   type Post,
+  type PostUpdate,
 } from "../api/client";
 import IgCropStudio, { type CropRect, type FocalPoint, type IgFit } from "./IgCropStudio";
+
+import { useDraftAutosaves } from "../hooks/useDraftAutosaves";
 
 const MAX_ASPECT = 1.91;
 const RATIOS: Record<string, number> = { "3:4": 3 / 4, "4:5": 4 / 5 };
@@ -25,13 +27,25 @@ type Entry = { fit: IgFit; rect: CropRect | null; focal: FocalPoint | null };
  * to change when they are.
  */
 export default function IgCropFilmstrip({
-  posts,
+  posts: selectedPosts,
   onClose,
 }: {
   posts: Post[];
   onClose: () => void;
 }) {
   const qc = useQueryClient();
+  const saves = useDraftAutosaves(qc);
+  // Keep the opening baseline stable across background cache updates.
+  const [posts] = useState(selectedPosts);
+  const pending = useRef(false);
+  const touched = useRef(new Map<string, Set<string>>());
+  const mark = (id: string, keys: string[]) => {
+    const fields = touched.current.get(id) ?? new Set<string>();
+    keys.forEach((key) => fields.add(key));
+    touched.current.set(id, fields);
+  };
+  const [error, setError] = useState<string | null>(null);
+  const dismiss = () => { if (!pending.current) onClose(); };
   const [idx, setIdx] = useState(0);
   const [edits, setEdits] = useState<Record<string, Entry>>(() =>
     Object.fromEntries(
@@ -67,12 +81,12 @@ export default function IgCropFilmstrip({
       if (t?.isContentEditable || t?.closest(
         "input:not([type=button]):not([type=submit]):not([type=reset]):not([type=checkbox]):not([type=radio]), textarea, select, [role=slider], [role=spinbutton], [role=listbox], [role=radiogroup], [role=tablist], [role=menu], [role=grid], [role=tree], [role=combobox], [contenteditable]:not([contenteditable='false'])",
       )) {
-        if (e.key === "Escape") onClose();
+        if (e.key === "Escape") dismiss();
         return;
       }
       if (e.key === "ArrowRight") setIdx((i) => Math.min(posts.length - 1, i + 1));
       else if (e.key === "ArrowLeft") setIdx((i) => Math.max(0, i - 1));
-      else if (e.key === "Escape") onClose();
+      else if (e.key === "Escape") dismiss();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -93,21 +107,31 @@ export default function IgCropFilmstrip({
 
   const save = useMutation({
     mutationFn: async () => {
-      for (const p of posts) {
-        const e = edits[p.id];
-        // Only the crop fields; the backend patches what it's given.
-        await updatePost(p.id, {
-          ig_fit: e.fit === "crop" ? null : e.fit,
-          ig_crop_x: e.rect?.x ?? null,
-          ig_crop_y: e.rect?.y ?? null,
-          ig_crop_w: e.rect?.w ?? null,
-          ig_crop_h: e.rect?.h ?? null,
-          ig_crop_ratio: e.rect ? ratioKey : null,
-          ig_focal_x: e.focal?.x ?? null,
-          ig_focal_y: e.focal?.y ?? null,
-        });
+      pending.current = true;
+      setError(null);
+      try {
+        const changes = posts.map((p) => {
+          const e = edits[p.id];
+          const desired: PostUpdate = {
+            ig_fit: e.fit === "crop" ? null : e.fit,
+            ig_crop_x: e.rect?.x ?? null,
+            ig_crop_y: e.rect?.y ?? null,
+            ig_crop_w: e.rect?.w ?? null,
+            ig_crop_h: e.rect?.h ?? null,
+            ig_crop_ratio: e.rect ? ratioKey : null,
+            ig_focal_x: e.focal?.x ?? null,
+            ig_focal_y: e.focal?.y ?? null,
+          };
+          const patch = Object.fromEntries(Object.entries(desired).filter(([key, value]) =>
+            touched.current.get(p.id)?.has(key) && value !== (p[key as keyof Post] ?? null))) as PostUpdate;
+          return { post: p, patch };
+        }).filter(({ patch }) => Object.keys(patch).length > 0);
+        await saves.saveCrops(changes);
+      } finally {
+        pending.current = false;
       }
     },
+    onError: (err) => setError(err instanceof Error ? err.message : "Could not save crops."),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["drafts"] });
       onClose();
@@ -120,7 +144,7 @@ export default function IgCropFilmstrip({
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 20 }}
-      onClick={save.isPending ? undefined : onClose}
+      onClick={dismiss}
     >
       <div
         className="fp-card fp-fade"
@@ -153,7 +177,7 @@ export default function IgCropFilmstrip({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={dismiss}
             disabled={save.isPending}
             aria-label="Close"
             style={{
@@ -185,7 +209,8 @@ export default function IgCropFilmstrip({
           </div>
         )}
 
-        <div style={{ padding: 20, overflow: "auto", display: "grid", gap: 14 }}>
+        {error && <div role="alert" style={{ padding: "12px 20px", color: "var(--danger)" }}>{error}</div>}
+        <fieldset disabled={save.isPending} style={{ border: 0, margin: 0, padding: 20, overflow: "auto", display: "grid", gap: 14 }}>
           {current && (
             <>
               <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
@@ -202,19 +227,25 @@ export default function IgCropFilmstrip({
                 rect={edits[current.id]?.rect ?? null}
                 offset={current.ig_crop_offset}
                 focal={edits[current.id]?.focal ?? null}
-                onFitChange={(f) =>
-                  setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], fit: f } }))
-                }
-                onRectChange={(r) =>
-                  setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], rect: r } }))
-                }
-                onFocalChange={(f) =>
-                  setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], focal: f } }))
-                }
+                onFitChange={(f) => {
+                  if (pending.current) return;
+                  mark(current.id, ["ig_fit"]);
+                  setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], fit: f } }));
+                }}
+                onRectChange={(r) => {
+                  if (pending.current) return;
+                  mark(current.id, ["ig_crop_x", "ig_crop_y", "ig_crop_w", "ig_crop_h", "ig_crop_ratio"]);
+                  setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], rect: r } }));
+                }}
+                onFocalChange={(f) => {
+                  if (pending.current) return;
+                  mark(current.id, ["ig_focal_x", "ig_focal_y"]);
+                  setEdits((e) => ({ ...e, [current.id]: { ...e[current.id], focal: f } }));
+                }}
               />
             </>
           )}
-        </div>
+        </fieldset>
 
         {/* Filmstrip */}
         <div
@@ -250,12 +281,16 @@ export default function IgCropFilmstrip({
             {cropped} of {posts.length} cropped by hand · the rest use face-anchored auto
           </div>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <button className="fp-btn-ghost" onClick={onClose} disabled={save.isPending}>
+            <button className="fp-btn-ghost" onClick={dismiss} disabled={save.isPending}>
               Cancel
             </button>
             <button
               className="fp-btn"
-              onClick={() => save.mutate()}
+              onClick={() => {
+                if (pending.current) return;
+                pending.current = true;
+                save.mutate();
+              }}
               disabled={save.isPending}
             >
               {save.isPending ? "Saving…" : `Save ${posts.length} crop${posts.length === 1 ? "" : "s"}`}
