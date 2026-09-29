@@ -6,7 +6,7 @@ import { CALENDAR_DRAG_MIME } from "./Calendar";
 export default function RescheduleSidebar() {
   const { data: drafts = [] } = useQuery({ queryKey: ["drafts"], queryFn: listDrafts });
 
-  const ready = drafts.filter((d) => !!d.title && !!d.tags);
+  const ready = drafts.filter((d) => d.preflight?.ready ?? false);
   const others = drafts.filter((d) => !ready.includes(d));
 
   return (
@@ -14,7 +14,7 @@ export default function RescheduleSidebar() {
       <div style={{ padding: "12px 14px", borderBottom: "0.5px solid var(--border)" }}>
         <div style={{ fontSize: 14, fontWeight: 500 }}>Drag to schedule</div>
         <div style={{ fontSize: 11, color: "var(--text-fade)", marginTop: 4 }}>
-          Drop a draft onto a day to schedule it. Ready drafts have title + tags filled in.
+          Drop a draft onto a day to schedule it. Ready drafts pass delivery checks and have no outstanding metadata warnings.
         </div>
       </div>
       <div style={{ overflow: "auto", padding: "8px 0" }}>
@@ -25,7 +25,7 @@ export default function RescheduleSidebar() {
         )}
         {ready.length > 0 && <SectionLabel>Ready</SectionLabel>}
         {ready.map((d) => <DraggableDraft key={d.id} id={d.id} title={d.title} filename={d.original_filename} />)}
-        {others.length > 0 && <SectionLabel dim>Needs metadata</SectionLabel>}
+        {others.length > 0 && <SectionLabel dim>Needs attention</SectionLabel>}
         {others.map((d) => <DraggableDraft key={d.id} id={d.id} title={d.title} filename={d.original_filename} dim />)}
       </div>
     </div>
