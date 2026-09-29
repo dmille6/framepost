@@ -24,10 +24,10 @@ app.add_middleware(CSRFMiddleware)
 @app.exception_handler(StarletteHTTPException)
 async def _masked_http_exception(request: Request, exc: StarletteHTTPException):
     """Routes turn platform failures into HTTPException(detail=str(e)) in ~40 places;
-    mask the detail once here rather than at each of them. Otherwise FastAPI's own
-    handler, unchanged."""
-    if isinstance(exc.detail, str):
-        exc.detail = redact.redact(exc.detail)
+    mask the detail once here rather than at each of them — string details and the
+    dict ones (routes/config.py sends {"validation": {key: str(e)}}) alike. Otherwise FastAPI's
+    own handler, unchanged."""
+    exc.detail = redact.redact_obj(exc.detail)
     return await http_exception_handler(request, exc)
 
 

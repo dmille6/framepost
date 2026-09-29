@@ -697,3 +697,16 @@ def test_validation_messages_are_masked_too():
                                    "input": TOKEN}])
     resp = asyncio.run(main._masked_validation_error(None, exc))
     assert resp.status_code == 422 and TOKEN not in resp.body.decode()
+
+
+def test_structured_http_error_details_are_masked_recursively():
+    import main
+
+    detail = {"message": "publish blocked",
+              "blockers": [{"platform": "instagram",
+                            "error": f"GET https://g/me?access_token={TOKEN}"}],
+              "count": 1}
+    resp = asyncio.run(main._masked_http_exception(None, HTTPException(409, detail)))
+    body = json.loads(resp.body)
+    assert TOKEN not in resp.body.decode()
+    assert body["detail"]["count"] == 1 and body["detail"]["blockers"][0]["platform"] == "instagram"
