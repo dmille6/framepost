@@ -83,6 +83,7 @@ class PostOut(BaseModel):
     safety_level: str | None
     content_type: str | None
     status: str
+    scheduled_at: datetime | None = None
     posted_to_instagram_at: datetime | None = None
     reddit_posted_at: datetime | None = None
     target_platforms: list[str] | None = None

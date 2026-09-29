@@ -150,9 +150,13 @@ def set_post_profiles(
     body: PostProfilesUpdate,
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
+    autosave: bool = False,
 ):
-    if not db.get(Post, post_id):
+    post = db.get(Post, post_id)
+    if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    if autosave and (post.status != "pending" or post.scheduled_at is not None):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This post is no longer a draft. Reopen it from the calendar to edit.")
     valid = set(db.execute(select(TagProfile.id).where(TagProfile.is_default == 0)).scalars().all())
     requested = [pid for pid in body.profile_ids if pid in valid]
     db.execute(PostProfile.__table__.delete().where(PostProfile.post_id == post_id))

@@ -252,11 +252,15 @@ def set_post_performers(
     body: TagPerformersBody,
     db: Session = Depends(get_session),
     _user: User = Depends(current_user),
+    autosave: bool = False,
 ):
     """Replace the entire performer-tag list for a post in one call. Order matters —
     captions render performers in this order."""
-    if not db.get(Post, post_id):
+    post = db.get(Post, post_id)
+    if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    if autosave and (post.status != "pending" or post.scheduled_at is not None):
+        raise HTTPException(status.HTTP_409_CONFLICT, "This post is no longer a draft. Reopen it from the calendar to edit.")
 
     # Validate referenced performers exist.
     if body.performer_ids:

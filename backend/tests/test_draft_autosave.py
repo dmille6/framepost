@@ -86,3 +86,49 @@ def test_autosave_rejects_posts_that_are_no_longer_drafts(db, state, scheduled, 
     db.refresh(post)
     assert post.title == "Original"
     assert rows(db) == []
+
+
+@pytest.mark.parametrize("state,scheduled", [("pending", True), ("posted", False), ("failed", False)])
+@pytest.mark.parametrize("relationship", ["albums", "groups", "routing", "profiles", "performers"])
+def test_relationship_autosaves_reject_non_drafts_before_mutation(db, state, scheduled, relationship):
+    from models import Album, Group, TagProfile, Performer, PostAlbum, PostGroup, PostProfile, PostPerformer
+    from routes.albums import set_post_albums, PostAlbumsUpdate
+    from routes.groups import set_post_groups, PostGroupsUpdate
+    from routes.profiles import set_post_profiles, PostProfilesUpdate
+    from routes.performers import set_post_performers, TagPerformersBody
+    post = make_post(db)
+    db.add_all([Album(id="a", name="Album"), Group(id="g", name="Group"),
+                TagProfile(id="t", name="Profile"), Performer(id="p", display_name="Performer")])
+    db.flush()
+    db.add_all([PostAlbum(post_id=post.id, album_id="a"),
+                PostGroup(id="pg", post_id=post.id, group_id="g"),
+                PostProfile(post_id=post.id, profile_id="t"),
+                PostPerformer(post_id=post.id, performer_id="p", position=0)])
+    post.status = state
+    post.scheduled_at = datetime.utcnow() if scheduled else None
+    post.groups_overridden = 1
+    db.commit()
+    endpoints = {
+        "albums": (set_post_albums, PostAlbumsUpdate(album_ids=[])),
+        "groups": (set_post_groups, PostGroupsUpdate(group_ids=[])),
+        "routing": (set_post_groups, PostGroupsUpdate(group_ids=[], use_routing=True)),
+        "profiles": (set_post_profiles, PostProfilesUpdate(profile_ids=[])),
+        "performers": (set_post_performers, TagPerformersBody(performer_ids=[])),
+    }
+    endpoint, body = endpoints[relationship]
+    with pytest.raises(HTTPException) as exc:
+        endpoint(post.id, body, db=db, _user=None, autosave=True)
+    assert exc.value.status_code == 409
+    db.expire_all()
+    for model in [PostAlbum, PostGroup, PostProfile, PostPerformer]:
+        assert len(db.scalars(select(model)).all()) == 1
+    assert post.groups_overridden == 1
+    # Explicit calendar edits remain supported.
+    endpoint(post.id, body, db=db, _user=None)
+
+
+def test_post_response_exposes_schedule_for_relationship_only_autosave_validation(db):
+    from routes.posts import get_post
+    post = make_post(db, scheduled_at=datetime.utcnow())
+    response = get_post(post.id, db=db, _user=None)
+    assert response.scheduled_at == post.scheduled_at
