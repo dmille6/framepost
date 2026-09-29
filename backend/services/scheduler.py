@@ -1596,7 +1596,7 @@ def _record_platform_failure(
             events.log_event(
                 db, post_id=post.id, event_type=f"{cred.platform}_bookkeeping_failed",
                 actor="worker",
-                details={"remote_id": pp.remote_id, "error": str(err)[:400]},
+                details={"remote_id": pp.remote_id, "error": redact.clip(str(err), 400)},
             )
             db.commit()
             return
@@ -1609,7 +1609,7 @@ def _record_platform_failure(
         # attempt budget still bounds anything that is merely failing over and over.
         if not getattr(err, "made_progress", False):
             pp.retry_count = (pp.retry_count or 0) + 1
-        pp.error_message = str(err)[:1000]
+        pp.error_message = redact.clip(str(err), 1000)
         max_attempts = retry.max_attempts(db)
         # Same invariant as the Flickr path: a retry we can't schedule is exhaustion.
         after = getattr(err, "retry_after_seconds", None)
@@ -1623,10 +1623,10 @@ def _record_platform_failure(
             nxt = retry.next_retry_at(db, max(1, pp.retry_count))
         exhausted = permanent or pp.retry_count >= max_attempts or nxt is None
         pp.status = "failed" if exhausted else "pending"
-        pp.error_message = f"{failure.user_message} ({str(err)[:400]})"[:1000]
+        pp.error_message = f"{failure.user_message} ({redact.clip(str(err), 400)})"[:1000]
         pp.next_retry_at = None if exhausted else nxt
         if refreshed_cred:
-            refreshed_cred.last_error = str(err)[:500]
+            refreshed_cred.last_error = redact.clip(str(err), 500)
             if failure.requires_reauth:
                 # No number of retries fixes a revoked grant or a missing scope. Park
                 # the channel so the health banner can ask for a reconnect instead of
@@ -1646,7 +1646,7 @@ def _record_platform_failure(
                 "permanent": permanent,
                 "category": failure.category.value,
                 "user_message": failure.user_message,
-                "error": str(err)[:500],
+                "error": redact.clip(str(err), 500),
             },
         )
         db.commit()

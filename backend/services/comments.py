@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from services import http_client
+from services import http_client, redact
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -253,7 +253,7 @@ def _sync_bluesky(db: Session, post_platforms: list[tuple[PostPlatform, Platform
                 params={"uri": pp.remote_id, "depth": 4},
             )
             if r.status_code >= 400:
-                raise RuntimeError(f"getPostThread HTTP {r.status_code}: {r.text[:200]}")
+                raise RuntimeError(f"getPostThread HTTP {r.status_code}: {redact.clip(r.text, 200)}")
             body = r.json()
             thread = body.get("thread") or {}
             root_post = thread.get("post") or {}
@@ -306,7 +306,7 @@ def _sync_bluesky(db: Session, post_platforms: list[tuple[PostPlatform, Platform
                     )
                     if lr.status_code >= 400:
                         log.warning("getLikes HTTP %s for %s: %s",
-                                    lr.status_code, pp.post_id[:8], lr.text[:200])
+                                    lr.status_code, pp.post_id[:8], redact.clip(lr.text, 200))
                         break
                     lbody = lr.json()
                     for like in (lbody.get("likes") or []):
@@ -366,7 +366,7 @@ def _sync_pixelfed(db: Session, post_platforms: list[tuple[PostPlatform, Platfor
                 # Status object — has favourites_count, reblogs_count, replies_count.
                 r1 = c.get(f"{base}/api/v1/statuses/{pp.remote_id}", headers=headers)
                 if r1.status_code >= 400:
-                    raise RuntimeError(f"status fetch HTTP {r1.status_code}: {r1.text[:200]}")
+                    raise RuntimeError(f"status fetch HTTP {r1.status_code}: {redact.clip(r1.text, 200)}")
                 status = r1.json()
                 fav_count = int(status.get("favourites_count") or 0)
                 rep_count = int(status.get("replies_count") or 0)
@@ -382,7 +382,7 @@ def _sync_pixelfed(db: Session, post_platforms: list[tuple[PostPlatform, Platfor
                 if rep_count > 0:
                     r2 = c.get(f"{base}/api/v1/statuses/{pp.remote_id}/context", headers=headers)
                     if r2.status_code >= 400:
-                        raise RuntimeError(f"context HTTP {r2.status_code}: {r2.text[:200]}")
+                        raise RuntimeError(f"context HTTP {r2.status_code}: {redact.clip(r2.text, 200)}")
                     ctx = r2.json()
                     for desc in (ctx.get("descendants") or []):
                         cid = desc.get("id")
@@ -413,7 +413,7 @@ def _sync_pixelfed(db: Session, post_platforms: list[tuple[PostPlatform, Platfor
                     )
                     if r3.status_code >= 400:
                         log.warning("favourited_by HTTP %s for %s: %s",
-                                    r3.status_code, pp.post_id[:8], r3.text[:200])
+                                    r3.status_code, pp.post_id[:8], redact.clip(r3.text, 200))
                     else:
                         for actor in r3.json():
                             actor_id = actor.get("id")
@@ -480,7 +480,7 @@ def _sync_instagram(db: Session, post_platforms: list[tuple[PostPlatform, Platfo
                         log.info("instagram media %s gone (deleted on IG) — skipping %s",
                                  pp.remote_id, pp.post_id[:8])
                         continue
-                    raise RuntimeError(f"media fetch HTTP {r1.status_code}: {r1.text[:200]}")
+                    raise RuntimeError(f"media fetch HTTP {r1.status_code}: {redact.clip(r1.text, 200)}")
                 media = r1.json()
                 like_count = int(media.get("like_count") or 0)
                 comments_count = int(media.get("comments_count") or 0)
@@ -506,7 +506,7 @@ def _sync_instagram(db: Session, post_platforms: list[tuple[PostPlatform, Platfo
                         headers=headers, params=params,
                     )
                     if r2.status_code >= 400:
-                        raise RuntimeError(f"comments HTTP {r2.status_code}: {r2.text[:200]}")
+                        raise RuntimeError(f"comments HTTP {r2.status_code}: {redact.clip(r2.text, 200)}")
                     body = r2.json()
                     for com in body.get("data") or []:
                         replies = ((com.get("replies") or {}).get("data")) or []
@@ -566,7 +566,7 @@ def _fetch_ig_media_insights(client: httpx.Client, headers: dict, media_id: str)
             return out
         if r.status_code != 400:
             log.warning("instagram insights HTTP %s for %s: %s",
-                        r.status_code, media_id, r.text[:160])
+                        r.status_code, media_id, redact.clip(r.text, 160))
             return {}
     return {}
 
@@ -631,7 +631,7 @@ def sync_instagram_account_stats(db: Session) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001 — audience stats are never worth failing a sync
         log.warning("instagram account stats failed: %s", e)
         db.rollback()
-        return {"error": str(e)[:160]}
+        return {"error": redact.clip(str(e), 160)}
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -791,7 +791,7 @@ def sync_all(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> dict
         except Exception as e:
             db.rollback()
             log.exception("comments+engagement sync stage %s failed", name)
-            out[name] = {"errors": 1, "failed": str(e)[:200]}
+            out[name] = {"errors": 1, "failed": redact.clip(str(e), 200)}
     log.info("comments+engagement sync: %s", json.dumps(out))
     return out
 
@@ -842,7 +842,7 @@ def sync_instagram_reels(db: Session, *, lookback_days: int = DEFAULT_LOOKBACK_D
                         # publish -- but stop asking about it every day.
                         log.info("instagram reel %s gone — skipping", reel.remote_id)
                         continue
-                    raise RuntimeError(f"reel fetch HTTP {r.status_code}: {r.text[:200]}")
+                    raise RuntimeError(f"reel fetch HTTP {r.status_code}: {redact.clip(r.text, 200)}")
                 media = r.json()
                 insights = _fetch_ig_media_insights(c, headers, reel.remote_id)
             _snapshot(

@@ -526,3 +526,91 @@ def test_a_new_pixelfed_client_secret_is_known_at_registration(monkeypatch, db):
     pixelfed.begin_connect(db, instance_url="https://pixelfed.test",
                            redirect_uri="https://fp/cb")
     assert redact.redact("brand-new-client-secret") == MASK
+
+
+# -----------------------------------------------------------------------------
+# Mask, then truncate: a secret cut in half by a slice must not leave a fragment
+# -----------------------------------------------------------------------------
+
+FRAGMENT = TOKEN[:8]      # what a cut-then-mask would leave behind
+
+
+def _straddling(limit: int) -> str:
+    """Text whose `limit`-character cut keeps TOKEN's first 12 characters, unlabelled."""
+    return "x" * (limit - 13) + " " + TOKEN + " tail"
+
+
+def test_clip_masks_before_it_cuts():
+    redact.remember(TOKEN)
+    out = redact.clip(_straddling(200), 200)
+    assert FRAGMENT not in out and len(out) <= 200
+
+
+def test_clip_handles_none_and_short_text():
+    assert redact.clip(None, 10) == ""
+    assert redact.clip("short", 10) == "short"
+
+
+def test_the_failure_recorder_masks_before_truncating(db):
+    redact.remember(TOKEN)
+    cred = PlatformCredential(id=uuid.uuid4().hex, platform="instagram",
+                              access_token="enc", account_name="acct")
+    post = Post(id=uuid.uuid4().hex, status="posted", title="t",
+                original_filename="f.arw", original_path="/nope/f.arw")
+    db.add_all([cred, post])
+    db.commit()
+
+    # 400 is where the user-facing message cuts; 500 where last_error does.
+    scheduler._record_platform_failure(db, post, cred, RuntimeError(_straddling(400)))
+    pp = db.get(PostPlatform, (post.id, cred.id))
+    cred = db.get(PlatformCredential, cred.id)
+    stored = [pp.error_message, cred.last_error]
+    stored += [e.details for e in db.query(PostEvent).filter_by(post_id=post.id)]
+    for text in stored:
+        assert FRAGMENT not in text
+
+    scheduler._record_platform_failure(db, post, cred, RuntimeError(_straddling(500)))
+    assert FRAGMENT not in db.get(PlatformCredential, cred.id).last_error
+
+
+def test_instagram_error_text_masks_before_truncating():
+    redact.remember(TOKEN)
+    r = httpx.Response(500, text=_straddling(300))          # not JSON: the raw-body path
+    with pytest.raises(InstagramError) as exc:
+        ig._raise_api_error(r, "container status check")
+    assert FRAGMENT not in str(exc.value)
+    r = httpx.Response(400, json={"error": {"message": f"bad token {TOKEN}"}})
+    assert TOKEN not in ig._error_text(r)
+
+
+def test_a_platform_body_cut_at_200_leaves_no_fragment(monkeypatch):
+    from services.platforms import bluesky
+
+    redact.remember(TOKEN)
+    _serve(monkeypatch, lambda req: httpx.Response(500, text=_straddling(200)))
+    with pytest.raises(bluesky.BlueskyError) as exc:
+        bluesky._refresh_session("refresh-jwt-value-xyz")
+    assert FRAGMENT not in str(exc.value)
+
+
+def test_the_connection_check_state_row_is_masked(db, monkeypatch):
+    """connection_check keeps its last error in app_config, which has no listener."""
+    import json as _json
+    from datetime import datetime, timedelta
+
+    from models import AppConfig
+    from services import connection_check as cc
+
+    now = datetime(2026, 10, 1, 12, 0)
+    redact.remember(TOKEN)
+    db.add(PlatformCredential(id=uuid.uuid4().hex, platform="instagram", access_token="tok"))
+    db.add(Post(id=uuid.uuid4().hex, status="pending", scheduled_at=now + timedelta(minutes=30),
+                target_platforms=_json.dumps(["instagram"])))
+    db.commit()
+
+    def boom(db, cred):
+        raise RuntimeError(_straddling(300))
+    monkeypatch.setattr(cc, "VERIFIERS", {"instagram": boom})
+    cc.run(db, now=now)
+    state = db.get(AppConfig, cc.STATE_KEY).value
+    assert "error" in state and FRAGMENT not in state

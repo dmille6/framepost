@@ -17,7 +17,7 @@ from database import get_session
 from models import PlatformCredential, Post, User
 from routes.auth import current_user
 from services.platforms import bluesky, flickr, instagram, pinterest, pixelfed
-from services.redact import redact
+from services.redact import clip, redact
 
 log = logging.getLogger("framepost.platforms")
 router = APIRouter()
@@ -203,7 +203,7 @@ def bluesky_test(
         params={"actor": session.handle or row.account_name or ""},
     )
     if r.status_code >= 400:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Bluesky test failed: {r.text[:200]}")
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Bluesky test failed: {clip(r.text, 200)}")
     body_json = r.json()
     return {
         "ok": True,

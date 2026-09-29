@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal, get_session
 from models import AppConfig, PlatformCredential, Post, Reel, ReelPhoto, User
 from routes.auth import current_user
-from services import reel_frames, reel_publish, storage
+from services import redact, reel_frames, reel_publish, storage
 from services.reel import CropRect, PhotoSegment, ReelGenerationError, generate
 
 log = logging.getLogger("framepost.reels")
@@ -197,7 +197,7 @@ def _run_generation(reel_id: str) -> None:
         except (ReelGenerationError, Exception) as e:
             log.exception("reel %s generation failed", reel_id)
             reel.status = "failed"
-            reel.error_message = str(e)[:1000]
+            reel.error_message = redact.clip(str(e), 1000)
             reel.updated_at = datetime.now(timezone.utc)
             db.commit()
     finally:

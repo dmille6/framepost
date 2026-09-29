@@ -83,7 +83,7 @@ def _create_session(handle: str, app_password: str, pds: str = DEFAULT_PDS) -> _
     if r.status_code == 401:
         raise BlueskyError("Bluesky rejected the credentials (handle or app password is wrong).", permanent=True)
     if r.status_code >= 400:
-        raise BlueskyError(f"createSession failed (HTTP {r.status_code}): {r.text[:200]}")
+        raise BlueskyError(f"createSession failed (HTTP {r.status_code}): {redact.clip(r.text, 200)}")
     body = r.json()
     _remember_session(body)
     return _Session(
@@ -109,7 +109,7 @@ def _refresh_session(refresh_jwt: str, pds: str = DEFAULT_PDS) -> _Session:
         )
     if r.status_code >= 400:
         raise BlueskyError(
-            f"refreshSession failed (HTTP {r.status_code}): {r.text[:200]}",
+            f"refreshSession failed (HTTP {r.status_code}): {redact.clip(r.text, 200)}",
             permanent=(r.status_code == 401),
         )
     body = r.json()
@@ -284,7 +284,7 @@ def _upload_blob(db: Session, row: PlatformCredential, session: _Session, src: P
         headers={"Content-Type": mime},
     )
     if r.status_code >= 400:
-        raise BlueskyError(f"uploadBlob failed (HTTP {r.status_code}): {r.text[:300]}")
+        raise BlueskyError(f"uploadBlob failed (HTTP {r.status_code}): {redact.clip(r.text, 300)}")
     return r.json()["blob"]
 
 
@@ -539,7 +539,7 @@ def post_photos(
         },
     )
     if r.status_code >= 400:
-        body = r.text[:400]
+        body = redact.clip(r.text, 400)
         # Map common permanent failures so the retry layer doesn't loop on them.
         permanent = r.status_code in (400, 401, 403)
         raise BlueskyError(f"createRecord failed (HTTP {r.status_code}): {body}", permanent=permanent)

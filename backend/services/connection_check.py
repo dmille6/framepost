@@ -87,7 +87,7 @@ def _raise_for(platform: str, r) -> None:
             code = int(code) if code is not None else None
     except Exception:  # noqa: BLE001 — an unparseable body just means "no code"
         pass
-    raise CheckFailed(f"{platform} check HTTP {r.status_code}: {r.text[:300]}",
+    raise CheckFailed(f"{platform} check HTTP {r.status_code}: {redact.clip(r.text, 300)}",
                       http_status=r.status_code, code=code, subcode=subcode,
                       error_type=error_type)
 
@@ -178,7 +178,7 @@ def is_reauth(platform: str, err: BaseException) -> tuple[bool, str]:
     # body can say anything — "expired", "scope" — so a 5xx/429 is settled before the
     # text rules get a look at it.
     if re.search(r"\bHTTP (5\d\d|429)\b", str(err)):
-        return False, f"{platform.title()} connection check failed: {str(err)[:200]}"
+        return False, f"{platform.title()} connection check failed: {redact.clip(str(err), 200)}"
     failure = publish_errors.classify(platform, err)
     if failure.requires_reauth:
         return True, failure.user_message
@@ -186,8 +186,8 @@ def is_reauth(platform: str, err: BaseException) -> tuple[bool, str]:
     # grant (e.g. Bluesky rejecting the stored app password) — unless it also looked
     # like a transient failure above.
     if getattr(err, "permanent", False) and failure.category is not publish_errors.FailureCategory.RETRY:
-        return True, f"{platform.title()} needs reconnecting: {str(err)[:200]}"
-    return False, f"{platform.title()} connection check failed: {str(err)[:200]}"
+        return True, f"{platform.title()} needs reconnecting: {redact.clip(str(err), 200)}"
+    return False, f"{platform.title()} connection check failed: {redact.clip(str(err), 200)}"
 
 
 # --- what is about to need which connection ------------------------------------------
@@ -279,7 +279,7 @@ def run(db: Session, *, now: datetime | None = None) -> dict[str, str]:
             db.rollback()
             reauth, message = is_reauth(platform, e)
             st["failed_at"] = now.isoformat()
-            st["error"] = str(e)[:300]
+            st["error"] = redact.clip(str(e), 300)
             if not reauth:
                 log.warning("connection check %s: transient (%s) — not flagging", platform, e)
                 out[platform] = "transient"
@@ -295,7 +295,7 @@ def run(db: Session, *, now: datetime | None = None) -> dict[str, str]:
                 events.log_event(
                     db, post_id=posts[0].id,
                     event_type=f"{platform}_connection_check_failed", actor="worker",
-                    details={"message": message, "error": str(e)[:300],
+                    details={"message": message, "error": redact.clip(str(e), 300),
                              "posts_in_next_90m": len(posts)},
                 )
                 db.commit()

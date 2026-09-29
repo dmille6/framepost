@@ -134,7 +134,7 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
         )
     if r.status_code >= 400:
         raise PinterestError(
-            f"Token exchange failed (HTTP {r.status_code}): {r.text[:300]}",
+            f"Token exchange failed (HTTP {r.status_code}): {redact.clip(r.text, 300)}",
             permanent=(r.status_code in (400, 401, 403)),
         )
     token_body = r.json()
@@ -153,7 +153,7 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
             headers={"Authorization": f"Bearer {access_token}"},
         )
     if r.status_code >= 400:
-        raise PinterestError(f"user_account fetch failed (HTTP {r.status_code}): {r.text[:200]}")
+        raise PinterestError(f"user_account fetch failed (HTTP {r.status_code}): {redact.clip(r.text, 200)}")
     account = r.json()
     username = account.get("username") or ""
 
@@ -248,7 +248,7 @@ def _refresh_if_needed(db: Session, row: PlatformCredential) -> str:
         )
     if r.status_code >= 400:
         raise PinterestError(
-            f"Pinterest token refresh failed (HTTP {r.status_code}): {r.text[:300]}",
+            f"Pinterest token refresh failed (HTTP {r.status_code}): {redact.clip(r.text, 300)}",
             permanent=(r.status_code in (400, 401, 403)),
         )
     body = r.json()
@@ -287,7 +287,7 @@ def list_boards(db: Session) -> list[dict[str, Any]]:
                 params=params,
             )
         if r.status_code >= 400:
-            raise PinterestError(f"list boards failed (HTTP {r.status_code}): {r.text[:200]}")
+            raise PinterestError(f"list boards failed (HTTP {r.status_code}): {redact.clip(r.text, 200)}")
         body = r.json()
         for b in body.get("items", []):
             out.append({
@@ -386,7 +386,7 @@ def post_pin(
         )
     if r.status_code >= 400:
         raise PinterestError(
-            f"pin create failed (HTTP {r.status_code}): {r.text[:400]}",
+            f"pin create failed (HTTP {r.status_code}): {redact.clip(r.text, 400)}",
             permanent=(r.status_code in (400, 401, 403, 422)),
         )
     pin = r.json()
@@ -464,7 +464,7 @@ def fetch_pin_analytics(
             break
     assert last is not None
     raise PinterestError(
-        f"pin analytics failed (HTTP {last.status_code}): {last.text[:200]}",
+        f"pin analytics failed (HTTP {last.status_code}): {redact.clip(last.text, 200)}",
         permanent=(last.status_code in (401, 403)),
     )
 

@@ -109,6 +109,16 @@ def redact(text: str | None) -> str | None:
     return out
 
 
+def clip(text: str | None, limit: int) -> str:
+    """Mask, then cut to `limit` characters — never the other way round.
+
+    Error builders keep the first N characters of a response or exception. Cut first and
+    a secret straddling the cut survives as a fragment that matches neither its
+    remembered value nor, if its label was cut away, any pattern.
+    """
+    return (redact(text) or "")[:limit]
+
+
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------

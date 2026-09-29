@@ -100,7 +100,7 @@ def begin_connect(
         )
     if r.status_code >= 400:
         raise PixelfedError(
-            f"Couldn't register app on {instance_url} (HTTP {r.status_code}): {r.text[:200]}",
+            f"Couldn't register app on {instance_url} (HTTP {r.status_code}): {redact.clip(r.text, 200)}",
             permanent=(r.status_code == 404),
         )
     app = r.json()
@@ -169,7 +169,7 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
         )
     if r.status_code >= 400:
         raise PixelfedError(
-            f"Token exchange failed (HTTP {r.status_code}): {r.text[:300]}",
+            f"Token exchange failed (HTTP {r.status_code}): {redact.clip(r.text, 300)}",
             permanent=(r.status_code in (400, 401, 403)),
         )
     token_body = r.json()
@@ -185,7 +185,7 @@ def complete_connect(db: Session, *, code: str, state: str) -> PlatformCredentia
             headers={"Authorization": f"Bearer {access_token}"},
         )
     if r.status_code >= 400:
-        raise PixelfedError(f"verify_credentials failed (HTTP {r.status_code}): {r.text[:200]}")
+        raise PixelfedError(f"verify_credentials failed (HTTP {r.status_code}): {redact.clip(r.text, 200)}")
     account = r.json()
 
     # Same row, same id: whatever this account already published stays attached to it.
@@ -260,7 +260,7 @@ def _decode(r, what: str) -> dict:
         raise PixelfedError(
             f"{what}: Pixelfed returned HTTP {r.status_code} with "
             f"{'an HTML page' if looks_html else 'a non-JSON body'} instead of JSON "
-            f"({len(body)} bytes): {body[:200]!r}"
+            f"({len(body)} bytes): {redact.clip(body, 200)!r}"
         ) from None
 
 
@@ -346,7 +346,7 @@ def post_photos(
                 r = c.post("/api/v1/media", headers=headers, files=files, data=data)
         if r.status_code >= 400:
             raise PixelfedError(
-                f"media upload failed (HTTP {r.status_code}): {r.text[:300]}",
+                f"media upload failed (HTTP {r.status_code}): {redact.clip(r.text, 300)}",
                 permanent=(r.status_code in (400, 401, 403, 422)),
             )
         media_ids.append(_decode(r, "media upload")["id"])
@@ -365,7 +365,7 @@ def post_photos(
         r = c.post("/api/v1/statuses", headers=headers, data=payload)
     if r.status_code >= 400:
         raise PixelfedError(
-            f"status post failed (HTTP {r.status_code}): {r.text[:300]}",
+            f"status post failed (HTTP {r.status_code}): {redact.clip(r.text, 300)}",
             permanent=(r.status_code in (400, 401, 403, 422)),
         )
     status = _decode(r, "status post")

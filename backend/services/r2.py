@@ -28,7 +28,7 @@ import os
 import urllib.parse
 import xml.etree.ElementTree as ET
 
-from services import http_client
+from services import http_client, redact
 
 log = logging.getLogger("framepost.r2")
 
@@ -111,7 +111,7 @@ def put(key: str, body: bytes, *, content_type: str = "image/jpeg") -> None:
     bucket = _cfg()[3]
     r = _request("PUT", f"/{bucket}/{_quote(key)}", body=body, content_type=content_type)
     if r.status_code >= 300:
-        raise R2Error(f"upload of {key} failed: HTTP {r.status_code} {r.text[:200]}")
+        raise R2Error(f"upload of {key} failed: HTTP {r.status_code} {redact.clip(r.text, 200)}")
 
 
 def presign_get(key: str, *, expires: int = DEFAULT_EXPIRY) -> str:
@@ -165,6 +165,6 @@ def list_keys(prefix: str = "") -> list[str]:
         query += f"&prefix={urllib.parse.quote(prefix, safe='')}"
     r = _request("GET", f"/{bucket}", query=query, timeout=60.0)
     if r.status_code >= 300:
-        raise R2Error(f"list failed: HTTP {r.status_code} {r.text[:200]}")
+        raise R2Error(f"list failed: HTTP {r.status_code} {redact.clip(r.text, 200)}")
     root = ET.fromstring(r.text)
     return [e.text or "" for e in root.findall(".//s3:Contents/s3:Key", _S3_NS)]

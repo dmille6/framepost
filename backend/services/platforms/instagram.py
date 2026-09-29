@@ -345,10 +345,10 @@ def _error_text(r: httpx.Response) -> str:
         if err.get("error_user_title"):
             msg = f"{err['error_user_title']}: {msg}"
         if msg:
-            return msg
+            return redact.redact(msg)
     except Exception:
         pass
-    return r.text[:300]
+    return redact.clip(r.text, 300)
 
 
 def _raise_api_error(r: httpx.Response, doing: str) -> None:
@@ -594,7 +594,7 @@ def _create_container(
         if r.status_code < 400:
             container_id = r.json().get("id")
             if not container_id:
-                raise InstagramError(f"container creation returned no id: {r.text[:200]}")
+                raise InstagramError(f"container creation returned no id: {redact.clip(r.text, 200)}")
             return container_id, attempt_collabs, rejected
 
         bad = _bad_collaborator_handles(r, attempt_collabs)
@@ -1348,7 +1348,7 @@ def _publish_container(ig_user_id: str, container_id: str, token: str) -> tuple[
         time.sleep(PUBLISH_RETRY_INTERVAL)
     media_id = r.json().get("id")
     if not media_id:
-        raise InstagramError(f"media_publish returned no id: {r.text[:200]}")
+        raise InstagramError(f"media_publish returned no id: {redact.clip(r.text, 200)}")
 
     # Permalink is cosmetic — the post is live even if this lookup fails.
     permalink = None
