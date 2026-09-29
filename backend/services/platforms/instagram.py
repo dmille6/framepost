@@ -320,6 +320,20 @@ def _client() -> httpx.Client:
     return http_client.client(base_url=f"{GRAPH}/{API_VERSION}", timeout=60.0)
 
 
+def _auth(token: str) -> dict[str, str]:
+    """The token as an Authorization header, for GETs.
+
+    A GET's parameters are its URL, and httpx logs every request URL at INFO — so an
+    `access_token` query parameter put the live token in the worker's docker log on every
+    status poll. Meta's content-publishing guide sends this same token as
+    `Authorization: Bearer` to graph.instagram.com, and comments.py has read media,
+    comments and insights that way since August. POSTs keep the token in the form body:
+    a body is never part of the logged request line, so there is nothing to move.
+    The one exception is /refresh_access_token (see _refresh), documented query-only.
+    """
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _error_text(r: httpx.Response) -> str:
     """Extract Meta's error message; fall back to raw body."""
     try:
@@ -351,10 +365,8 @@ def connect(db: Session, *, access_token: str) -> PlatformCredential:
     access_token = access_token.strip()
     try:
         with _client() as c:
-            r = c.get("/me", params={
-                "fields": "user_id,username,account_type",
-                "access_token": access_token,
-            })
+            r = c.get("/me", params={"fields": "user_id,username,account_type"},
+                      headers=_auth(access_token))
     except Exception as e:
         raise InstagramError(f"Couldn't reach graph.instagram.com: {e}") from e
     if r.status_code >= 400:
@@ -442,7 +454,10 @@ def _refresh(db: Session, row: PlatformCredential) -> None:
     """Swap the current token for a fresh 60-day one. Token must be ≥24h old — Meta
     rejects refreshing brand-new tokens, which is why connect() doesn't refresh."""
     token = decrypt_token(row.access_token)
-    # Note: refresh_access_token is unversioned (no /vXX.X prefix).
+    # Note: refresh_access_token is unversioned (no /vXX.X prefix). It stays a query
+    # parameter: Meta documents this endpoint only in that form, and a refresh that fails
+    # on an undocumented header is how a token quietly expires. The logging redaction
+    # (services/redact.py) is what keeps this one URL out of the log.
     with http_client.client(base_url=GRAPH, timeout=30.0) as c:
         r = c.get("/refresh_access_token", params={
             "grant_type": "ig_refresh_token",
@@ -1153,7 +1168,7 @@ def _container_status(container_id: str, token: str) -> str | None:
     discarding it on that basis could publish a second copy of a post already live.
     """
     with _client() as c:
-        r = c.get(f"/{container_id}", params={"fields": "status_code", "access_token": token})
+        r = c.get(f"/{container_id}", params={"fields": "status_code"}, headers=_auth(token))
     if r.status_code >= 500:
         _raise_api_error(r, "container status check")
     if r.status_code >= 400:
@@ -1214,12 +1229,11 @@ def _find_published(
         params = {
             "fields": "id,caption,media_type,timestamp,permalink",
             "limit": RECOVERY_PAGE_SIZE,
-            "access_token": token,
         }
         if after:
             params["after"] = after
         with _client() as c:
-            r = c.get(f"/{ig_user_id}/media", params=params)
+            r = c.get(f"/{ig_user_id}/media", params=params, headers=_auth(token))
         if r.status_code >= 400:
             _raise_api_error(r, "recent media lookup")
         body = r.json()
@@ -1265,7 +1279,7 @@ def _count_children(media_id: str, token: str) -> int | None:
     """
     try:
         with _client() as c:
-            r = c.get(f"/{media_id}", params={"fields": "children{id}", "access_token": token})
+            r = c.get(f"/{media_id}", params={"fields": "children{id}"}, headers=_auth(token))
         if r.status_code >= 400:
             return None
         return len(((r.json().get("children") or {}).get("data")) or [])
@@ -1284,10 +1298,8 @@ def _await_container(
     for _attempt in range(tries):
         heartbeat()
         with _client() as c:
-            r = c.get(f"/{container_id}", params={
-                "fields": "status_code",
-                "access_token": token,
-            })
+            r = c.get(f"/{container_id}", params={"fields": "status_code"},
+                      headers=_auth(token))
         if r.status_code >= 400:
             _raise_api_error(r, "container status check")
         status_code = r.json().get("status_code")
@@ -1336,7 +1348,7 @@ def _publish_container(ig_user_id: str, container_id: str, token: str) -> tuple[
     permalink = None
     try:
         with _client() as c:
-            r = c.get(f"/{media_id}", params={"fields": "permalink", "access_token": token})
+            r = c.get(f"/{media_id}", params={"fields": "permalink"}, headers=_auth(token))
         if r.status_code < 400:
             permalink = r.json().get("permalink")
     except Exception:
@@ -1350,10 +1362,8 @@ def publishing_quota(db: Session) -> dict:
     token = decrypt_token(row.access_token)
     ig_user_id = json.loads(row.extra_json or "{}").get("ig_user_id")
     with _client() as c:
-        r = c.get(f"/{ig_user_id}/content_publishing_limit", params={
-            "fields": "quota_usage,config",
-            "access_token": token,
-        })
+        r = c.get(f"/{ig_user_id}/content_publishing_limit",
+                  params={"fields": "quota_usage,config"}, headers=_auth(token))
     if r.status_code >= 400:
         _raise_api_error(r, "quota lookup")
     entries = r.json().get("data") or [{}]

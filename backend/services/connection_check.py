@@ -96,8 +96,8 @@ def _raise_for(platform: str, r) -> None:
 
 def _verify_instagram(db: Session, cred: PlatformCredential) -> None:
     with instagram._client() as c:
-        r = c.get("/me", params={"fields": "user_id,username",
-                                 "access_token": decrypt_token(cred.access_token)})
+        r = c.get("/me", params={"fields": "user_id,username"},
+                  headers=instagram._auth(decrypt_token(cred.access_token)))
     _raise_for("instagram", r)
 
 

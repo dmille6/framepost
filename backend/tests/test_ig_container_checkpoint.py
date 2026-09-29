@@ -54,7 +54,12 @@ class FakeMeta:
             def __enter__(self): return self
             def __exit__(self, *a): return False
             def post(self, path, data=None): return meta._post(path, dict(data or {}))
-            def get(self, path, params=None): return meta._get(path, dict(params or {}))
+            def get(self, path, params=None, headers=None):
+                # A GET's params are its URL, which httpx logs: the token rides in the
+                # header instead, on every lookup this fake serves.
+                assert "access_token" not in (params or {})
+                assert (headers or {}).get("Authorization", "").startswith("Bearer ")
+                return meta._get(path, dict(params or {}))
 
         return Client()
 

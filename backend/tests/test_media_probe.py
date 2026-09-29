@@ -159,7 +159,7 @@ class _Meta:
                     return httpx.Response(200, json={"id": "c1"})
                 return httpx.Response(200, json={"id": "m1"})
 
-            def get(self, path, params=None):
+            def get(self, path, params=None, headers=None):
                 if params and params.get("fields") == "status_code":
                     return httpx.Response(200, json={"status_code": "FINISHED"})
                 return httpx.Response(200, json={"permalink": "https://instagram.com/p/m1/"})

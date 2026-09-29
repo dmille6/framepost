@@ -181,7 +181,7 @@ def test_instagram_verifier_uses_get_me(db, monkeypatch):
     class Client:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def get(self, path, params=None):
+        def get(self, path, params=None, headers=None):
             seen.append(path)
             return httpx.Response(400, json={"error": {"code": 190}})
 
@@ -241,7 +241,7 @@ def test_the_verifier_parses_metas_error_code(db, monkeypatch):
     class Client:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def get(self, path, params=None):
+        def get(self, path, params=None, headers=None):
             return httpx.Response(400, json={"error": {
                 "message": "Application request limit reached", "type": "OAuthException",
                 "code": 4}})

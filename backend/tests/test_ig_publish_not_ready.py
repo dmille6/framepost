@@ -58,7 +58,7 @@ def _client_returning(responses, calls=None):
                 calls.append(data.get("creation_id"))
             return seq.pop(0) if seq else _published()
 
-        def get(self, path, params=None):
+        def get(self, path, params=None, headers=None):
             return FakeResponse(200, {"permalink": "https://instagram.com/p/abc/"})
 
     return lambda: FakeClient()
