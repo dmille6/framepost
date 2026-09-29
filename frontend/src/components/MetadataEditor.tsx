@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 
@@ -24,6 +24,7 @@ import {
   type PostUpdate,
   type Venue,
 } from "../api/client";
+import type { EditorAutosave } from "../hooks/useDraftAutosaves";
 import AISuggestPanel from "./AISuggestPanel";
 import IgCropStudio, { type CropRect, type FocalPoint } from "./IgCropStudio";
 import ApplyTemplateDialog from "./ApplyTemplateDialog";
@@ -107,6 +108,8 @@ type Props = {
   onDelete?: () => void;
   scheduleLabel?: string;
   saving: boolean;
+  autosave?: EditorAutosave;
+  onSaveNext?: () => void;
 };
 
 // Fallbacks only. The live values come from Settings -> General
@@ -138,33 +141,62 @@ export function formatTemplateDate(iso: string | null | undefined): string | nul
   return d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
 
-export default function MetadataEditor({ post, onSave, onSchedule, onDelete, scheduleLabel, saving }: Props) {
-  const [title, setTitle] = useState(post.title ?? "");
-  const [description, setDescription] = useState(post.description ?? "");
-  const [tags, setTags] = useState(post.tags ?? "");
-  const [privacy, setPrivacy] = useState(post.privacy ?? "public");
-  const [safety, setSafety] = useState(post.safety_level ?? "safe");
-  const [contentType, setContentType] = useState(post.content_type ?? "photo");
-  const [show, setShow] = useState(post.show ?? "");
-  const [city, setCity] = useState(post.city ?? "");
-  const [altText, setAltText] = useState(post.alt_text ?? "");
-  const [includeExif, setIncludeExif] = useState(post.include_exif ?? false);
-  const [venue, setVenue] = useState<Venue | null>(null);
+function useEditorField<T>(
+  autosave: EditorAutosave | undefined,
+  name: string,
+  initial: T,
+  changes: (value: T) => Partial<EditorChanges>,
+  initialChanges?: Partial<EditorChanges>,
+): [T, (value: T) => void, (value: T) => void] {
+  const [value, setValue] = useState<T>(() =>
+    autosave?.view.has(name) ? autosave.view.get(name) as T : initial,
+  );
+  return [value, (next) => {
+    autosave?.change(name, next, changes(next),
+      !autosave.view.has(name) && initialChanges ? initialChanges : changes(value));
+    setValue(next);
+  }, (loaded) => {
+    // A query response may hydrate untouched fields, never a photographer's edits.
+    if (!autosave?.view.has(name)) setValue(loaded);
+  }];
+}
+
+const subscribeIdle = () => () => {};
+const idleSnapshot = () => 0;
+
+export default function MetadataEditor({ post, onSave, onSchedule, onDelete, scheduleLabel, saving, autosave, onSaveNext }: Props) {
+  useSyncExternalStore(autosave?.subscribe ?? subscribeIdle, autosave?.snapshot ?? idleSnapshot);
+  const [title, setTitle, loadTitle] = useEditorField(autosave, "title", post.title ?? "", (v) => ({ title: v.trim() || null }));
+  const [description, setDescription, loadDescription] = useEditorField(autosave, "description", post.description ?? "", (v) => ({ description: v.trim() || null }));
+  const [tags, setTags, loadTags] = useEditorField(autosave, "tags", post.tags ?? "", (v) => ({ tags: v.trim() || null }));
+  const [privacy, setPrivacy, loadPrivacy] = useEditorField(autosave, "privacy", post.privacy ?? "private", (v) => ({ privacy: v }));
+  const [safety, setSafety, loadSafety] = useEditorField(autosave, "safety", post.safety_level ?? "safe", (v) => ({ safety_level: v }));
+  const [contentType, setContentType, loadContentType] = useEditorField(autosave, "contentType", post.content_type ?? "photo", (v) => ({ content_type: v }));
+  const [show, setShow, loadShow] = useEditorField(autosave, "show", post.show ?? "", (v) => ({ show: v.trim() || null }));
+  const [city, setCity, loadCity] = useEditorField(autosave, "city", post.city ?? "", (v) => ({ city: v.trim() || null }));
+  const [altText, setAltText, loadAltText] = useEditorField(autosave, "altText", post.alt_text ?? "", (v) => ({ alt_text: v.trim() || null }));
+  const [includeExif, setIncludeExif, loadIncludeExif] = useEditorField(autosave, "includeExif", post.include_exif ?? false, (v) => ({ include_exif: v }));
+  const [venue, setVenue, loadVenue] = useEditorField<Venue | null>(autosave, "venue", null, (v) => ({ venue_id: v?.id ?? null }));
   // IG auto-transform: fit mode + crop-window nudge. Offset null = face-anchored auto.
-  const [igFit, setIgFit] = useState<"crop" | "pad" | "pad_blur">(post.ig_fit ?? "crop");
+  const [igFit, setIgFit] = useEditorField<"crop" | "pad" | "pad_blur">(autosave, "igFit", post.ig_fit ?? "crop", (v) => ({ ig_fit: v === "crop" ? null : v }));
   const [igOffset] = useState<number | null>(post.ig_crop_offset);
   // A rect wins over the legacy offset; null means face-anchored auto.
-  const [igRect, setIgRect] = useState<CropRect | null>(
+  const [igRect, setIgRect] = useEditorField<CropRect | null>(autosave, "igRect",
     post.ig_crop_x != null && post.ig_crop_y != null &&
     post.ig_crop_w != null && post.ig_crop_h != null
       ? { x: post.ig_crop_x, y: post.ig_crop_y, w: post.ig_crop_w, h: post.ig_crop_h }
       : null,
+    (v) => ({ ig_crop_x: v?.x ?? null, ig_crop_y: v?.y ?? null,
+      ig_crop_w: v?.w ?? null, ig_crop_h: v?.h ?? null, ig_crop_ratio: v ? igRatioKey : null }),
+    { ig_crop_x: post.ig_crop_x ?? null, ig_crop_y: post.ig_crop_y ?? null,
+      ig_crop_w: post.ig_crop_w ?? null, ig_crop_h: post.ig_crop_h ?? null, ig_crop_ratio: post.ig_crop_ratio ?? null },
   );
   // Where auto anchors. null hands it back to face detection.
-  const [igFocal, setIgFocal] = useState<FocalPoint | null>(
+  const [igFocal, setIgFocal] = useEditorField<FocalPoint | null>(autosave, "igFocal",
     post.ig_focal_x != null && post.ig_focal_y != null
       ? { x: post.ig_focal_x, y: post.ig_focal_y }
       : null,
+    (v) => ({ ig_focal_x: v?.x ?? null, ig_focal_y: v?.y ?? null }),
   );
   // The learned floor decides the target ratio; the studio mirrors the worker's rule.
   const { data: appCfg } = useQuery({ queryKey: ["config"], queryFn: fetchAppConfig });
@@ -181,17 +213,18 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   // Routing decides groups unless a human has taken over. `groups_overridden` is the
   // server's record of that takeover; the local flag also flips when the photographer
   // clicks through to the checklist in this session, before anything is saved.
-  const [manualGroups, setManualGroups] = useState(false);
+  const [manualGroups, setManualGroups, loadManualGroups] = useEditorField(autosave, "manualGroups", Boolean(post.groups_overridden),
+    (v): Partial<EditorChanges> => ({ use_routing: !v, group_ids: [...groupIds] }));
   useEffect(() => {
-    setManualGroups(Boolean(post.groups_overridden));
+    loadManualGroups(Boolean(post.groups_overridden));
   }, [post.id, post.groups_overridden]);
 
   useEffect(() => {
     if (post.venue_id) {
       const v = allVenues.find((x) => x.id === post.venue_id);
-      if (v) setVenue(v);
+      if (v) loadVenue(v);
     } else {
-      setVenue(null);
+      loadVenue(null);
     }
   }, [post.id, post.venue_id, allVenues]);
 
@@ -232,17 +265,18 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   });
   const { data: aiStatus } = useQuery({ queryKey: ["ai-status"], queryFn: fetchAIStatus });
 
-  const [albumIds, setAlbumIds] = useState<Set<string>>(new Set());
-  const [groupIds, setGroupIds] = useState<Set<string>>(new Set());
-  const [profileIds, setProfileIds] = useState<Set<string>>(new Set());
-  const [performers, setPerformers] = useState<Performer[]>([]);
+  const [albumIds, setAlbumIds, loadAlbumIds] = useEditorField<Set<string>>(autosave, "albumIds", new Set(), (v) => ({ album_ids: [...v] }));
+  const [groupIds, setGroupIds, loadGroupIds] = useEditorField<Set<string>>(autosave, "groupIds", new Set(), (v): Partial<EditorChanges> => ({ group_ids: [...v], use_routing: !manualGroups }));
+  const [profileIds, setProfileIds, loadProfileIds] = useEditorField<Set<string>>(autosave, "profileIds", new Set(), (v) => ({ profile_ids: [...v] }));
+  const [performers, setPerformers, loadPerformers] = useEditorField<Performer[]>(autosave, "performers", [], (v) => ({ performer_ids: v.map((p) => p.id) }));
   const [lightboxOpen, setLightboxOpen] = useState(false);
   // Sixteen fields in a 380px rail asked the photographer to re-answer, per photo,
   // questions whose answer is now a default: city, destinations, privacy, groups. What
   // stays up top is what genuinely changes frame to frame.
   const [showMore, setShowMore] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
-  const [targetSet, setTargetSet] = useState<Set<string>>(new Set());
+  const [targetSet, setTargetSet, loadTargetSet] = useEditorField<Set<string>>(autosave, "targetSet", new Set(),
+    (v) => ({ target_platforms: setsEqual(v, defaultTargetSet) ? null : [...v] }));
 
   const { data: connectedPlatforms = [] } = useQuery({
     queryKey: ["connected-platforms"],
@@ -250,31 +284,31 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   });
 
   useEffect(() => {
-    setTitle(post.title ?? "");
-    setDescription(post.description ?? "");
-    setTags(post.tags ?? "");
-    setPrivacy(post.privacy ?? "private");
-    setSafety(post.safety_level ?? "safe");
-    setContentType(post.content_type ?? "photo");
-    setShow(post.show ?? "");
-    setCity(post.city ?? "");
-    setAltText(post.alt_text ?? "");
-    setIncludeExif(post.include_exif ?? false);
+    loadTitle(post.title ?? "");
+    loadDescription(post.description ?? "");
+    loadTags(post.tags ?? "");
+    loadPrivacy(post.privacy ?? "private");
+    loadSafety(post.safety_level ?? "safe");
+    loadContentType(post.content_type ?? "photo");
+    loadShow(post.show ?? "");
+    loadCity(post.city ?? "");
+    loadAltText(post.alt_text ?? "");
+    loadIncludeExif(post.include_exif ?? false);
   }, [post.id]);
 
-  useEffect(() => { setAlbumIds(new Set(postAlbums)); }, [post.id, postAlbums.join(",")]);
-  useEffect(() => { setGroupIds(new Set(postGroups)); }, [post.id, postGroups.join(",")]);
-  useEffect(() => { setProfileIds(new Set(postProfiles)); }, [post.id, postProfiles.join(",")]);
-  useEffect(() => { setPerformers(postPerformers); }, [post.id, postPerformers.map((p) => p.id).join(",")]);
+  useEffect(() => { loadAlbumIds(new Set(postAlbums)); }, [post.id, postAlbums.join(",")]);
+  useEffect(() => { loadGroupIds(new Set(postGroups)); }, [post.id, postGroups.join(",")]);
+  useEffect(() => { loadProfileIds(new Set(postProfiles)); }, [post.id, postProfiles.join(",")]);
+  useEffect(() => { loadPerformers(postPerformers); }, [post.id, postPerformers.map((p) => p.id).join(",")]);
 
   // Default for target_platforms: if post has an explicit list, use it; otherwise default
   // to all connected platforms with default_target=on (which the user already configured
   // in Settings → Platforms).
   useEffect(() => {
     if (post.target_platforms !== null && post.target_platforms !== undefined) {
-      setTargetSet(new Set(post.target_platforms));
+      loadTargetSet(new Set(post.target_platforms));
     } else {
-      setTargetSet(
+      loadTargetSet(
         new Set(connectedPlatforms.filter((p) => p.default_target).map((p) => p.platform)),
       );
     }
@@ -288,7 +322,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       ? new Set(post.target_platforms)
       : defaultTargetSet;
 
-  const dirty =
+  const manualDirty =
     (title || "") !== (post.title ?? "") ||
     (description || "") !== (post.description ?? "") ||
     (tags || "") !== (post.tags ?? "") ||
@@ -312,6 +346,8 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
     (igRect?.h ?? null) !== (post.ig_crop_h ?? null) ||
     (igFocal?.x ?? null) !== (post.ig_focal_x ?? null) ||
     (igFocal?.y ?? null) !== (post.ig_focal_y ?? null);
+
+  const dirty = autosave ? autosave.pending : manualDirty;
 
   // Blockers stop scheduling; warnings never do. That split is the server's
   // (`deliverable` vs `ready`) and is not re-derived here -- a second copy of the rules
@@ -403,7 +439,22 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const defaultProfile = profiles.find((p) => p.is_default);
 
   return (
-    <div className="fp-card" style={{ display: "grid", gap: 16 }}>
+    <div className="fp-card" style={{ display: "grid", gap: 16 }} onKeyDown={(e) => {
+      if (autosave && (e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        onSaveNext?.();
+      }
+    }}>
+      {autosave && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>Edit draft</span>
+          <span role="status" style={{ fontSize: 12, color: autosave.error ? "var(--danger)" : "var(--text-dim)" }}>
+            {autosave.status === "error" ? <>Couldn't save · <button className="fp-link" onClick={() => void autosave.flush()}>Retry</button></>
+              : autosave.status === "saving" ? "Saving…" : "Saved"}
+          </span>
+        </div>
+      )}
+      {autosave?.error && <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>{autosave.error}</div>}
       <button
         type="button"
         onClick={() => setLightboxOpen(true)}
@@ -859,19 +910,19 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           <button
             className="fp-btn-ghost"
             onClick={onSchedule}
-            disabled={dirty || saving || blocked}
+            disabled={autosave ? (!dirty && blocked) : dirty || saving || blocked}
             title={blocked ? blockedReason : undefined}
           >
             {scheduleLabel ?? "Schedule on Flickr"}
           </button>
-          <button className="fp-btn" disabled={!dirty || saving} onClick={handleSave}>
+          {!autosave && <button className="fp-btn" disabled={!dirty || saving} onClick={handleSave}>
             {saving ? "Saving…" : "Save"}
-          </button>
+          </button>}
         </div>
       </div>
-      {(dirty || blocked) && (
+      {((!autosave && dirty) || blocked) && (
         <div style={{ fontSize: 11, color: "var(--text-fade)", textAlign: "right", marginTop: -8 }}>
-          {dirty ? "Save before scheduling." : blockedReason}
+          {!autosave && dirty ? "Save before scheduling." : blockedReason}
         </div>
       )}
 

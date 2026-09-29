@@ -16,7 +16,20 @@ function harness() {
   const state = [];
   let cursor = 0;
   const pending = [];
+  const effects = [];
+  const calls = [];
   const drafts = [{ id: 'blocked', title: 'In a reel', created_at: '2026-09-28' }, { id: 'free', title: 'Free', created_at: '2026-09-27' }];
+  const saves = {
+    sessions: new Map(),
+    get(id) {
+      if (!this.sessions.has(id)) this.sessions.set(id, {
+        view: new Map(), flush: async () => { calls.push(["flush", id]); return true; },
+        cancel: async () => { calls.push(["cancel", id]); }, resume() {},
+      });
+      return this.sessions.get(id);
+    },
+    release(id, session) { calls.push(["release", id]); void session.flush(); },
+  };
   const api = new Proxy({
     ApiError: Error,
     deletePost: async (id) => {
@@ -32,10 +45,16 @@ function harness() {
           state[index] = typeof value === 'function' ? value(state[index]) : value;
         }];
       },
-      useMemo: fn => fn(), useEffect: () => {},
+      useMemo: fn => fn(), useEffect: (fn, deps) => {
+        const index = cursor++;
+        const previous = state[index];
+        if (!previous || deps.some((v, i) => !Object.is(v, previous.deps[i]))) {
+          effects.push(() => { previous?.cleanup?.(); state[index] = { deps, cleanup: fn() }; });
+        }
+      },
     };
     if (name === '@tanstack/react-query') return {
-      useQueryClient: () => ({ invalidateQueries() {}, setQueryData() {} }),
+      useQueryClient: () => ({ invalidateQueries() {}, setQueryData() {}, getQueryData: () => drafts }),
       useQuery: ({ queryKey }) => ({ data: queryKey[0] === 'drafts' ? drafts : [] }),
       useMutation: options => {
         const mutateAsync = async (id) => {
@@ -49,6 +68,7 @@ function harness() {
       },
     };
     if (name === '../api/client') return api;
+    if (name === '../hooks/useDraftAutosaves') return { useDraftAutosaves: () => saves };
     if (name === '../hooks/usePageTitle') return { usePageTitle() {} };
     if (name === '../lib/shoots') return { batchKey: () => null };
     if (name.startsWith('../components/')) return { __esModule: true,
@@ -58,7 +78,9 @@ function harness() {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', compiled)(load, module, module.exports);
   return {
-    render: () => { cursor = 0; return module.exports.default(); },
+    render: () => { cursor = 0; const tree = module.exports.default(); effects.splice(0).forEach(fn => fn()); return tree; },
+    calls, saves,
+    unmount: () => state.forEach(s => s?.cleanup?.()),
     settle: async () => { await Promise.all(pending); await new Promise(setImmediate); },
   };
 }
@@ -99,4 +121,71 @@ test('bulk deletion displays conflicts and keeps only failed drafts selected', a
     assert.equal(cards.find(e => e.props.post.id === 'blocked').props.isChecked, true);
     assert.equal(cards.find(e => e.props.post.id === 'free').props.isChecked, false);
   } finally { globalThis.confirm = oldConfirm; }
+});
+
+
+function cards(tree) { return elements(tree).filter(e => e.type === 'DraftCard'); }
+function editor(tree) { return elements(tree).find(e => e.type === 'MetadataEditor'); }
+
+test('switch and close release the old editor and flush it without awaiting the network', () => {
+  const page = harness();
+  cards(page.render())[0].props.onSelect();
+  page.render();
+  cards(page.render())[1].props.onSelect();
+  assert.equal(editor(page.render()).props.post.id, 'free');
+  assert.ok(page.calls.some(([action, id]) => action === 'flush' && id === 'blocked'));
+  button(page.render(), 'Close editor').props.onClick();
+  assert.equal(editor(page.render()), undefined);
+  assert.ok(page.calls.some(([action, id]) => action === 'flush' && id === 'free'));
+});
+
+test('delete another draft flushes the editor; delete this draft cancels its pending save', async () => {
+  const page = harness();
+  cards(page.render())[0].props.onSelect();
+  cards(page.render())[1].props.onDelete();
+  await page.settle();
+  assert.ok(page.calls.some(([action, id]) => action === 'flush' && id === 'blocked'));
+  editor(page.render()).props.onDelete();
+  await page.settle();
+  assert.ok(page.calls.some(([action, id]) => action === 'cancel' && id === 'blocked'));
+});
+
+test('save-next waits for success, uses the filtered order, and stays on failed saves', async () => {
+  const page = harness();
+  cards(page.render())[0].props.onSelect();
+  const save = page.saves.get('blocked');
+  save.flush = async () => false;
+  editor(page.render()).props.onSaveNext();
+  await page.settle();
+  assert.equal(editor(page.render()).props.post.id, 'blocked');
+  let resolve;
+  save.flush = () => new Promise(yes => { resolve = yes; });
+  editor(page.render()).props.onSaveNext();
+  assert.equal(editor(page.render()).props.post.id, 'blocked');
+  resolve(true);
+  await page.settle();
+  assert.equal(editor(page.render()).props.post.id, 'free');
+  const input = elements(page.render()).find(e => e.type === 'input' && e.props.placeholder?.startsWith('Search'));
+  input.props.onChange({ target: { value: 'Free' } });
+  editor(page.render()).props.onSaveNext();
+  await page.settle();
+  assert.equal(editor(page.render()).props.post.id, 'free');
+});
+
+test('Schedule waits for a successful flush before opening the scheduling dialog', async () => {
+  const page = harness();
+  cards(page.render())[0].props.onSelect();
+  const save = page.saves.get('blocked');
+  let resolve;
+  save.flush = () => new Promise(yes => { resolve = yes; });
+  editor(page.render()).props.onSchedule();
+  assert.equal(elements(page.render()).find(e => e.type === 'ScheduleDialog'), undefined);
+  resolve(false);
+  await page.settle();
+  assert.equal(elements(page.render()).find(e => e.type === 'ScheduleDialog'), undefined);
+  assert.match(text(page.render()), /Couldn't save/);
+  save.flush = async () => true;
+  editor(page.render()).props.onSchedule();
+  await page.settle();
+  assert.ok(elements(page.render()).find(e => e.type === 'ScheduleDialog'));
 });

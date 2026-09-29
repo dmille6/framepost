@@ -9,14 +9,8 @@ import {
   listScheduled,
   type Post,
   schedulePost,
-  setPostAlbums,
-  setPostGroups,
-  setPostPerformers,
-  setPostProfiles,
-  updatePost,
   uploadFileWithProgress,
 } from "../api/client";
-import type { EditorChanges } from "../components/MetadataEditor";
 
 import BulkEditDialog from "../components/BulkEditDialog";
 import FindReplaceDialog from "../components/FindReplaceDialog";
@@ -24,7 +18,7 @@ import CarouselDialog from "../components/CarouselDialog";
 import IgCropFilmstrip from "../components/IgCropFilmstrip";
 import DraftCard from "../components/DraftCard";
 import EmptyState from "../components/EmptyState";
-import MetadataEditor, { editorChangesToPatch } from "../components/MetadataEditor";
+import MetadataEditor from "../components/MetadataEditor";
 import PageHeader from "../components/PageHeader";
 import QueueTabs from "../components/QueueTabs";
 import ReelFromDraftsDialog from "../components/ReelFromDraftsDialog";
@@ -35,6 +29,7 @@ import StatsRow from "../components/StatsRow";
 import Topbar from "../components/Topbar";
 import UploadZone, { type UploadItem } from "../components/UploadZone";
 import WatchFolderStatus from "../components/WatchFolderStatus";
+import { useDraftAutosaves } from "../hooks/useDraftAutosaves";
 import { usePageTitle } from "../hooks/usePageTitle";
 import { batchKey } from "../lib/shoots";
 
@@ -84,6 +79,7 @@ function computeBatches(drafts: Post[]): { key: string; label: string; ids: stri
 export default function DraftQueue() {
   usePageTitle("Drafts");
   const qc = useQueryClient();
+  const saves = useDraftAutosaves(qc);
   const draftsQuery = useQuery({ queryKey: ["drafts"], queryFn: listDrafts });
   const drafts = draftsQuery.data ?? [];
 
@@ -107,7 +103,7 @@ export default function DraftQueue() {
     refetchInterval: 60_000,
   });
 
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Selected post — prefer the matching one from the (filtered) visible list, fall back to
   // the unfiltered drafts list, then the first visible if anything remains.
@@ -196,30 +192,47 @@ export default function DraftQueue() {
     setCheckedIds(new Set());
   }
 
-  const updateMutation = useMutation({
-    mutationFn: async ({ id, changes }: { id: string; changes: EditorChanges }) => {
-      const body = editorChangesToPatch(changes);
-      const saved = await updatePost(id, body);
-      await setPostAlbums(id, changes.album_ids);
-      await setPostGroups(id, changes.group_ids, changes.use_routing);
-      await setPostProfiles(id, changes.profile_ids);
-      await setPostPerformers(id, changes.performer_ids);
-      return saved;
-    },
-    onSuccess: (saved) => {
-      qc.setQueryData<Post[]>(["drafts"], (old) =>
-        (old ?? []).map((p) => (p.id === saved.id ? saved : p)),
-      );
-      void qc.invalidateQueries({ queryKey: ["post-albums", saved.id] });
-      void qc.invalidateQueries({ queryKey: ["post-groups", saved.id] });
-      void qc.invalidateQueries({ queryKey: ["post-profiles", saved.id] });
-      void qc.invalidateQueries({ queryKey: ["post-performers", saved.id] });
-      void qc.invalidateQueries({ queryKey: ["merged-tags", saved.id] });
-      void qc.invalidateQueries({ queryKey: ["venues"] });
-      void qc.invalidateQueries({ queryKey: ["recent-shows"] });
-      void qc.invalidateQueries({ queryKey: ["recent-cities"] });
-    },
-  });
+  const selectedSave = selected ? saves.get(selected.id) : undefined;
+  useEffect(() => {
+    if (!selectedSave || !selectedId) return;
+    selectedSave.attached = true;
+    return () => {
+      selectedSave.attached = false;
+      saves.release(selectedId, selectedSave);
+    };
+  }, [saves, selectedId, selectedSave]);
+
+  async function prepareSchedule(id: string) {
+    if (!await saves.get(id).flush()) throw new Error("Couldn't save. Retry before scheduling.");
+    const post = qc.getQueryData<Post[]>(["drafts"])?.find((p) => p.id === id);
+    if (post?.preflight && !post.preflight.deliverable) {
+      throw new Error(post.preflight.blockers.map((b) => b.message).join(" · "));
+    }
+    return post;
+  }
+
+  function saveNext() {
+    if (!selected || !selectedSave) return;
+    // Capture the filtered order before the save changes title/readiness and sorts it.
+    const index = visibleDrafts.findIndex((p) => p.id === selected.id);
+    const next = index >= 0 ? visibleDrafts[index + 1]?.id : undefined;
+    void selectedSave.flush().then((ok) => {
+      if (ok && next) setSelectedId((current) => current === selected.id ? next : current);
+    });
+  }
+
+  async function openDraftAction(open: () => void) {
+    // Batch editors and Smart Fill must see the latest saved draft, and must not
+    // compete with an older editor's pending PATCH for the same fields.
+    const sessions = [...saves.sessions.values()];
+    const results = await Promise.all(sessions.map((session) => session.flush()));
+    if (results.some((ok) => !ok)) {
+      setActionError("Couldn't save a draft. Retry its save before continuing.");
+      return;
+    }
+    setSelectedId(null);
+    open();
+  }
 
   const scheduleMutation = useMutation({
     mutationFn: ({ id, iso }: { id: string; iso: string }) => schedulePost(id, iso),
@@ -231,9 +244,21 @@ export default function DraftQueue() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => deletePost(id),
+    mutationFn: async (id: string) => {
+      if (selectedId && selectedId !== id) void saves.get(selectedId).flush();
+      const session = saves.sessions.get(id);
+      await session?.cancel();
+      try {
+        const result = await deletePost(id);
+        saves.sessions.delete(id);
+        return result;
+      } catch (error) {
+        session?.resume();
+        throw error;
+      }
+    },
     onError: (error) => {
-      setDeleteError(error instanceof Error ? error.message : "Could not delete the draft.");
+      setActionError(error instanceof Error ? error.message : "Could not delete the draft.");
     },
     onSuccess: (_data, id) => {
       void qc.invalidateQueries({ queryKey: ["drafts"] });
@@ -251,8 +276,7 @@ export default function DraftQueue() {
   async function deleteSelected() {
     const ids = [...checkedIds];
     if (ids.length === 0) return;
-    if (!confirm(`Delete ${ids.length} draft${ids.length === 1 ? "" : "s"}? This removes original + thumbnail files. Photos already on Flickr stay there.`)) return;
-    setDeleteError(null);
+    setActionError(null);
     let failed = false;
     for (const id of ids) {
       try {
@@ -357,12 +381,19 @@ export default function DraftQueue() {
           subtitle="Lightroom export → import pipeline → review → schedule. The pipeline pre-fills title, description, and tags from any IPTC metadata it finds."
         />
 
-        {deleteError && (
+        {actionError && (
           <div role="alert" style={{ color: "var(--danger)", fontSize: 13, marginBottom: 16 }}>
-            {deleteError}
-            <button className="fp-btn" onClick={() => setDeleteError(null)} style={{ marginLeft: 12 }}>Dismiss</button>
+            {actionError}
+            <button className="fp-btn" onClick={() => setActionError(null)} style={{ marginLeft: 12 }}>Dismiss</button>
           </div>
         )}
+
+        {[...saves.sessions].filter(([id, session]) => id !== selectedId && session.error).map(([id, session]) => (
+          <div key={id} role="alert" style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>
+            Couldn't save {drafts.find((p) => p.id === id)?.title || drafts.find((p) => p.id === id)?.original_filename || id}: {session.error}
+            <button className="fp-btn-ghost" onClick={() => void session.flush()} style={{ marginLeft: 8 }}>Retry</button>
+          </div>
+        ))}
 
         <QueueTabs draftCount={drafts.length} scheduledCount={scheduledPending.length} />
 
@@ -405,7 +436,7 @@ export default function DraftQueue() {
                         server-side and also reaches scheduled posts. */}
                     <button
                       className="fp-btn-ghost"
-                      onClick={() => setFindReplaceOpen(true)}
+                      onClick={() => void openDraftAction(() => setFindReplaceOpen(true))}
                       title="Fix a typo across many drafts and scheduled posts at once"
                       style={{ padding: "6px 12px", fontSize: 13 }}
                     >
@@ -490,7 +521,7 @@ export default function DraftQueue() {
                       <button
                         className="fp-btn-ghost"
                         disabled={checkedIds.size === 0}
-                        onClick={() => setBulkEditOpen(true)}
+                        onClick={() => void openDraftAction(() => setBulkEditOpen(true))}
                         style={{ padding: "6px 14px", fontSize: 13 }}
                       >
                         Bulk Edit ({checkedIds.size})
@@ -498,7 +529,7 @@ export default function DraftQueue() {
                       <button
                         className="fp-btn-ghost"
                         disabled={checkedIds.size === 0}
-                        onClick={() => setFilmstripOpen(true)}
+                        onClick={() => void openDraftAction(() => setFilmstripOpen(true))}
                         title="Crop the selection to one Instagram ratio, one frame at a time"
                         style={{ padding: "6px 14px", fontSize: 13 }}
                       >
@@ -507,7 +538,7 @@ export default function DraftQueue() {
                       <button
                         className="fp-btn-ghost"
                         disabled={checkedIds.size < 2}
-                        onClick={() => setReelOpen(true)}
+                        onClick={() => void openDraftAction(() => setReelOpen(true))}
                         title="Build a reel from the selection and schedule it — reels reach people who don't follow you, which a carousel cannot"
                         style={{ padding: "6px 14px", fontSize: 13 }}
                       >
@@ -516,7 +547,7 @@ export default function DraftQueue() {
                       <button
                         className="fp-btn-ghost"
                         disabled={checkedIds.size < 2}
-                        onClick={() => setCarouselOpen(true)}
+                        onClick={() => void openDraftAction(() => setCarouselOpen(true))}
                         title="Publish the selection as one swipeable Instagram post. Best when the order tells a sequence; otherwise a reel reaches further."
                         style={{ padding: "6px 14px", fontSize: 13, opacity: 0.75 }}
                       >
@@ -525,7 +556,7 @@ export default function DraftQueue() {
                       <button
                         className="fp-btn"
                         disabled={checkedIds.size === 0}
-                        onClick={() => setSmartFillOpen(true)}
+                        onClick={() => void openDraftAction(() => setSmartFillOpen(true))}
                         style={{ padding: "6px 14px", fontSize: 13 }}
                       >
                         Smart Fill ({checkedIds.size})
@@ -632,20 +663,23 @@ export default function DraftQueue() {
 
             {selected && (
               <div style={{ position: "sticky", top: 80 }}>
+                <button className="fp-btn-ghost" onClick={() => setSelectedId(null)} style={{ marginBottom: 8 }}>Close editor</button>
                 <MetadataEditor
                   key={selected.id}
                   post={selected}
-                  saving={updateMutation.isPending}
-                  onSave={async (changes) => {
-                    await updateMutation.mutateAsync({ id: selected.id, changes });
+                  saving={false}
+                  autosave={selectedSave}
+                  onSave={async () => { await selectedSave?.flush(); }}
+                  onSaveNext={saveNext}
+                  onSchedule={() => {
+                    setActionError(null);
+                    void prepareSchedule(selected.id).then((post) => {
+                      if (post) setScheduling(post);
+                    }).catch((error) => setActionError(error.message));
                   }}
-                  onSchedule={() => setScheduling(selected)}
                   onDelete={() => {
-                    const label = selected.title || selected.original_filename || "this draft";
-                    if (confirm(`Delete "${label}"? Removes original + thumbnail files. If it's already on Flickr, the Flickr photo stays.`)) {
-                      setDeleteError(null);
-                      deleteMutation.mutate(selected.id);
-                    }
+                    setActionError(null);
+                    deleteMutation.mutate(selected.id);
                   }}
                 />
               </div>
@@ -659,6 +693,7 @@ export default function DraftQueue() {
           postTitle={scheduling.title || scheduling.original_filename || "(untitled)"}
           onCancel={() => setScheduling(null)}
           onSubmit={async (iso) => {
+            await prepareSchedule(scheduling.id);
             await scheduleMutation.mutateAsync({ id: scheduling.id, iso });
           }}
         />
