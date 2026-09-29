@@ -147,11 +147,13 @@ function useEditorField<T>(
   initial: T,
   changes: (value: T) => Partial<EditorChanges>,
   initialChanges?: Partial<EditorChanges>,
+  editable: () => boolean = () => true,
 ): [T, (value: T) => void, (value: T) => void] {
   const [value, setValue] = useState<T>(() =>
     autosave?.view.has(name) ? autosave.view.get(name) as T : initial,
   );
   return [value, (next) => {
+    if (!editable()) return;
     autosave?.change(name, next, changes(next),
       !autosave.view.has(name) && initialChanges ? initialChanges : changes(value));
     setValue(next);
@@ -214,7 +216,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   // server's record of that takeover; the local flag also flips when the photographer
   // clicks through to the checklist in this session, before anything is saved.
   const [manualGroups, setManualGroups, loadManualGroups] = useEditorField(autosave, "manualGroups", Boolean(post.groups_overridden),
-    (v): Partial<EditorChanges> => ({ use_routing: !v, group_ids: [...groupIds] }));
+    (v): Partial<EditorChanges> => ({ use_routing: !v, group_ids: [...groupIds] }), undefined, () => groupsLoaded);
   useEffect(() => {
     loadManualGroups(Boolean(post.groups_overridden));
   }, [post.id, post.groups_overridden]);
@@ -242,19 +244,19 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   const { data: albums = [] } = useQuery({ queryKey: ["albums"], queryFn: listAlbums });
   const { data: groups = [] } = useQuery({ queryKey: ["groups"], queryFn: listGroups });
   const { data: profiles = [] } = useQuery({ queryKey: ["profiles"], queryFn: listProfiles });
-  const { data: postAlbums = [] } = useQuery({
+  const { data: postAlbums = [], isSuccess: albumsLoaded } = useQuery({
     queryKey: ["post-albums", post.id],
     queryFn: () => getPostAlbums(post.id),
   });
-  const { data: postGroups = [] } = useQuery({
+  const { data: postGroups = [], isSuccess: groupsLoaded } = useQuery({
     queryKey: ["post-groups", post.id],
     queryFn: () => getPostGroups(post.id),
   });
-  const { data: postProfiles = [] } = useQuery({
+  const { data: postProfiles = [], isSuccess: profilesLoaded } = useQuery({
     queryKey: ["post-profiles", post.id],
     queryFn: () => getPostProfiles(post.id),
   });
-  const { data: postPerformers = [] } = useQuery({
+  const { data: postPerformers = [], isSuccess: performersLoaded } = useQuery({
     queryKey: ["post-performers", post.id],
     queryFn: () => getPostPerformers(post.id),
   });
@@ -265,10 +267,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
   });
   const { data: aiStatus } = useQuery({ queryKey: ["ai-status"], queryFn: fetchAIStatus });
 
-  const [albumIds, setAlbumIds, loadAlbumIds] = useEditorField<Set<string>>(autosave, "albumIds", new Set(), (v) => ({ album_ids: [...v] }));
-  const [groupIds, setGroupIds, loadGroupIds] = useEditorField<Set<string>>(autosave, "groupIds", new Set(), (v): Partial<EditorChanges> => ({ group_ids: [...v], use_routing: !manualGroups }));
-  const [profileIds, setProfileIds, loadProfileIds] = useEditorField<Set<string>>(autosave, "profileIds", new Set(), (v) => ({ profile_ids: [...v] }));
-  const [performers, setPerformers, loadPerformers] = useEditorField<Performer[]>(autosave, "performers", [], (v) => ({ performer_ids: v.map((p) => p.id) }));
+  const [albumIds, setAlbumIds, loadAlbumIds] = useEditorField<Set<string>>(autosave, "albumIds", new Set(), (v) => ({ album_ids: [...v] }), undefined, () => albumsLoaded);
+  const [groupIds, setGroupIds, loadGroupIds] = useEditorField<Set<string>>(autosave, "groupIds", new Set(), (v): Partial<EditorChanges> => ({ group_ids: [...v], use_routing: !manualGroups }), undefined, () => groupsLoaded);
+  const [profileIds, setProfileIds, loadProfileIds] = useEditorField<Set<string>>(autosave, "profileIds", new Set(), (v) => ({ profile_ids: [...v] }), undefined, () => profilesLoaded);
+  const [performers, setPerformers, loadPerformers] = useEditorField<Performer[]>(autosave, "performers", [], (v) => ({ performer_ids: v.map((p) => p.id) }), undefined, () => performersLoaded);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   // Sixteen fields in a 380px rail asked the photographer to re-answer, per photo,
   // questions whose answer is now a default: city, destinations, privacy, groups. What
@@ -374,7 +376,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         } above before scheduling.`
       : "";
 
+  const relationshipsLoaded = albumsLoaded && groupsLoaded && profilesLoaded && performersLoaded;
+
   function handleSave() {
+    if (!relationshipsLoaded) return;
     // If user's selection matches what defaults would produce, send null to mean "use defaults".
     // This way newly-added platforms automatically apply to future posts.
     const targetsToSave =
@@ -440,6 +445,8 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
 
   return (
     <div className="fp-card" style={{ display: "grid", gap: 16 }} onKeyDown={(e) => {
+      if (e.defaultPrevented || lightboxOpen || templateOpen ||
+          (e.target as HTMLElement)?.closest?.('[role="dialog"], [role="alertdialog"], dialog')) return;
       if (autosave && (e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
         onSaveNext?.();
@@ -538,7 +545,10 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
         )}
       </Field>
 
-      <PerformersField selected={performers} onChange={setPerformers} />
+      <fieldset disabled={!performersLoaded} style={{ border: 0, margin: 0, padding: 0 }}>
+        {!performersLoaded && <span>Performers unavailable until loaded.</span>}
+        <PerformersField selected={performers} onChange={setPerformers} />
+      </fieldset>
 
       <AISuggestPanel
         postId={post.id}
@@ -747,66 +757,75 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           onAddTags={addTagsInline}
         />
 
-        <MultiSelectChips
-          label="Tag profiles"
-          options={togglableProfiles.map((p) => ({
-            id: p.id,
-            label: p.name,
-            sublabel: p.tags ? `${p.tags.split(",").length} tags` : "no tags",
-          }))}
-          selected={profileIds}
-          onChange={setProfileIds}
-          emptyMessage="No additional profiles. Add some in Settings → Tag Profiles."
-        />
+        <fieldset disabled={!profilesLoaded} style={{ border: 0, margin: 0, padding: 0 }}>
+          {!profilesLoaded && <span>Tag profiles unavailable until loaded.</span>}
+          <MultiSelectChips
+            label="Tag profiles"
+            options={togglableProfiles.map((p) => ({
+              id: p.id,
+              label: p.name,
+              sublabel: p.tags ? `${p.tags.split(",").length} tags` : "no tags",
+            }))}
+            selected={profileIds}
+            onChange={setProfileIds}
+            emptyMessage="No additional profiles. Add some in Settings → Tag Profiles."
+          />
+        </fieldset>
 
-        <MultiSelectChips
-          label="Albums"
-          options={albums.map((a) => ({ id: a.id, label: a.name, sublabel: `${a.photo_count} photos` }))}
-          selected={albumIds}
-          onChange={setAlbumIds}
-          emptyMessage="Sync albums in Settings → Albums first."
-        />
+        <fieldset disabled={!albumsLoaded} style={{ border: 0, margin: 0, padding: 0 }}>
+          {!albumsLoaded && <span>Albums unavailable until loaded.</span>}
+          <MultiSelectChips
+            label="Albums"
+            options={albums.map((a) => ({ id: a.id, label: a.name, sublabel: `${a.photo_count} photos` }))}
+            selected={albumIds}
+            onChange={setAlbumIds}
+            emptyMessage="Sync albums in Settings → Albums first."
+          />
+        </fieldset>
 
         {/* Not <Field>: that renders a <label>, and a click anywhere inside a label
             activates its first control -- fine for one input, wrong for a group of them.
             (The Title field already needed a preventDefault to dodge the same edge.) */}
-        <div style={{ display: "grid", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
-          <span>Groups</span>
-          {manualGroups ? (
-            <div style={{ display: "grid", gap: 8 }}>
-              <MultiSelectChips
-                label=""
-                options={groups.map((g) => ({ id: g.id, label: g.name, sublabel: g.category ?? undefined }))}
-                selected={groupIds}
-                onChange={setGroupIds}
-                maxSelected={maxGroups}
-                warnThreshold={warnGroups}
-                emptyMessage="Add groups in Settings → Groups."
-              />
+        <fieldset disabled={!groupsLoaded} style={{ border: 0, margin: 0, padding: 0 }}>
+          {!groupsLoaded && <span>Groups unavailable until loaded.</span>}
+          <div style={{ display: "grid", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
+            <span>Groups</span>
+            {manualGroups ? (
+              <div style={{ display: "grid", gap: 8 }}>
+                <MultiSelectChips
+                  label=""
+                  options={groups.map((g) => ({ id: g.id, label: g.name, sublabel: g.category ?? undefined }))}
+                  selected={groupIds}
+                  onChange={setGroupIds}
+                  maxSelected={maxGroups}
+                  warnThreshold={warnGroups}
+                  emptyMessage="Add groups in Settings → Groups."
+                />
+                <RoutedGroups
+                  tags={tags}
+                  overridden
+                  manualCount={groupIds.size}
+                  onOverride={() => setManualGroups(true)}
+                  onUseRouting={() => {
+                    // The saved PUT carries use_routing, which clears groups_overridden
+                    // server-side and drops the pending rows. An empty list alone would not
+                    // do it -- that reads as "no groups", the very case groups_overridden
+                    // exists to tell apart from "untouched".
+                    setGroupIds(new Set());
+                    setManualGroups(false);
+                  }}
+                />
+              </div>
+            ) : (
               <RoutedGroups
                 tags={tags}
-                overridden
+                overridden={false}
                 manualCount={groupIds.size}
                 onOverride={() => setManualGroups(true)}
-                onUseRouting={() => {
-                  // The saved PUT carries use_routing, which clears groups_overridden
-                  // server-side and drops the pending rows. An empty list alone would not
-                  // do it -- that reads as "no groups", the very case groups_overridden
-                  // exists to tell apart from "untouched".
-                  setGroupIds(new Set());
-                  setManualGroups(false);
-                }}
               />
-            </div>
-          ) : (
-            <RoutedGroups
-              tags={tags}
-              overridden={false}
-              manualCount={groupIds.size}
-              onOverride={() => setManualGroups(true)}
-            />
-          )}
-        </div>
+            )}
+          </div>
+        </fieldset>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
           <Field label="Privacy">
@@ -915,7 +934,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           >
             {scheduleLabel ?? "Schedule on Flickr"}
           </button>
-          {!autosave && <button className="fp-btn" disabled={!dirty || saving} onClick={handleSave}>
+          {!autosave && <button className="fp-btn" disabled={!dirty || saving || !relationshipsLoaded} onClick={handleSave}>
             {saving ? "Saving…" : "Save"}
           </button>}
         </div>

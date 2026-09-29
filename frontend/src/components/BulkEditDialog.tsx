@@ -188,6 +188,10 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
             error: e instanceof Error ? e.message : "Update failed",
           });
         }
+        // Earlier endpoints may have succeeded even when this draft failed later.
+        for (const key of ["post", "post-albums", "post-groups", "post-profiles", "post-performers", "merged-tags"]) {
+          void qc.invalidateQueries({ queryKey: [key, postId] });
+        }
         setProgress({ done: done + failed, failed, total });
       }
 

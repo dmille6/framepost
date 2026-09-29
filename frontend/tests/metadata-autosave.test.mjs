@@ -3,14 +3,14 @@ import test from 'node:test';
 import { harness, compile, elements, button, text } from './component-harness.mjs';
 const { DraftAutosave } = compile('../src/lib/draftAutosave.ts');
 
-function setup(autosave) {
+function setup(autosave, queryStates = {}) {
   const queries = {
     venues: [{ id: 'v', display_name: 'Venue' }],
     'post-albums': ['a'], 'post-groups': ['g'], 'post-profiles': ['p'],
     'post-performers': [{ id: 'p1', display_name: 'First' }],
     'connected-platforms': [{ platform: 'instagram', default_target: true }],
   };
-  const page = harness('../src/components/MetadataEditor.tsx', { queries });
+  const page = harness('../src/components/MetadataEditor.tsx', { queries, queryStates });
   const props = { post: { id: 'one', title: 'Original', privacy: 'public', venue_id: 'v',
     groups_overridden: true, preflight: { deliverable: true, blockers: [], warnings: [] } },
     autosave, saving: false, onSave: async () => {}, onSchedule() {} };
@@ -104,4 +104,46 @@ test('Cmd/Ctrl+Enter invokes save-next, and a changed crop carries its authored 
   elements(tree).find(e => e.type === 'IgCropStudio').props.onRectChange({ x: 0.1, y: 0, w: 0.8, h: 1 });
   await save.flush();
   assert.deepEqual(sent, [{ ig_crop_x: 0.1, ig_crop_ratio: '3:4' }]);
+});
+
+
+test('unloaded or errored relationships cannot replace saved lists, including routing overrides', async () => {
+  const sent = [];
+  const save = new DraftAutosave(async patch => sent.push(patch), 10000);
+  const states = Object.fromEntries(['albums', 'groups', 'profiles', 'performers'].map(key =>
+    [`post-${key}`, { data: undefined, isSuccess: false }]));
+  const { page, props } = setup(save, states);
+  button(page.render(props), 'More fields').props.onClick();
+  for (const isError of [false, true]) {
+    for (const state of Object.values(states)) state.isError = isError;
+    const tree = page.render(props);
+    assert.equal(elements(tree).filter(e => e.type === 'fieldset' && e.props.disabled).length, 4);
+    elements(tree).find(e => e.type === 'PerformersField').props.onChange([{ id: 'new' }]);
+    for (const chips of elements(tree).filter(e => e.type === 'MultiSelectChips')) chips.props.onChange(new Set(['new']));
+    for (const routing of elements(tree).filter(e => e.type === 'RoutedGroups')) routing.props.onOverride();
+    await save.flush(); assert.deepEqual(sent, []);
+  }
+  for (const state of Object.values(states)) { delete state.data; state.isSuccess = true; state.isError = false; }
+  const tree = page.render(props);
+  assert.equal(elements(tree).filter(e => e.type === 'fieldset' && e.props.disabled).length, 0);
+  const performers = elements(tree).find(e => e.type === 'PerformersField');
+  assert.equal(performers.props.selected[0].id, 'p1');
+  performers.props.onChange([...performers.props.selected, { id: 'new' }]);
+  await save.flush(); assert.deepEqual(sent, [{ performer_ids: ['p1', 'new'] }]);
+});
+
+test('Cmd/Ctrl+Enter is ignored inside editor dialogs and while a dialog is open', () => {
+  const save = new DraftAutosave(async () => {}, 10000);
+  const { page, props } = setup(save);
+  let next = 0; props.onSaveNext = () => next++;
+  let tree = page.render(props);
+  for (const modifier of ['metaKey', 'ctrlKey']) {
+    tree.props.onKeyDown({ key: 'Enter', [modifier]: true, target: { closest: () => ({}) }, preventDefault() {} });
+  }
+  assert.equal(next, 0);
+  const templateButton = elements(tree).find(e => e.props.label === 'Title').props.hint;
+  templateButton.props.onClick({ preventDefault() {} });
+  tree = page.render(props);
+  tree.props.onKeyDown({ key: 'Enter', metaKey: true, preventDefault() {} });
+  assert.equal(next, 0);
 });
