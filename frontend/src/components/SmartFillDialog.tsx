@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   ApiError,
+  fetchAppConfig,
   fetchPopularHours,
   type SmartFillRequest,
   type SmartFillResponse,
@@ -29,7 +30,13 @@ type Mode = "sequential" | "random_scatter";
 export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Props) {
   const saves = useDraftAutosaves(useQueryClient());
   const [mode, setMode] = useState<Mode>("sequential");
-  const [time, setTime] = useState("10:00");
+  const [time, setTime] = useState("13:00");
+  // Sequential mode starts at the configured default publish time, not a hard-coded hour.
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: fetchAppConfig });
+  const [timeTouched, setTimeTouched] = useState(false);
+  useEffect(() => {
+    if (!timeTouched && cfg?.default_publish_time) setTime(cfg.default_publish_time);
+  }, [cfg?.default_publish_time, timeTouched]);
   const [cadence, setCadence] = useState(1);
   const [startDate, setStartDate] = useState(() => formatLocalDate(tomorrow()));
   const [skipWeekends, setSkipWeekends] = useState(false);
@@ -113,7 +120,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 4 }}>
             {mode === "sequential"
               ? `Distribute ${postIds.length} draft${postIds.length === 1 ? "" : "s"} across the calendar at a chosen cadence. The one-post-per-hour rule applies — clashes auto-bump to the next day.`
-              : `Scatter ${postIds.length} draft${postIds.length === 1 ? "" : "s"} randomly across the next 12 months at ${popular?.learned ? "your best-performing post times" : "popular post times"}. Already-scheduled days are skipped.`}
+              : `Scatter ${postIds.length} draft${postIds.length === 1 ? "" : "s"} randomly across the next 12 months at ${popular?.configured ? "your chosen post times" : popular?.learned ? "your best-performing post times" : "popular post times"}. Already-scheduled days are skipped.`}
           </div>
         </div>
 
@@ -144,7 +151,7 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
             </Field>
             <Field label="Time of day">
               <input className="fp-input" type="time" value={time}
-                     onChange={(e) => setTime(e.target.value)} />
+                     onChange={(e) => { setTimeTouched(true); setTime(e.target.value); }} />
             </Field>
             <Field label="Days between posts">
               <input className="fp-input" type="number" min={1} max={30} value={cadence}
@@ -166,7 +173,12 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
             Each post lands on a random day in the next 365 days — every day fills to one
             post before any day takes a second — at one of these
             local hours: <strong>{hourText}</strong>
-            {popular?.learned ? (
+            {popular?.configured ? (
+              <>
+                {" "}
+                — <span style={{ color: "var(--teal)" }}>set in Settings → General</span>.
+              </>
+            ) : popular?.learned ? (
               <>
                 {" "}
                 — <span style={{ color: "var(--teal)" }}>ranked by Instagram engagement</span>{" "}

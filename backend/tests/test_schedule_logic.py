@@ -194,3 +194,34 @@ def test_a_post_too_young_for_a_seven_day_reading_is_not_counted(db):
     hours, _, n = _learned_popular_hours(db)
     assert n == 35, "a 2-hour-old reading is not a 7-day reading"
     assert 22 not in hours
+
+
+def test_configured_hours_override_learned(db):
+    from routes.schedule import _scatter_hour_pool
+    for h in range(10):
+        _fill(db, 15, _MIN_HOUR_SAMPLES, quality=10, day0=1 + h * 10)
+    db.add(AppConfig(key="best_post_hours", value="13, 14,15,14,99,x"))
+    db.commit()
+    hours, learned, configured, _ = _scatter_hour_pool(db)
+    assert hours == [13, 14, 15]
+    assert configured and not learned
+
+
+def test_empty_configured_hours_falls_back(db):
+    from routes.schedule import _scatter_hour_pool
+    db.add(AppConfig(key="best_post_hours", value=""))
+    db.commit()
+    hours, _learned, configured, _ = _scatter_hour_pool(db)
+    assert not configured
+    assert hours == _learned_popular_hours(db)[0]
+
+
+def test_hour_list_validator():
+    import pytest
+    from routes.config import _v_hour_list
+    assert _v_hour_list("13, 14,15,13") == "13,14,15"
+    assert _v_hour_list("") == ""
+    with pytest.raises(ValueError):
+        _v_hour_list("24")
+    with pytest.raises(ValueError):
+        _v_hour_list("1pm")

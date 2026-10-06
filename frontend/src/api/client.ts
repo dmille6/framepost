@@ -520,6 +520,7 @@ export const postNow = (postId: string) =>
 export type PopularHours = {
   hours: number[];
   learned: boolean;      // false = these are defaults, not measured
+  configured: boolean;   // set by hand in Settings; overrides the learned ranking
   sample_posts: number;  // Instagram posts old enough to have a 7-day reading
   platform: string;
   window: string;

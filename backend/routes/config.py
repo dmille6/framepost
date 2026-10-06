@@ -157,6 +157,22 @@ def _v_csv_int(raw: Any) -> str:
     return ",".join(parts)
 
 
+def _v_hour_list(raw: Any) -> str:
+    """Local clock hours (0-23), comma-separated. Empty clears the override."""
+    parts = [p.strip() for p in str(raw or "").split(",") if p.strip()]
+    hours: list[int] = []
+    for p in parts:
+        try:
+            h = int(p)
+        except ValueError:
+            raise ValueError(f"'{p}' is not an hour")
+        if not 0 <= h <= 23:
+            raise ValueError(f"{h} is not an hour (0-23)")
+        if h not in hours:
+            hours.append(h)
+    return ",".join(str(h) for h in hours)
+
+
 def _v_hashtag_list(raw: Any) -> str:
     """Normalize a space/comma-separated tag list to clean lowercase tokens.
 
@@ -243,6 +259,7 @@ _EDITABLE: dict[str, Any] = {
     "max_groups_default": _v_int(1, 30),
     "warn_groups_threshold": _v_int(1, 30),
     "schedule_fuzz_minutes": _v_int(0, 30),
+    "best_post_hours": _v_hour_list,
     "retry_max_attempts": _v_int(1, 20),
     "retry_backoff_minutes": _v_csv_int,
     "upload_max_mb": _v_int(1, 1000),

@@ -24,6 +24,7 @@ type FormState = {
   max_groups_default: string;
   warn_groups_threshold: string;
   schedule_fuzz_minutes: string;
+  best_post_hours: string;
   instagram_signature: string;
   reel_trial_default: string;
 };
@@ -48,6 +49,7 @@ const FIELDS: (keyof FormState)[] = [
   "max_groups_default",
   "warn_groups_threshold",
   "schedule_fuzz_minutes",
+  "best_post_hours",
   "instagram_signature",
   "reel_trial_default",
 ];
@@ -233,6 +235,20 @@ export default function SettingsGeneral() {
         {errors.schedule_fuzz_minutes && <FieldError msg={errors.schedule_fuzz_minutes} />}
       </ConfigField>
 
+      <ConfigField
+        label="Best posting hours"
+        hint="Local hours (24-hour clock, comma-separated) that Smart Fill's random scatter picks from — e.g. 13,14,15 for 1–4 PM. Leave blank to let it rank hours from Instagram engagement instead."
+      >
+        <input
+          className="fp-input"
+          value={form.best_post_hours}
+          onChange={(e) => set("best_post_hours", e.target.value)}
+          placeholder="13,14,15"
+          style={{ maxWidth: 200 }}
+        />
+        {errors.best_post_hours && <FieldError msg={errors.best_post_hours} />}
+      </ConfigField>
+
       <div style={{ fontSize: 13, color: "var(--text)", marginTop: 8 }}>Instagram</div>
       <ConfigField
         label="Caption signature"
@@ -295,6 +311,7 @@ function toForm(c: AppConfigMap): FormState {
     max_groups_default: c.max_groups_default ?? "12",
     warn_groups_threshold: c.warn_groups_threshold ?? "8",
     schedule_fuzz_minutes: c.schedule_fuzz_minutes ?? "5",
+    best_post_hours: c.best_post_hours ?? "",
     instagram_signature: c.instagram_signature ?? "",
     reel_trial_default: saved(c, "reel_trial_default"),
   };

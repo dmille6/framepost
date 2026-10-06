@@ -475,9 +475,44 @@ def _learned_popular_hours(db: Session) -> tuple[list[int], bool, int]:
     return hours, learned, len(samples)
 
 
+def _configured_hours(db: Session) -> list[int] | None:
+    """Hours set by hand in Settings (app_config.best_post_hours), or None.
+
+    Takes precedence over the learned ranking. The learned ranking scores posts by
+    engagement, which on this account favours early morning; a deliberate measurement
+    of reach at a fixed age (Oct 2026) found the opposite, and the operator should be
+    able to act on that without waiting for the ranking to agree.
+    """
+    row = db.execute(
+        select(AppConfig).where(AppConfig.key == "best_post_hours")
+    ).scalar_one_or_none()
+    if not row or not row.value:
+        return None
+    hours: list[int] = []
+    for part in row.value.split(","):
+        try:
+            h = int(part.strip())
+        except ValueError:
+            continue
+        if 0 <= h <= 23 and h not in hours:
+            hours.append(h)
+    return hours or None
+
+
+def _scatter_hour_pool(db: Session) -> tuple[list[int], bool, bool, int]:
+    """(hours, learned, configured, sample_posts) -- what random_scatter will use."""
+    hours, learned, n = _learned_popular_hours(db)
+    configured = _configured_hours(db)
+    if configured:
+        return configured, False, True, n
+    return hours, learned, False, n
+
+
 class PopularHoursOut(BaseModel):
     hours: list[int]
     learned: bool
+    # Set by hand in Settings -> General; overrides the learned ranking.
+    configured: bool = False
     sample_posts: int
     # What the ranking is actually drawn from, so the caller can say so rather than
     # presenting defaults as though they were measured.
@@ -493,8 +528,8 @@ def popular_hours(
 ):
     """The hour pool random_scatter will actually use — surfaced in the Smart Fill
     dialog so the user sees whether the scheduler is running on learned hours yet."""
-    hours, learned, n = _learned_popular_hours(db)
-    return PopularHoursOut(hours=hours, learned=learned, sample_posts=n)
+    hours, learned, configured, n = _scatter_hour_pool(db)
+    return PopularHoursOut(hours=hours, learned=learned, configured=configured, sample_posts=n)
 
 
 # Scatter density. One post per day is the default shape; when EVERY day in the horizon
@@ -589,8 +624,10 @@ def _random_scatter(db: Session, body: SmartFillRequest, user: User) -> SmartFil
     fuzz = _schedule_fuzz_minutes(db)
     now_local = datetime.now(tz)
     today_local = now_local.date()
-    hour_pool, hours_learned, _n = _learned_popular_hours(db)
-    if hours_learned:
+    hour_pool, hours_learned, _configured, _n = _scatter_hour_pool(db)
+    if _configured:
+        log.info("random_scatter using configured hours: %s", hour_pool)
+    elif hours_learned:
         log.info("random_scatter using engagement-learned hours: %s", hour_pool)
 
     # Posts to schedule, in deterministic order. Eligibility check matches the sequential path.
