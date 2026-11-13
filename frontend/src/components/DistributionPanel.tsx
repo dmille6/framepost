@@ -159,6 +159,12 @@ export default function DistributionPanel({
         <span style={{ color: "var(--text-fade)" }}>
           Not a controlled comparison — the days differ in more than post count.
         </span>
+        {data.boosted_excluded > 0 && (
+          <div style={{ marginTop: 6, color: "var(--text-fade)" }}>
+            {data.boosted_excluded} boosted post{data.boosted_excluded === 1 ? "" : "s"} left
+            out — paid reach is not what the photo or the schedule earned.
+          </div>
+        )}
       </div>
 
       {rates.best.length > 0 && (

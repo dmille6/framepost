@@ -71,6 +71,10 @@ class Post(Base):
     publish_claim_token = Column(String)
     error_message = Column(Text)
     posted_to_instagram_at = Column(DateTime)
+    # (0041) Paid-boosted on Instagram. Set => organic analytics leave this post's
+    # Instagram readings out (see analytics_core.collect_samples). Other platforms'
+    # readings are unaffected; a Meta boost does not touch Bluesky or Flickr.
+    ig_boosted_at = Column(DateTime)
     reddit_posted_at = Column(DateTime)
     target_platforms = Column(Text)  # JSON list, null = use defaults
     # Structured context fields (0014). venue_id is a lightweight entity (like performer);

@@ -85,6 +85,7 @@ class PostOut(BaseModel):
     status: str
     scheduled_at: datetime | None = None
     posted_to_instagram_at: datetime | None = None
+    ig_boosted_at: datetime | None = None
     reddit_posted_at: datetime | None = None
     target_platforms: list[str] | None = None
     # True once a human saved a group selection for this post; after that the
@@ -683,6 +684,7 @@ class InstagramFormat(BaseModel):
     alt_text: str | None
     signature: str | None
     posted_to_instagram_at: datetime | None
+    ig_boosted_at: datetime | None = None
     sizes: list[str]
 
 
@@ -774,6 +776,7 @@ def get_instagram_format(
         alt_text=post.alt_text,
         signature=signature,
         posted_to_instagram_at=post.posted_to_instagram_at,
+        ig_boosted_at=post.ig_boosted_at,
         sizes=list(instagram.SIZES.keys()),
     )
 
@@ -912,6 +915,49 @@ def mark_instagram_posted(
         event_type="instagram_posted" if body.posted else "instagram_unmarked",
         actor="user",
     )
+    db.commit()
+    db.refresh(post)
+    return PostOut.from_post(post)
+
+
+class InstagramBoostBody(BaseModel):
+    boosted: bool
+
+
+@router.patch("/{post_id}/instagram/boost", response_model=PostOut)
+def mark_instagram_boosted(
+    post_id: str,
+    body: InstagramBoostBody,
+    db: Session = Depends(get_session),
+    _user: User = Depends(current_user),
+):
+    """Flag (or unflag) a post as paid-boosted on Instagram.
+
+    A boost is bought for the Instagram media, and a carousel is one media, so the flag
+    is applied to every frame of the carousel. Flagging only the frame the user had open
+    would leave the rest in the organic numbers. Re-flagging a post that is already
+    flagged keeps the original timestamp.
+    """
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "post not found")
+    targets = [post]
+    if post.carousel_id:
+        targets = db.execute(
+            select(Post).where(Post.carousel_id == post.carousel_id)
+        ).scalars().all()
+    now = datetime.now(timezone.utc)
+    for p in targets:
+        if body.boosted == (p.ig_boosted_at is not None):
+            continue
+        p.ig_boosted_at = now if body.boosted else None
+        p.updated_at = now
+        events.log_event(
+            db,
+            post_id=p.id,
+            event_type="instagram_boosted" if body.boosted else "instagram_unboosted",
+            actor="user",
+        )
     db.commit()
     db.refresh(post)
     return PostOut.from_post(post)

@@ -305,6 +305,7 @@ export type InstagramFormat = {
   alt_text: string | null;
   signature: string | null;
   posted_to_instagram_at: string | null;
+  ig_boosted_at: string | null;
   sizes: string[];
 };
 
@@ -390,6 +391,13 @@ export const instagramImageUrl = (
 export const igPostNow = (postId: string) =>
   apiFetch<{ queued: boolean; status: string }>(`/api/posts/${postId}/instagram/post-now`, {
     method: "POST",
+  });
+
+/** Flag a post as paid-boosted on Instagram; the server applies it to the whole carousel. */
+export const markInstagramBoosted = (postId: string, boosted: boolean) =>
+  apiFetch<Post>(`/api/posts/${postId}/instagram/boost`, {
+    method: "PATCH",
+    body: JSON.stringify({ boosted }),
   });
 
 export const markInstagramPosted = (postId: string, posted: boolean) =>
@@ -1629,6 +1637,8 @@ export type Distribution = {
     median_reach_rate_single: number | null;
     median_reach_rate_multi: number | null;
   };
+  /** Posts flagged as paid-boosted, left out of every number above. */
+  boosted_excluded: number;
 };
 
 export const fetchDistribution = (platform = "instagram", window = "7d") =>

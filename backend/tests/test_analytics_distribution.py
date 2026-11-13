@@ -226,4 +226,4 @@ def test_cadence_separates_single_post_days_from_crowded_ones(db):
 def test_distribution_bundles_all_four(db):
     db.commit()
     out = adist.distribution(db)
-    assert set(out) == {"rates", "decay", "conversion", "cadence"}
+    assert set(out) == {"rates", "decay", "conversion", "cadence", "boosted_excluded"}

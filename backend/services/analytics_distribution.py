@@ -237,4 +237,6 @@ def distribution(
         "decay": decay_curve(db, platform=platform),
         "conversion": follow_conversion(db, platform=platform),
         "cadence": cadence(db, platform=platform, window=window),
+        # Said out loud so a median that moved after flagging a post is not a mystery.
+        "boosted_excluded": core.boosted_count(db) if platform == "instagram" else 0,
     }

@@ -7,6 +7,7 @@ import {
   fetchPostPlatforms,
   igPostNow,
   instagramImageUrl,
+  markInstagramBoosted,
   markInstagramPosted,
   type PostPlatformStatus,
 } from "../api/client";
@@ -61,6 +62,19 @@ export default function InstagramPanel({ postId }: Props) {
     mutationFn: () => igPostNow(postId),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["post-platforms", postId] });
+    },
+  });
+
+  const boost = useMutation({
+    mutationFn: (boosted: boolean) => markInstagramBoosted(postId, boosted),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["instagram-format", postId] });
+      void qc.invalidateQueries({ queryKey: ["distribution"] });
+      // Analytics keys are "analytics-platforms", "analytics-leaderboard", ... -- one
+      // flat prefix, not a nested key, so match on the name.
+      void qc.invalidateQueries({
+        predicate: (q) => String(q.queryKey[0]).startsWith("analytics"),
+      });
     },
   });
 
@@ -178,6 +192,28 @@ export default function InstagramPanel({ postId }: Props) {
 
       {/* Engagement: auto-synced counts aren't wired yet, so the manual tracker stays —
           it feeds the Activity feed regardless of how the photo got to IG. */}
+      {(posted || manuallyMarked) && fmt && (
+        <div style={{ display: "grid", gap: 4, fontSize: 12 }}>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={!!fmt.ig_boosted_at}
+              disabled={boost.isPending}
+              onChange={(e) => boost.mutate(e.target.checked)}
+            />
+            <span>
+              Boosted (paid){" "}
+              <span style={{ color: "var(--text-dim)" }}>
+                — left out of reach, timing and performer analytics
+              </span>
+            </span>
+          </label>
+          {boost.isError && (
+            <div style={{ color: "var(--danger)" }}>{(boost.error as Error).message}</div>
+          )}
+        </div>
+      )}
+
       {(posted || manuallyMarked) && <InstagramEngagementTracker postId={postId} />}
     </div>
   );

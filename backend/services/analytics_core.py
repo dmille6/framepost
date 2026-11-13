@@ -118,8 +118,16 @@ def collect_samples(
     *,
     platform: str | None = None,
     window: str | None = None,
+    include_boosted: bool = False,
 ) -> list[Sample]:
     """One Sample per (post, platform).
+
+    Instagram readings of paid-boosted posts (Post.ig_boosted_at) are left out unless
+    include_boosted is set. Every consumer here -- leaderboards, time-of-day, reach
+    rates, the learned posting hours -- is asking what the photograph and the schedule
+    earned on their own; a boosted post answers what the ad budget earned, and a few of
+    them are enough to crown a performer or an hour. Only the Instagram series is
+    dropped: the same post's Bluesky or Flickr readings were never boosted.
 
     window=None uses the latest snapshot (lifetime). A named window picks the snapshot
     closest to posted_at + window, skipping posts that have not yet lived through the
@@ -154,6 +162,8 @@ def collect_samples(
     out: list[Sample] = []
     for (post_id, plat), snaps in by_key.items():
         post = posts[post_id]
+        if plat == "instagram" and post.ig_boosted_at is not None and not include_boosted:
+            continue
         posted = _platform_posted_at(db, post, plat)
         if not posted:
             continue
@@ -225,6 +235,14 @@ def collect_reel_samples(db: Session, *, trial: bool, window: str | None = None)
         if sample is not None:
             out.append(sample)
     return out
+
+
+def boosted_count(db: Session) -> int:
+    """Posts flagged as boosted, so a panel can say what it left out. Carousel frames
+    count individually, matching how collect_samples sees them."""
+    return len(db.execute(
+        select(Post.id).where(Post.ig_boosted_at.is_not(None))
+    ).scalars().all())
 
 
 def _utcnow() -> datetime:
