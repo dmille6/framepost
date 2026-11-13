@@ -45,6 +45,37 @@ def test_falls_back_to_all_when_message_is_opaque():
     assert bad == ["a", "b"]  # can't tell which — drop them all rather than lose the post
 
 
+def _untaggable(handle: str) -> FakeResponse:
+    """Meta's wording, verbatim, from the 2026-11-13 failure."""
+    return FakeResponse(400, {
+        "error": {
+            "message": "Invalid parameter",
+            "code": 100,
+            "error_user_title": "Cannot Tag User on Media",
+            "error_user_msg": f"The user {handle} cannot be tagged on this media.",
+        }
+    })
+
+
+def test_an_untaggable_handle_is_a_collaborator_refusal():
+    bad = ig._bad_collaborator_handles(_untaggable("poppytart333"), ["poppytart333", "other"])
+    assert bad == ["poppytart333"]
+
+
+def test_an_untaggable_handle_is_dropped_and_the_post_still_publishes(monkeypatch):
+    class FakeClient:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, path, data=None):
+            if "poppytart333" in json.loads(data.get("collaborators", "[]")):
+                return _untaggable("poppytart333")
+            return FakeResponse(200, {"id": "container-9"})
+
+    monkeypatch.setattr(ig, "_client", lambda: FakeClient())
+    cid, used, rejected = ig._create_container("ig1", {"image_url": "x"}, ["poppytart333"])
+    assert (cid, used, rejected) == ("container-9", [], ["poppytart333"])
+
+
 def test_unrelated_error_is_not_treated_as_a_collaborator_problem():
     resp = FakeResponse(400, {"error": {"message": "Media download has failed", "code": 9004}})
     assert ig._bad_collaborator_handles(resp, ["someone"]) == []

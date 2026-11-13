@@ -528,8 +528,20 @@ def _bad_collaborator_handles(resp: httpx.Response, candidates: list[str]) -> li
     except Exception:
         return []
     subcode = err.get("error_subcode")
-    blob = f"{err.get('error_user_msg') or ''} {err.get('message') or ''}".lower()
-    looks_like_collab = subcode == _COLLAB_REJECT_SUBCODE or "cannot be accessed" in blob
+    blob = " ".join(
+        err.get(k) or "" for k in ("error_user_title", "error_user_msg", "message")
+    ).lower()
+    # Two refusals, two phrasings. "cannot be accessed" is a private, renamed or deleted
+    # account. "Cannot Tag User on Media: The user X cannot be tagged on this media" is
+    # an account that exists but does not allow being tagged (seen 2026-11-13 for
+    # poppytart333). Missing the second phrasing failed the whole post as bad_content
+    # -- permanent, no retry -- when dropping the one handle would have published it.
+    looks_like_collab = (
+        subcode == _COLLAB_REJECT_SUBCODE
+        or "cannot be accessed" in blob
+        or "cannot be tagged" in blob
+        or "cannot tag user" in blob
+    )
     if not looks_like_collab:
         return []
     # Match whole tokens, not substrings: a handle like "eli" would otherwise be
