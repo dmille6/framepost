@@ -11,6 +11,7 @@ import {
 } from "../api/client";
 
 import { useDraftAutosaves } from "../hooks/useDraftAutosaves";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 function formatHour(h: number): string {
   if (h === 0) return "12 AM";
@@ -102,13 +103,15 @@ export default function SmartFillDialog({ postIds, onCancel, onConfirmed }: Prop
     return () => { current = false; clearTimeout(t); };
   }, [requestKey, saves]);
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(onCancel);
   return (
     <div
       style={{
         position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
         display: "grid", placeItems: "center", zIndex: 100, padding: 24,
       }}
-      onClick={onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card"

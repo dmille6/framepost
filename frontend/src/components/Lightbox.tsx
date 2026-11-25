@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { previewUrl } from "../api/client";
+import { useModalLayer } from "../hooks/useModalDismiss";
 
 type Props = {
   postId: string;
@@ -14,13 +15,9 @@ export default function Lightbox({ postId, caption, meta, onClose }: Props) {
   const [errored, setErrored] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Top dialog only: opened from the scheduled-post view, Escape here used to close
+  // that view as well, along with whatever had been typed into it.
+  useModalLayer(onClose);
 
   // Cache-hit fix: if the image is already complete by the time React attaches
   // refs (e.g. browser served from cache before the onLoad handler bound), the

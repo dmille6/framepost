@@ -15,6 +15,7 @@ import { SkeletonGrid } from "../components/Skeleton";
 import Topbar from "../components/Topbar";
 import { usePageTitle } from "../hooks/usePageTitle";
 import { absoluteTime, relativeTime } from "../lib/time";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const STATUSES = ["posted", "late", "missed", "failed"] as const;
 type StatusKey = typeof STATUSES[number];
@@ -256,11 +257,13 @@ function DetailModal({ post, onClose }: { post: HistoryPost; onClose: () => void
   });
 
   const canRepost = !!post.flickr_photo_id || post.status === "failed" || post.status === "missed";
+  useModalLayer();
+  const backdrop = useBackdropDismiss(onClose);
   return (
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 24 }}
-      onClick={onClose}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade-in"

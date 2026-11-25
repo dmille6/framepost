@@ -15,6 +15,7 @@ import { useQuery } from "@tanstack/react-query";
 import Cropper, { type Area } from "react-easy-crop";
 
 import { fetchCropAnchor, previewUrl, type ReelCrop } from "../api/client";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const ASPECT = 9 / 16;
 const PREVIEW_LONG_EDGE = 1600;
@@ -179,9 +180,13 @@ export default function CropModal({
     onSave(startScaled, endScaled);
   }
 
+  // Registered as a layer so the dialog this one was opened from ignores its keys.
+  const layer = useModalLayer();
+
   // Arrow-key 1px nudges on the active tab.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (!layer.isTop()) return;
       if (e.key === "Escape") {
         onCancel();
         return;
@@ -213,11 +218,12 @@ export default function CropModal({
   const canSave =
     !!startPixel && (mode === "simple" || !!endPixel);
 
+  const backdrop = useBackdropDismiss(onCancel);
   return (
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 24, zIndex: 100 }}
-      onClick={onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade-in"

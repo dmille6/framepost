@@ -14,6 +14,15 @@ export function compile(path, load = require) {
   return module.exports;
 }
 
+// Dialogs register a key listener on mount. Tests that care install their own `window`;
+// for the rest, effects get a bare one for the moment they run. Only for that moment:
+// code that asks `typeof window` during render must keep seeing a non-browser.
+function withWindow(fn) {
+  if (globalThis.window !== undefined) return fn();
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  try { return fn(); } finally { delete globalThis.window; }
+}
+
 // Like draft-queue.test: execute the real component and handlers, stubbing only
 // hooks, network and children. Effects run after render, with dependency cleanup.
 export function harness(path, { api = {}, queries = {}, imports = {}, queryClient = {}, queryStates = {} } = {}) {
@@ -45,7 +54,7 @@ export function harness(path, { api = {}, queries = {}, imports = {}, queryClien
   };
   const empty = [];
   const qc = { invalidateQueries() {}, setQueryData() {}, cancelQueries: async () => {}, isFetching: () => 0, ...queryClient };
-  let autosaves;
+  let autosaves, modalDismiss;
   function load(name) {
     if (name in imports) return imports[name];
     if (name === 'react') return react;
@@ -63,12 +72,14 @@ export function harness(path, { api = {}, queries = {}, imports = {}, queryClien
           } catch (e) { options.onError?.(e); throw e; }
           finally { setBusy(false); }
         };
-        return { isPending: busy, mutateAsync,
+        return { isPending: busy, mutateAsync, error: null, reset() {},
           mutate: variables => pending.push(mutateAsync(variables).catch(() => {})) };
       },
     };
     if (name === '../hooks/useDraftAutosaves') return autosaves ??= compile('../src/hooks/useDraftAutosaves.ts', load);
     if (name === '../lib/draftAutosave') return compile('../src/lib/draftAutosave.ts');
+    if (name === '../hooks/useModalDismiss') return modalDismiss ??= compile('../src/hooks/useModalDismiss.ts', load);
+    if (name === '../lib/scheduleNav') return compile('../src/lib/scheduleNav.ts');
     if (name === '../api/client') return { ApiError: Error, thumbnailUrl: id => id, ...api };
     if (name.startsWith('./')) return { __esModule: true, default: name.slice(2), ...imports[name] };
     return require(name);
@@ -80,13 +91,16 @@ export function harness(path, { api = {}, queries = {}, imports = {}, queryClien
       do {
         changed = false; cursor = 0;
         tree = Component(props);
-        effects.splice(0).forEach(fn => fn());
+        withWindow(() => effects.splice(0).forEach(fn => fn()));
         if (++n > 20) throw new Error('Effect render loop');
       } while (changed);
       return tree;
     },
     async settle() { await Promise.all(pending.splice(0)); await new Promise(setImmediate); },
-    unmount() { state.forEach(s => s?.cleanup?.()); },
+    unmount() { withWindow(() => state.forEach(s => s?.cleanup?.())); },
+    // Close and reopen: effects clean up and every hook starts over, but the module
+    // (and anything it keeps at module level) is the same one.
+    remount() { this.unmount(); state.length = 0; },
   };
 }
 export function elements(node) {
@@ -100,4 +114,10 @@ export function text(node) {
 }
 export function button(tree, label) {
   return elements(tree).find(e => e.type === 'button' && text(e).includes(label));
+}
+// A real click on a dialog's backdrop: pressed and released on the backdrop itself.
+export function clickBackdrop(backdrop) {
+  const event = { target: backdrop, currentTarget: backdrop };
+  backdrop.props.onMouseDown(event);
+  backdrop.props.onClick(event);
 }

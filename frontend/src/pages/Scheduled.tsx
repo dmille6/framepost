@@ -17,6 +17,7 @@ import ScheduleDialog from "../components/ScheduleDialog";
 import ScheduledItemModal from "../components/ScheduledItemModal";
 import Topbar from "../components/Topbar";
 import { usePageTitle } from "../hooks/usePageTitle";
+import { navOrder, neighbours } from "../lib/scheduleNav";
 
 import { useDraftAutosaves } from "../hooks/useDraftAutosaves";
 
@@ -67,6 +68,43 @@ export default function Scheduled() {
     queryFn: () => listScheduled(range.from, range.to),
     refetchInterval: 60_000,
   });
+
+  // Previous/next inside the post view walks the whole calendar, not just the month on
+  // screen: the queue runs about one post a day for a year, so the entry after the last
+  // one visible is usually in the next month, and sometimes several months on. Fetched
+  // only once a post is open. List and Shoots already hold the whole remaining queue.
+  const navRange = useMemo(() => {
+    const day = new Date();
+    day.setHours(0, 0, 0, 0);
+    const from = new Date(day);
+    from.setDate(from.getDate() - 400);
+    const to = new Date(day);
+    to.setDate(to.getDate() + 400);
+    return { from: from.toISOString(), to: to.toISOString() };
+  }, []);
+  const { data: wholeCalendar } = useQuery({
+    queryKey: ["schedule", navRange.from, navRange.to],
+    queryFn: () => listScheduled(navRange.from, navRange.to),
+    enabled: view === "calendar" && !!selected,
+    refetchInterval: 60_000,
+  });
+  const ordered = useMemo(
+    () => navOrder(view === "calendar" && wholeCalendar ? wholeCalendar : items),
+    [view, wholeCalendar, items],
+  );
+  const nav = selected ? neighbours(ordered, selected.id) : null;
+  // The fresh copy from the list, so the header follows a save; the clicked snapshot
+  // only until the list has it.
+  const current = selected && nav && nav.index >= 0 ? ordered[nav.index] : selected;
+
+  function stepTo(it: ScheduledItem) {
+    setSelected(it);
+    // Keep the calendar behind the post view on the month being looked at.
+    if (view === "calendar" && it.scheduled_at) {
+      const m = firstOfMonth(new Date(it.scheduled_at + "Z"));
+      if (m.getTime() !== month.getTime()) setMonth(m);
+    }
+  }
 
   // Default-publish-time is set by the user in Settings → General, stored as "HH:MM" local.
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: fetchAppConfig });
@@ -152,15 +190,18 @@ export default function Scheduled() {
         )}
       </div>
 
-      {selected && !rescheduling && (
+      {selected && current && !rescheduling && (
         <ScheduledItemModal
-          item={selected}
+          item={current}
           busy={unscheduleMutation.isPending}
           onClose={() => setSelected(null)}
           onReschedule={() => setRescheduling(true)}
           onUnschedule={async () => {
             await unscheduleMutation.mutateAsync(selected.id);
           }}
+          onPrev={nav?.prev ? () => stepTo(nav.prev!) : undefined}
+          onNext={nav?.next ? () => stepTo(nav.next!) : undefined}
+          position={nav && nav.index >= 0 ? { index: nav.index, total: nav.total } : undefined}
         />
       )}
 

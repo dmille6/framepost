@@ -8,6 +8,7 @@ import {
   thumbnailUrl,
   type Post,
 } from "../api/client";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 /**
  * Arrange a set of photos into one Instagram post, or re-arrange one that already
@@ -132,13 +133,15 @@ export default function CarouselDialog({
   const blocked = errors.length > 0 || checking;
   const verb = existingId ? "Reorder carousel" : "Group as carousel";
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(onCancel);
   return (
     <div
       style={{
         position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
         display: "grid", placeItems: "center", zIndex: 50, padding: 20,
       }}
-      onClick={onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card"

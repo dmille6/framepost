@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -26,6 +26,7 @@ import { formatPerformerForTemplate, formatTemplateDate } from "./MetadataEditor
 import MultiSelectChips from "./MultiSelectChips";
 import PerformersField from "./PerformersField";
 import VenueField from "./VenueField";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 type Props = {
   postIds: string[];
@@ -242,13 +243,11 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
     },
   });
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !apply.isPending) onCancel();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel, apply.isPending]);
+  // Escape only while this is the top dialog: with the template dialog open over it,
+  // one Escape used to close both.
+  useModalLayer(() => {
+    if (!apply.isPending) onCancel();
+  });
 
 
   const willChangeAnything =
@@ -269,11 +268,12 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
 
   const busy = apply.isPending;
 
+  const backdrop = useBackdropDismiss(busy ? undefined : onCancel);
   return (
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 24 }}
-      onClick={busy ? undefined : onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade"
@@ -735,6 +735,7 @@ export default function BulkEditDialog({ postIds, onCancel, onApplied }: Props) 
             city: bulkCity || samplePost?.city || null,
             date: formatTemplateDate(samplePost?.captured_at),
           }}
+          draftKey={`bulk:${[...postIds].sort().join(",")}`}
           onCancel={() => setTemplateOpen(false)}
           onApply={({ title: t, description: d }) => {
             // Fills the bulk fields; the user still reviews before Apply-to-N.

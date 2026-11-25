@@ -2,12 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { listTitleTemplates } from "../api/client";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 type Props = {
   initialTitle?: string | null;
   initialDescription?: string | null;
   /** What the post/batch already knows — prefills fields (see contextValueFor). */
   context?: TemplateContext;
+  /** Identifies what is being titled (a post id, or one bulk selection). Whatever is
+   *  typed here is remembered under this key until it is applied, so closing the dialog
+   *  — on purpose or not — and reopening it returns to the same half-filled form. */
+  draftKey?: string;
   onCancel: () => void;
   onApply: (next: { title: string; description: string | null }) => void;
 };
@@ -23,6 +28,17 @@ function loadStored(): StoredValues {
   } catch {
     return {};
   }
+}
+
+// Typed-but-not-applied values, per draftKey. In memory only: this protects one sitting
+// from a stray close, it is not a second copy of the "last used" values above. Before
+// it existed, closing the dialog threw away every field, and Apply was the only save.
+type Unapplied = { templateId: string | null; values: Record<string, Record<string, string>> };
+const unapplied = new Map<string, Unapplied>();
+
+/** Test hook: forget every unapplied value. */
+export function clearUnappliedTemplateValues() {
+  unapplied.clear();
 }
 
 function saveStored(s: StoredValues) {
@@ -93,6 +109,7 @@ export default function ApplyTemplateDialog({
   initialTitle,
   initialDescription,
   context,
+  draftKey,
   onCancel,
   onApply,
 }: Props) {
@@ -101,7 +118,8 @@ export default function ApplyTemplateDialog({
     queryFn: listTitleTemplates,
   });
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const remembered = draftKey ? unapplied.get(draftKey) : undefined;
+  const [selectedId, setSelectedId] = useState<string | null>(remembered?.templateId ?? null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [includeDescription, setIncludeDescription] = useState(true);
 
@@ -110,12 +128,23 @@ export default function ApplyTemplateDialog({
     [templates, selectedId],
   );
 
-  // Auto-pick the first template when the list loads.
+  // Auto-pick the first template when the list loads — or when the one remembered from
+  // last time has since been deleted.
   useEffect(() => {
-    if (!selectedId && templates.length > 0) {
+    if (templates.length > 0 && !templates.some((t) => t.id === selectedId)) {
       setSelectedId(templates[0].id);
     }
   }, [templates, selectedId]);
+
+  function remember(templateId: string | null, typed?: { key: string; value: string }) {
+    if (!draftKey) return;
+    const entry = unapplied.get(draftKey) ?? { templateId, values: {} };
+    entry.templateId = templateId;
+    if (typed && templateId) {
+      entry.values[templateId] = { ...entry.values[templateId], [typed.key]: typed.value };
+    }
+    unapplied.set(draftKey, entry);
+  }
 
   // When the selected template changes, prefill values from localStorage (if we've used this
   // template before) so repeat-shoot photos are nearly one-click.
@@ -125,23 +154,22 @@ export default function ApplyTemplateDialog({
       return;
     }
     const stored = loadStored()[selected.id] ?? {};
+    const typed = (draftKey ? unapplied.get(draftKey)?.values[selected.id] : undefined) ?? {};
     const initial: Record<string, string> = {};
     for (const f of selected.fields) {
-      // Precedence: what this post actually is > what we typed last time > blank.
-      // Without the first, a repeat-shoot memory silently credits the wrong performer.
-      initial[f.key] = contextValueFor(f.key, context) || stored[f.key] || "";
+      // Precedence: what was typed here and not yet applied (even if cleared to blank)
+      // > what this post actually is > what we typed last time > blank. Without the
+      // second, a repeat-shoot memory silently credits the wrong performer.
+      initial[f.key] =
+        f.key in typed ? typed[f.key] : contextValueFor(f.key, context) || stored[f.key] || "";
     }
     setValues(initial);
   }, [selected?.id, selected?.fields.length, JSON.stringify(context ?? {})]);
 
-  // Esc closes
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  // Esc closes this dialog, and only this one: it used to close the post editor it was
+  // opened from in the same keystroke.
+  useModalLayer(onCancel);
+  const backdrop = useBackdropDismiss(onCancel);
 
   const titlePreview = selected ? renderTemplate(selected.title_template, values) : "";
   const descPreview =
@@ -162,6 +190,7 @@ export default function ApplyTemplateDialog({
     const stored = loadStored();
     stored[selected.id] = { ...values };
     saveStored(stored);
+    if (draftKey) unapplied.delete(draftKey);
 
     onApply({
       title: titlePreview,
@@ -173,7 +202,7 @@ export default function ApplyTemplateDialog({
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 24 }}
-      onClick={onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade"
@@ -252,7 +281,10 @@ export default function ApplyTemplateDialog({
                     return (
                       <button
                         key={t.id}
-                        onClick={() => setSelectedId(t.id)}
+                        onClick={() => {
+                          setSelectedId(t.id);
+                          remember(t.id);
+                        }}
                         style={{
                           background: active ? "var(--teal-tint)" : "transparent",
                           color: active ? "var(--text)" : "var(--text-dim)",
@@ -281,9 +313,11 @@ export default function ApplyTemplateDialog({
                     className="fp-input"
                     value={values[f.key] ?? ""}
                     placeholder={f.placeholder ?? ""}
-                    onChange={(e) =>
-                      setValues((v) => ({ ...v, [f.key]: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setValues((v) => ({ ...v, [f.key]: value }));
+                      remember(selected.id, { key: f.key, value });
+                    }}
                   />
                 </label>
               ))}

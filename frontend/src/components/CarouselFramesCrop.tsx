@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { fetchCarouselPosts } from "../api/client";
+import { useBackdropDismiss } from "../hooks/useModalDismiss";
 import IgCropStudioFilmstrip from "./IgCropFilmstrip";
 
 /**
@@ -24,6 +25,7 @@ export default function CarouselFramesCrop({
     queryFn: () => fetchCarouselPosts(carouselId),
   });
 
+  const backdrop = useBackdropDismiss(onClose);
   if (isLoading || isError || !posts?.length) {
     return (
       <div
@@ -33,7 +35,7 @@ export default function CarouselFramesCrop({
           position: "fixed", inset: 0, zIndex: 60, display: "grid", placeItems: "center",
           background: "rgba(0,0,0,0.55)",
         }}
-        onClick={onClose}
+        {...backdrop}
       >
         <div
           onClick={(e) => e.stopPropagation()}

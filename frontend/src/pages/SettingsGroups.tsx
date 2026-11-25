@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
+
 import {
   createGroup,
   deleteGroup,
@@ -237,8 +239,10 @@ function GroupForm({
     onSubmit(form);
   }
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(onCancel);
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", zIndex: 100 }} onClick={onCancel}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", zIndex: 100 }} {...backdrop}>
       <form className="fp-card" style={{ width: 520, display: "grid", gap: 12 }} onClick={(e) => e.stopPropagation()} onSubmit={submit}>
         <div style={{ fontSize: 16, fontWeight: 500 }}>{isEdit ? "Edit group" : "Add group"}</div>
 

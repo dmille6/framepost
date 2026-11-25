@@ -11,6 +11,7 @@ import {
 import IgCropStudio, { type CropRect, type FocalPoint, type IgFit } from "./IgCropStudio";
 
 import { useDraftAutosaves } from "../hooks/useDraftAutosaves";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const MAX_ASPECT = 1.91;
 const RATIOS: Record<string, number> = { "3:4": 3 / 4, "4:5": 4 / 5 };
@@ -72,11 +73,14 @@ export default function IgCropFilmstrip({
 
   const current = posts[idx];
 
+  // Registered as a layer so the dialog this one was opened from ignores its keys.
+  const layer = useModalLayer();
+
   // Arrow keys step the strip — this is a review flow, not a form.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Focused controls own their arrow keys, including custom sliders and editors.
-      if (e.defaultPrevented) return;
+      if (e.defaultPrevented || !layer.isTop()) return;
       const t = e.target as HTMLElement | null;
       if (t?.isContentEditable || t?.closest(
         "input:not([type=button]):not([type=submit]):not([type=reset]):not([type=checkbox]):not([type=radio]), textarea, select, [role=slider], [role=spinbutton], [role=listbox], [role=radiogroup], [role=tablist], [role=menu], [role=grid], [role=tree], [role=combobox], [contenteditable]:not([contenteditable='false'])",
@@ -140,11 +144,12 @@ export default function IgCropFilmstrip({
 
   const cropped = posts.filter((p) => edits[p.id]?.rect).length;
 
+  const backdrop = useBackdropDismiss(dismiss);
   return (
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 20 }}
-      onClick={dismiss}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade"

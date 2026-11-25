@@ -7,6 +7,7 @@ import {
   findReplaceApply,
   findReplacePreview,
 } from "../api/client";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const FIELDS = [
   { key: "description", label: "Description" },
@@ -83,11 +84,13 @@ export default function FindReplaceDialog({ onClose }: { onClose: () => void }) 
     [preview, selectedCount],
   );
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(busy ? undefined : onClose);
   return (
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 24 }}
-      onClick={busy ? undefined : onClose}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade"

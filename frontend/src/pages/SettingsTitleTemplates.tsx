@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -13,6 +13,7 @@ import {
 } from "../api/client";
 import { CardHeader } from "../components/PageHeader";
 import { SkeletonRows } from "../components/Skeleton";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const PLACEHOLDER_RE = /\{([a-z][a-z0-9_]*)\}/g;
 
@@ -182,13 +183,7 @@ function TemplateEditorModal({
 }) {
   const [form, setForm] = useState<TitleTemplateInput>(initial);
 
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onCancel();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+  useModalLayer(onCancel);
 
   // Auto-generate fields list from {placeholders} found in title + description templates.
   // Preserves any labels/placeholders the user already filled in for matching keys.
@@ -214,11 +209,12 @@ function TemplateEditorModal({
     setForm((f) => ({ ...f, fields: next }));
   }
 
+  const backdrop = useBackdropDismiss(saving ? undefined : onCancel);
   return (
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 24 }}
-      onClick={saving ? undefined : onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade"

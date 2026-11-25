@@ -111,6 +111,12 @@ type Props = {
   autosave?: EditorAutosave;
   onDiscardEdits?: () => void;
   onSaveNext?: () => void;
+  /** Explicit-save callers only: told whenever "has unsaved edits" flips, so the
+   *  surrounding view can refuse to drop them. */
+  onDirtyChange?: (dirty: boolean) => void;
+  /** Explicit-save callers only: filled with a function that saves the current edits
+   *  and resolves true on success, so the view can save on the editor's behalf. */
+  saveRef?: { current: (() => Promise<boolean>) | null };
 };
 
 // Fallbacks only. The live values come from Settings -> General
@@ -169,7 +175,7 @@ function useEditorField<T>(
 const subscribeIdle = () => () => {};
 const idleSnapshot = () => 0;
 
-export default function MetadataEditor({ post, onSave, onSchedule, onDelete, scheduleLabel, saving, autosave, onSaveNext, onDiscardEdits }: Props) {
+export default function MetadataEditor({ post, onSave, onSchedule, onDelete, scheduleLabel, saving, autosave, onSaveNext, onDiscardEdits, onDirtyChange, saveRef }: Props) {
   useSyncExternalStore(autosave?.subscribe ?? subscribeIdle, autosave?.snapshot ?? idleSnapshot);
   const [title, setTitle, loadTitle] = useEditorField(autosave, "title", post.title ?? "", (v) => ({ title: v.trim() || null }));
   const [description, setDescription, loadDescription] = useEditorField(autosave, "description", post.description ?? "", (v) => ({ description: v.trim() || null }));
@@ -396,13 +402,14 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
 
   const relationshipsLoaded = albumsLoaded && groupsLoaded && profilesLoaded && performersLoaded;
 
-  function handleSave() {
-    if (!relationshipsLoaded) return;
+  async function handleSave(): Promise<boolean> {
+    if (!relationshipsLoaded) return false;
     // If user's selection matches what defaults would produce, send null to mean "use defaults".
     // This way newly-added platforms automatically apply to future posts.
     const targetsToSave =
       setsEqual(targetSet, defaultTargetSet) ? null : [...targetSet];
-    void onSave({
+    try {
+      await onSave({
       title: title.trim() || null,
       description: description.trim() || null,
       tags: tags.trim() || null,
@@ -431,8 +438,26 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
       // Both or neither — focal_for() ignores a half-written point.
       ig_focal_x: igFocal?.x ?? null,
       ig_focal_y: igFocal?.y ?? null,
-    });
+      });
+      return true;
+    } catch {
+      // The caller owns the error message; a rejected save must not become an
+      // unhandled rejection, which is what `void onSave(...)` used to leave behind.
+      return false;
+    }
   }
+
+  // Refreshed after every render so the surrounding view always saves the current edits.
+  useEffect(() => {
+    if (saveRef && !autosave) saveRef.current = handleSave;
+  });
+  useEffect(() => {
+    if (!autosave) onDirtyChange?.(manualDirty);
+  }, [manualDirty]);
+  useEffect(() => () => {
+    if (saveRef) saveRef.current = null;
+    onDirtyChange?.(false);
+  }, []);
 
   const captured = post.captured_at ? new Date(post.captured_at).toLocaleString() : "—";
   // IG feed range is 4:5 … 1.91:1 (the worker probes whether Meta quietly allows 3:4).
@@ -952,7 +977,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
           >
             {scheduleLabel ?? "Schedule on Flickr"}
           </button>
-          {!autosave && <button className="fp-btn" disabled={!dirty || saving || !relationshipsLoaded} onClick={handleSave}>
+          {!autosave && <button className="fp-btn" disabled={!dirty || saving || !relationshipsLoaded} onClick={() => void handleSave()}>
             {saving ? "Saving…" : "Save"}
           </button>}
         </div>
@@ -988,6 +1013,7 @@ export default function MetadataEditor({ post, onSave, onSchedule, onDelete, sch
             city: city || null,
             date: formatTemplateDate(post.captured_at),
           }}
+          draftKey={post.id}
           onCancel={() => setTemplateOpen(false)}
           onApply={({ title: t, description: d }) => {
             setTitle(t);

@@ -13,6 +13,7 @@ import {
   updateProfile,
 } from "../api/client";
 import { SkeletonRows } from "../components/Skeleton";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const EMPTY: TagProfileInput = { name: "", tags: "", sort_order: 10 };
 
@@ -238,6 +239,8 @@ function ProfileForm({
     onSubmit(form);
   }
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(onCancel);
   return (
     <div
       style={{
@@ -248,7 +251,7 @@ function ProfileForm({
         placeItems: "center",
         zIndex: 100,
       }}
-      onClick={onCancel}
+      {...backdrop}
     >
       <form
         className="fp-card"

@@ -41,6 +41,7 @@ import {
   type TrialGraduation,
 } from "../api/client";
 import { ReelTrialField, TrialBadge } from "./ReelTrialField";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const ASPECT = 9 / 16;
 const MAX_FRAMES = 10;
@@ -142,13 +143,15 @@ export default function ReelFromDraftsDialog({
   const ready = reel?.status === "ready";
   const failed = reel?.status === "failed";
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(onCancel);
   return (
     <div
       style={{
         position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
         display: "grid", placeItems: "center", zIndex: 60, padding: 20,
       }}
-      onClick={onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card"

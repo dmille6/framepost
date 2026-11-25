@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { QueryClient } from '@tanstack/react-query';
-import { harness, compile, elements } from './component-harness.mjs';
+import { harness, compile, elements, clickBackdrop } from './component-harness.mjs';
 const { DraftAutosave } = compile('../src/lib/draftAutosave.ts');
 
 for (const entry of ['calendar sidebar drop', 'calendar reschedule']) {
@@ -63,14 +63,14 @@ test('pending schedule blocks Cancel and backdrop until success or failure settl
     tree = page.render(props);
     assert.equal(button(tree, 'Cancel').props.disabled, true);
     button(tree, 'Cancel').props.onClick?.();
-    tree.props.onClick?.();
+    clickBackdrop(tree);
     assert.equal(cancelled, 0);
     assert.ok(elements(tree).filter(e => e.type === 'input').every(e => e.props.disabled));
     if (fail) reject(new Error('Schedule failed')); else resolve();
     await submitting;
     tree = page.render(props);
     assert.equal(button(tree, 'Cancel').props.disabled, false);
-    tree.props.onClick();
+    clickBackdrop(tree);
     assert.equal(cancelled, 1);
   }
 });

@@ -31,6 +31,7 @@ import { CardHeader } from "./PageHeader";
 import CopyableBox from "./CopyableBox";
 import CropModal from "./CropModal";
 import { SkeletonRows } from "./Skeleton";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 const MAX_PHOTOS = 10;
 const DEFAULT_DURATION = 60;
@@ -734,11 +735,13 @@ function PhotoPicker({
     onConfirm(pickedPosts);
   }
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(onClose);
   return (
     <div
       className="fp-backdrop"
       style={{ display: "grid", placeItems: "center", padding: 24, zIndex: 90 }}
-      onClick={onClose}
+      {...backdrop}
     >
       <div
         className="fp-card fp-fade-in"

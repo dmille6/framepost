@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ApiError } from "../api/client";
+import { useBackdropDismiss, useModalLayer } from "../hooks/useModalDismiss";
 
 type Props = {
   postTitle: string;
@@ -54,13 +55,15 @@ export default function ScheduleDialog({ postTitle, initial, onCancel, onSubmit 
     }
   }
 
+  useModalLayer();
+  const backdrop = useBackdropDismiss(submitting ? undefined : onCancel);
   return (
     <div
       style={{
         position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
         display: "grid", placeItems: "center", zIndex: 100,
       }}
-      onClick={submitting ? undefined : onCancel}
+      {...backdrop}
     >
       <div
         className="fp-card"
